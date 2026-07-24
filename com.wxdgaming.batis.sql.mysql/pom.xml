@@ -17,6 +17,13 @@
             <artifactId>com.wxdgaming.batis.sql</artifactId>
             <version>1.0.1</version>
         </dependency>
+
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <version>9.5.0</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
 </project>
