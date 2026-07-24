@@ -20,7 +20,7 @@ public class MysqlTableCreateHandler implements TableCreateHandler {
     @Override
     public void doAction(TableInfo tableInfo) {
         StringBuilder sb = new StringBuilder(512);
-        sb.append("CREATE TABLE IF NOT EXISTS `").append(tableInfo.getTableName()).append("` (\n");
+        sb.append("CREATE TABLE IF NOT EXISTS `").append(tableInfo.getTableName().toLowerCase()).append("` (\n");
 
         List<String> columnDefs = new ArrayList<>();
 
@@ -33,7 +33,7 @@ public class MysqlTableCreateHandler implements TableCreateHandler {
         List<String> pkColumns = new ArrayList<>();
         for (ColumnInfo col : tableInfo.getColumns().values()) {
             if (col.isPrimaryKey()) {
-                pkColumns.add(col.getColumnName());
+                pkColumns.add(col.getColumnName().toLowerCase());
             }
         }
         if (!pkColumns.isEmpty()) {
@@ -46,9 +46,9 @@ public class MysqlTableCreateHandler implements TableCreateHandler {
                 String indexType = index.isUnique() ? "UNIQUE INDEX" : "INDEX";
                 List<String> quotedCols = new ArrayList<>();
                 for (String colName : index.getColumns()) {
-                    quotedCols.add("`" + colName + "`");
+                    quotedCols.add("`" + colName.toLowerCase() + "`");
                 }
-                columnDefs.add("  " + indexType + " `" + index.getName() + "` (" + String.join(", ", quotedCols) + ")");
+                columnDefs.add("  " + indexType + " `" + index.getName().toLowerCase() + "` (" + String.join(", ", quotedCols) + ")");
             }
         }
 
@@ -66,7 +66,7 @@ public class MysqlTableCreateHandler implements TableCreateHandler {
     /** 构建单列定义 */
     private String buildColumnDef(ColumnInfo col) {
         StringBuilder sb = new StringBuilder(64);
-        sb.append("  `").append(col.getColumnName()).append("` ").append(col.getType());
+        sb.append("  `").append(col.getColumnName().toLowerCase()).append("` ").append(col.getType());
 
         if (!col.isNullable()) {
             sb.append(" NOT NULL");

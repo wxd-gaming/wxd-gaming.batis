@@ -1,13 +1,17 @@
 package com.wxdgaming.batis.sql;
 
+import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
 import com.wxdgaming.batis.model.ColumnInfo;
+import com.wxdgaming.batis.model.StorageMode;
 import com.wxdgaming.batis.model.TableInfo;
 import com.wxdgaming.batis.parser.EntityParser;
+import com.wxdgaming.batis.util.ProtostuffUtil;
 import lombok.AccessLevel;
 import lombok.NoArgsConstructor;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Type;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
@@ -127,15 +131,56 @@ public class Handlers {
                     continue;
                 }
                 Field field = getDeclaredField(entityClass, fieldName);
-                if (field != null) {
-                    field.setAccessible(true);
-                    field.set(instance, value);
+                if (field == null) {
+                    continue;
                 }
+                field.setAccessible(true);
+                Object converted = convertValue(value, field, colInfo);
+                field.set(instance, converted);
             }
             return instance;
         } catch (ReflectiveOperationException e) {
             throw new SQLException("Failed to map ResultSet to " + entityClass.getSimpleName(), e);
         }
+    }
+
+    /** 根据存储模式将数据库值转换为 Java 字段类型 */
+    private static Object convertValue(Object value, Field field, ColumnInfo colInfo) throws SQLException {
+        StorageMode storageMode = colInfo.getStorageMode();
+        if (storageMode == StorageMode.JSON) {
+            // JSON 反序列化：数据库返回 String（或原生 JSON 类型），解析为目标类型
+            String jsonStr = value.toString();
+            Type genericType = field.getGenericType();
+            try {
+                return JSON.parseObject(jsonStr, genericType);
+            } catch (Exception e) {
+                throw new SQLException("Failed to parse JSON for field '" + field.getName()
+                        + "', value=" + jsonStr, e);
+            }
+        }
+        if (storageMode == StorageMode.BLOB
+                || storageMode == StorageMode.MEDIUMBLOB
+                || storageMode == StorageMode.LONGBLOB) {
+            // 二进制反序列化：数据库返回 byte[]，使用 ProtostuffUtil 解码
+            byte[] bytes;
+            if (value instanceof byte[]) {
+                bytes = (byte[]) value;
+            } else if (value instanceof java.sql.Blob) {
+                java.sql.Blob blob = (java.sql.Blob) value;
+                bytes = blob.getBytes(1, (int) blob.length());
+            } else {
+                throw new SQLException("Unsupported binary type for field '" + field.getName()
+                        + "': " + value.getClass());
+            }
+            try {
+                return ProtostuffUtil.decode(bytes, field.getType());
+            } catch (Exception e) {
+                throw new SQLException("Failed to decode Protostuff for field '" + field.getName()
+                        + "', bytes length=" + bytes.length, e);
+            }
+        }
+        // AUTO 模式：直接返回原值
+        return value;
     }
 
     /** 从类及其继承链上查找字段 */

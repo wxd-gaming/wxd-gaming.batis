@@ -29,6 +29,8 @@ public class ColumnInfo {
     private boolean primaryKey;
     /** 主键生成策略 */
     private GenerationType generationType = GenerationType.NONE;
+    /** 存储模式 */
+    private StorageMode storageMode = StorageMode.AUTO;
     /** 对应的 Java 字段名 */
     private String fieldName;
     /** 对应的 Java 类型 */
@@ -104,6 +106,13 @@ public class ColumnInfo {
         return this;
     }
 
+    public StorageMode getStorageMode() { return storageMode; }
+
+    public ColumnInfo setStorageMode(StorageMode storageMode) {
+        this.storageMode = storageMode;
+        return this;
+    }
+
     public String getFieldName() { return fieldName; }
 
     public ColumnInfo setFieldName(String fieldName) {
@@ -127,6 +136,7 @@ public class ColumnInfo {
                 ", comment='" + comment + '\'' +
                 ", primaryKey=" + primaryKey +
                 ", unique=" + unique +
+                ", storageMode=" + storageMode +
                 '}';
     }
 }

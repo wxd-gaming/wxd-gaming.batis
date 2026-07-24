@@ -1,5 +1,7 @@
 package com.wxdgaming.batis.annotation;
 
+import com.wxdgaming.batis.model.StorageMode;
+
 import java.lang.annotation.Documented;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
@@ -44,4 +46,16 @@ public @interface Column {
 
     /** 是否唯一约束，默认 false */
     boolean unique() default false;
+
+    /**
+     * 存储模式
+     * <p>
+     * <ul>
+     *   <li>{@link StorageMode#AUTO} - 自动推断（默认）：基础类型直接映射，复杂类型（List/Map/Set/自定义POJO）自动升级为 JSON</li>
+     *   <li>{@link StorageMode#JSON} - 强制以 JSON 字符串存储，列类型推断为 LONGTEXT</li>
+     *   <li>{@link StorageMode#BLOB} / {@link StorageMode#MEDIUMBLOB} / {@link StorageMode#LONGBLOB} -
+     *       强制以二进制存储，使用 ProtostuffUtil 序列化/反序列化，列类型自动映射为对应数据库 BLOB 类型</li>
+     * </ul>
+     */
+    StorageMode storageMode() default StorageMode.AUTO;
 }

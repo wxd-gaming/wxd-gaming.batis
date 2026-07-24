@@ -8,6 +8,7 @@ import com.wxdgaming.batis.annotation.Index;
 import com.wxdgaming.batis.annotation.Table;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.IndexInfo;
+import com.wxdgaming.batis.model.StorageMode;
 import com.wxdgaming.batis.model.TableInfo;
 
 import java.lang.reflect.Field;
@@ -17,11 +18,13 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
@@ -137,14 +140,21 @@ public class EntityParser {
             columnInfo.setUnique(columnAnn.unique());
             columnInfo.setDefaultValue(columnAnn.defaultValue());
 
+            // 1. 确定存储模式
+            StorageMode storageMode = resolveStorageMode(columnAnn.storageMode(), field.getType());
+            columnInfo.setStorageMode(storageMode);
+
+            // 2. 推断 DB 列类型
             if (!columnAnn.type().isEmpty()) {
                 columnInfo.setType(columnAnn.type());
             } else {
-                columnInfo.setType(inferType(field.getType(), columnAnn.length()));
+                columnInfo.setType(inferType(field.getType(), columnAnn.length(), storageMode));
             }
         } else {
             columnInfo.setColumnName(camelToUnderscore(field.getName()));
-            columnInfo.setType(inferType(field.getType(), 255));
+            StorageMode storageMode = resolveStorageMode(StorageMode.AUTO, field.getType());
+            columnInfo.setStorageMode(storageMode);
+            columnInfo.setType(inferType(field.getType(), 255, storageMode));
             columnInfo.setLength(255);
             columnInfo.setNullable(true);
         }
@@ -160,6 +170,56 @@ public class EntityParser {
         }
 
         return columnInfo;
+    }
+
+    /**
+     * 解析存储模式
+     * <p>
+     * 如果注解显式指定了 {@link StorageMode}，直接使用；
+     * 否则按 Java 类型自动推断：
+     * <ul>
+     *   <li>{@link Collection}/{@link Map}/数组/非 JDK 内置复杂对象 → JSON</li>
+     *   <li>其他基础类型 → AUTO</li>
+     * </ul>
+     */
+    private static StorageMode resolveStorageMode(StorageMode annotationMode, Class<?> javaType) {
+        if (annotationMode != StorageMode.AUTO) {
+            return annotationMode;
+        }
+        // byte[] 默认直接映射为 BLOB，不走 JSON 或 Protostuff 序列化
+        if (javaType == byte[].class) {
+            return StorageMode.AUTO;
+        }
+        // 复杂类型自动升级为 JSON
+        if (javaType.isArray()
+                || Collection.class.isAssignableFrom(javaType)
+                || Map.class.isAssignableFrom(javaType)) {
+            return StorageMode.JSON;
+        }
+        // 非 JDK 内置的自定义 POJO -> JSON（排除基础类型和日期等）
+        if (!isBasicType(javaType)) {
+            return StorageMode.JSON;
+        }
+        return StorageMode.AUTO;
+    }
+
+    /** 判断是否为 JDK 内置基础类型 / 日期等 */
+    private static boolean isBasicType(Class<?> javaType) {
+        return javaType.isPrimitive()
+                || javaType == String.class
+                || javaType == Boolean.class
+                || javaType == Byte.class
+                || javaType == Short.class
+                || javaType == Integer.class
+                || javaType == Long.class
+                || javaType == Float.class
+                || javaType == Double.class
+                || javaType == BigDecimal.class
+                || javaType == Date.class
+                || javaType == java.time.LocalDate.class
+                || javaType == java.time.LocalTime.class
+                || javaType == java.time.LocalDateTime.class
+                || javaType == byte[].class;
     }
 
     /** 解析索引：字段级 + 表级复合索引 + @Column(unique=true) 自动生成 */
@@ -245,10 +305,64 @@ public class EntityParser {
 
     // ============== 类型推断 ==============
 
-    private static String inferType(Class<?> javaType, int length) {
+    /**
+     * 根据 Java 类型和存储模式推断数据库列类型
+     *
+     * @param javaType    Java 字段类型
+     * @param length      列长度（主要用于 VARCHAR）
+     * @param storageMode 存储模式
+     */
+    private static String inferType(Class<?> javaType, int length, StorageMode storageMode) {
+        switch (storageMode) {
+            case JSON:
+                return "LONGTEXT";
+            case BOOL:
+                return "TINYINT(1)";
+            case BYTE:
+                return "TINYINT";
+            case SHORT:
+                return "SMALLINT";
+            case INT:
+                return "INT";
+            case LONG:
+                return "BIGINT";
+            case FLOAT:
+                return "FLOAT";
+            case DOUBLE:
+                return "DOUBLE";
+            case DECIMAL:
+                return "DECIMAL(20,6)";
+            case VARCHAR:
+                return "VARCHAR(" + Math.max(length, 1) + ")";
+            case TEXT:
+                return "TEXT";
+            case MEDIUMTEXT:
+                return "MEDIUMTEXT";
+            case LONGTEXT:
+                return "LONGTEXT";
+            case BLOB:
+                return "BLOB";
+            case MEDIUMBLOB:
+                return "MEDIUMBLOB";
+            case LONGBLOB:
+                return "LONGBLOB";
+            case DATE:
+                return "DATE";
+            case DATETIME:
+                return "DATETIME";
+            case TIME:
+                return "TIME";
+            // AUTO 模式：按 Java 类型推断
+            case AUTO:
+            default:
+                // fall through to Java type inference
+        }
+
+        // AUTO 模式：原有推断逻辑
         if (javaType == String.class) {
-            if (length > 65535) return "TEXT";
-            if (length > 16383) return "MEDIUMTEXT";
+            if (length > 16777215) return "LONGTEXT";
+            if (length > 65535) return "MEDIUMTEXT";
+            if (length > 16383) return "TEXT";
             return "VARCHAR(" + length + ")";
         }
         if (javaType == boolean.class || javaType == Boolean.class) return "TINYINT(1)";
@@ -264,6 +378,14 @@ public class EntityParser {
         if (javaType == LocalTime.class) return "TIME";
         if (javaType == byte[].class) return "BLOB";
         return "VARCHAR(" + length + ")";
+    }
+
+    /**
+     * @deprecated 请使用 {@link #inferType(Class, int, StorageMode)}
+     */
+    @Deprecated
+    private static String inferType(Class<?> javaType, int length) {
+        return inferType(javaType, length, StorageMode.AUTO);
     }
 
     // ============== 工具方法 ==============
