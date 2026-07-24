@@ -66,8 +66,9 @@ public class MysqlTableCreateHandler implements TableCreateHandler {
 
         sb.append(";");
         log.debug("创建表sql:\n{}", sb.toString());
-        QueryRunner queryRunner = new QueryRunner(jdbcTemplate);
-        queryRunner.update(sb.toString());
+        try (QueryRunner queryRunner = new QueryRunner(jdbcTemplate)) {
+            queryRunner.update(sb.toString());
+        }
     }
 
     /** 构建单列定义 */
