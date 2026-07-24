@@ -4,7 +4,11 @@ import com.wxdgaming.batis.annotation.GenerationType;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.IndexInfo;
 import com.wxdgaming.batis.model.TableInfo;
+import com.wxdgaming.batis.sql.JdbcTemplate;
+import com.wxdgaming.batis.sql.QueryRunner;
 import com.wxdgaming.batis.sql.TableCreateHandler;
+import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -15,10 +19,11 @@ import java.util.List;
  * @author wxd-gaming(無心道, 15388152619)
  * @version 2026-07-24 17:19
  **/
+@Slf4j
 public class MysqlTableCreateHandler implements TableCreateHandler {
 
     @Override
-    public void doAction(TableInfo tableInfo) {
+    public void doAction(JdbcTemplate jdbcTemplate, TableInfo tableInfo) {
         StringBuilder sb = new StringBuilder(512);
         sb.append("CREATE TABLE IF NOT EXISTS `").append(tableInfo.getTableName().toLowerCase()).append("` (\n");
 
@@ -60,7 +65,9 @@ public class MysqlTableCreateHandler implements TableCreateHandler {
         }
 
         sb.append(";");
-        System.out.println(sb.toString());
+        log.debug("创建表sql:\n{}", sb.toString());
+        QueryRunner queryRunner = new QueryRunner(jdbcTemplate);
+        queryRunner.update(sb.toString());
     }
 
     /** 构建单列定义 */

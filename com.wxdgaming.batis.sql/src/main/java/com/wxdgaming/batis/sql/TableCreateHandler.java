@@ -10,6 +10,6 @@ import com.wxdgaming.batis.model.TableInfo;
  **/
 public interface TableCreateHandler {
 
-    void doAction(TableInfo tableInfo);
+    void doAction(JdbcTemplate jdbcTemplate, TableInfo tableInfo);
 
 }

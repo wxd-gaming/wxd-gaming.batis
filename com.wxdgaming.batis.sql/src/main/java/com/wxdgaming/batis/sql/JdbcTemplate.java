@@ -1,6 +1,7 @@
 package com.wxdgaming.batis.sql;
 
 import com.wxdgaming.batis.DbTemplate;
+import com.wxdgaming.batis.model.TableInfo;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import lombok.Getter;
@@ -23,5 +24,9 @@ public class JdbcTemplate extends DbTemplate {
     public JdbcTemplate(HikariDataSource dataSource) {
         this.dataSource = dataSource;
     }
+
+    public void checkTable(Class<?> cls) {}
+
+    public void checkTable(TableInfo tableInfo) {}
 
 }

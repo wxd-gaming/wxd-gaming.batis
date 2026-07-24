@@ -16,27 +16,46 @@ import java.util.List;
  * @version 2026-07-24 17:33
  **/
 @Getter
-public class QueryRunner {
+public class QueryRunner implements AutoCloseable {
 
     private JdbcTemplate jdbcTemplate;
     private Connection connection;
+    /** 是否需要关闭连接（内部获取的连接需要关闭，外部注入的连接由调用方管理） */
+    private boolean closeConnection;
 
     public QueryRunner(JdbcTemplate jdbcTemplate) {
         this.jdbcTemplate = jdbcTemplate;
+        this.closeConnection = true;
     }
 
     public QueryRunner(Connection connection) {
         this.connection = connection;
+        this.closeConnection = false;
     }
 
     /**
-     * 获取数据库连接，优先使用外部注入的 connection，否则从 JdbcTemplate 的 DataSource 获取
+     * 获取数据库连接，优先使用外部注入的 connection，否则从 JdbcTemplate 的 DataSource 惰性获取
      */
     public Connection getConnection() throws SQLException {
         if (connection != null) {
             return connection;
         }
-        return jdbcTemplate.getDataSource().getConnection();
+        connection = jdbcTemplate.getDataSource().getConnection();
+        closeConnection = false;
+        return connection;
+    }
+
+    @Override
+    public void close() {
+        if (connection != null && closeConnection) {
+            try {
+                connection.close();
+            } catch (SQLException e) {
+                throw ExceptionUtils.asRuntimeException(e);
+            }
+        }
+        closeConnection = false;
+        connection = null;
     }
 
     /**
@@ -61,14 +80,17 @@ public class QueryRunner {
      * @return 处理结果
      */
     public <R> R query(String sql, Object[] args, ResultSetHandler<R> handler) {
-        try (Connection conn = getConnection(); PreparedStatement stmt = conn.prepareStatement(sql)) {
-            if (args != null) {
-                for (int i = 0; i < args.length; i++) {
-                    stmt.setObject(i + 1, args[i]);
+        try {
+            Connection conn = getConnection();
+            try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                if (args != null) {
+                    for (int i = 0; i < args.length; i++) {
+                        stmt.setObject(i + 1, args[i]);
+                    }
                 }
-            }
-            try (ResultSet rs = stmt.executeQuery()) {
-                return handler.handle(rs);
+                try (ResultSet rs = stmt.executeQuery()) {
+                    return handler.handle(rs);
+                }
             }
         } catch (SQLException e) {
             throw ExceptionUtils.asRuntimeException(e);
@@ -91,13 +113,16 @@ public class QueryRunner {
      * @param args 参数数组
      */
     public boolean execute(String sql, Object[] args) {
-        try (Connection conn = getConnection(); PreparedStatement stmt = conn.prepareStatement(sql)) {
-            if (args != null) {
-                for (int i = 0; i < args.length; i++) {
-                    stmt.setObject(i + 1, args[i]);
+        try {
+            Connection conn = getConnection();
+            try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                if (args != null) {
+                    for (int i = 0; i < args.length; i++) {
+                        stmt.setObject(i + 1, args[i]);
+                    }
                 }
+                return stmt.execute();
             }
-            return stmt.execute();
         } catch (SQLException e) {
             throw ExceptionUtils.asRuntimeException(e);
         }
@@ -119,13 +144,16 @@ public class QueryRunner {
      * @param args 参数数组
      */
     public int update(String sql, Object[] args) {
-        try (Connection conn = getConnection(); PreparedStatement stmt = conn.prepareStatement(sql)) {
-            if (args != null) {
-                for (int i = 0; i < args.length; i++) {
-                    stmt.setObject(i + 1, args[i]);
+        try {
+            Connection conn = getConnection();
+            try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                if (args != null) {
+                    for (int i = 0; i < args.length; i++) {
+                        stmt.setObject(i + 1, args[i]);
+                    }
                 }
+                return stmt.executeUpdate();
             }
-            return stmt.executeUpdate();
         } catch (SQLException e) {
             throw ExceptionUtils.asRuntimeException(e);
         }
@@ -139,16 +167,19 @@ public class QueryRunner {
      * @return 每条语句影响的行数数组
      */
     public int[] executeBatch(String sql, List<Object[]> batchArgs) {
-        try (Connection conn = getConnection(); PreparedStatement stmt = conn.prepareStatement(sql)) {
-            for (Object[] args : batchArgs) {
-                if (args != null) {
-                    for (int i = 0; i < args.length; i++) {
-                        stmt.setObject(i + 1, args[i]);
+        try {
+            Connection conn = getConnection();
+            try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                for (Object[] args : batchArgs) {
+                    if (args != null) {
+                        for (int i = 0; i < args.length; i++) {
+                            stmt.setObject(i + 1, args[i]);
+                        }
                     }
+                    stmt.addBatch();
                 }
-                stmt.addBatch();
+                return stmt.executeBatch();
             }
-            return stmt.executeBatch();
         } catch (SQLException e) {
             throw ExceptionUtils.asRuntimeException(e);
         }
