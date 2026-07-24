@@ -66,7 +66,7 @@ public class EntityParser {
         tableInfo.setEntityClass(entityClass);
 
         resolveTableAnnotation(entityClass, tableInfo);
-        List<ColumnInfo> columns = resolveColumns(entityClass);
+        LinkedHashMap<String, ColumnInfo> columns = resolveColumns(entityClass);
         tableInfo.setColumns(columns);
         List<IndexInfo> indexes = resolveIndexes(entityClass, columns, tableInfo);
         tableInfo.setIndexes(indexes);
@@ -103,20 +103,22 @@ public class EntityParser {
     }
 
     /** 解析所有字段上的 {@link Column}、{@link Id}、{@link GeneratedValue} 注解 */
-    private static List<ColumnInfo> resolveColumns(Class<?> entityClass) {
-        Map<String, ColumnInfo> columnMap = new LinkedHashMap<>();
+    private static LinkedHashMap<String, ColumnInfo> resolveColumns(Class<?> entityClass) {
+        LinkedHashMap<String, ColumnInfo> columnMap = new LinkedHashMap<>();
+        java.util.Set<String> fieldNames = new java.util.HashSet<>();
 
         Class<?> currentClass = entityClass;
         while (currentClass != null && currentClass != Object.class) {
             for (Field field : currentClass.getDeclaredFields()) {
                 if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
-                if (columnMap.containsKey(field.getName())) continue;
-                columnMap.put(field.getName(), buildColumnInfo(field));
+                if (!fieldNames.add(field.getName())) continue;
+                ColumnInfo col = buildColumnInfo(field);
+                columnMap.put(col.getColumnName(), col);
             }
             currentClass = currentClass.getSuperclass();
         }
 
-        return new ArrayList<>(columnMap.values());
+        return columnMap;
     }
 
     private static ColumnInfo buildColumnInfo(Field field) {
@@ -162,7 +164,7 @@ public class EntityParser {
 
     /** 解析索引：字段级 + 表级复合索引 + @Column(unique=true) 自动生成 */
     private static List<IndexInfo> resolveIndexes(Class<?> entityClass,
-                                                   List<ColumnInfo> columns,
+                                                   LinkedHashMap<String, ColumnInfo> columns,
                                                    TableInfo tableInfo) {
         List<IndexInfo> indexes = new ArrayList<>();
 
@@ -174,7 +176,7 @@ public class EntityParser {
                 Index indexAnn = field.getAnnotation(Index.class);
                 if (indexAnn == null) continue;
 
-                ColumnInfo colInfo = columns.stream()
+                ColumnInfo colInfo = columns.values().stream()
                         .filter(c -> c.getFieldName().equals(field.getName()))
                         .findFirst().orElse(null);
                 if (colInfo == null) continue;
@@ -219,7 +221,7 @@ public class EntityParser {
         }
 
         // 3. @Column(unique=true) → 自动生成唯一索引
-        for (ColumnInfo col : columns) {
+        for (ColumnInfo col : columns.values()) {
             if (col.isUnique()) {
                 boolean alreadyExists = indexes.stream().anyMatch(idx ->
                         idx.getColumns().size() == 1

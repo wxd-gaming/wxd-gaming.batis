@@ -6,9 +6,22 @@
     <parent>
         <groupId>wxd-gaming</groupId>
         <artifactId>wxd-gaming.batis</artifactId>
-        <version>1.0-SNAPSHOT</version>
+        <version>1.0.1</version>
     </parent>
 
     <artifactId>com.wxdgaming.batis.sql</artifactId>
+
+    <dependencies>
+        <dependency>
+            <groupId>wxd-gaming</groupId>
+            <artifactId>com.wxdgaming.batis</artifactId>
+            <version>1.0.1</version>
+        </dependency>
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <version>7.1.0</version>
+        </dependency>
+    </dependencies>
 
 </project>

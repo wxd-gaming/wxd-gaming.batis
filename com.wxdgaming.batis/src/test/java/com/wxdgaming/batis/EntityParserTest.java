@@ -1,5 +1,7 @@
 package com.wxdgaming.batis;
 
+import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.serializer.SerializerFeature;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.IndexInfo;
 import com.wxdgaming.batis.model.TableInfo;
@@ -29,6 +31,7 @@ class EntityParserTest {
     @Test
     void testTableNameNoAnnotation() {
         TableInfo info = EntityParser.parse(SimpleEntity.class);
+        System.out.println(JSON.toJSONString(info, SerializerFeature.PrettyFormat));
         assertEquals("simple_entity", info.getTableName());
         assertNull(info.getComment());
     }
@@ -50,7 +53,7 @@ class EntityParserTest {
 
     @Test
     void testPrimaryKey() {
-        ColumnInfo pk = EntityParser.parse(PlayerEntity.class).getColumns().stream()
+        ColumnInfo pk = EntityParser.parse(PlayerEntity.class).getColumns().values().stream()
                 .filter(ColumnInfo::isPrimaryKey)
                 .findFirst().orElse(null);
         assertNotNull(pk);
@@ -60,7 +63,7 @@ class EntityParserTest {
 
     @Test
     void testColumnAnnotation() {
-        ColumnInfo col = EntityParser.parse(PlayerEntity.class).getColumns().stream()
+        ColumnInfo col = EntityParser.parse(PlayerEntity.class).getColumns().values().stream()
                 .filter(c -> c.getFieldName().equals("name"))
                 .findFirst().orElse(null);
         assertNotNull(col);
@@ -77,20 +80,20 @@ class EntityParserTest {
 
         // 无注解的字段应自动推断类型
         assertEquals("simple_entity", info.getTableName());
-        assertEquals("id", info.getColumns().get(0).getColumnName());
-        assertEquals("BIGINT", info.getColumns().get(0).getType());
+        assertEquals("id", info.getColumn("id").getColumnName());
+        assertEquals("BIGINT", info.getColumn("id").getType());
 
-        ColumnInfo nameCol = info.getColumns().stream()
+        ColumnInfo nameCol = info.getColumns().values().stream()
                 .filter(c -> c.getFieldName().equals("name")).findFirst().orElse(null);
         assertNotNull(nameCol);
         assertEquals("VARCHAR(255)", nameCol.getType()); // 默认长度 255
 
-        ColumnInfo ageCol = info.getColumns().stream()
+        ColumnInfo ageCol = info.getColumns().values().stream()
                 .filter(c -> c.getFieldName().equals("age")).findFirst().orElse(null);
         assertNotNull(ageCol);
         assertEquals("INT", ageCol.getType());
 
-        ColumnInfo activeCol = info.getColumns().stream()
+        ColumnInfo activeCol = info.getColumns().values().stream()
                 .filter(c -> c.getFieldName().equals("active")).findFirst().orElse(null);
         assertNotNull(activeCol);
         assertEquals("TINYINT(1)", activeCol.getType());
@@ -145,7 +148,7 @@ class EntityParserTest {
 
     @Test
     void testGeneratedValue() {
-        ColumnInfo pk = EntityParser.parse(PlayerEntity.class).getColumns().stream()
+        ColumnInfo pk = EntityParser.parse(PlayerEntity.class).getColumns().values().stream()
                 .filter(ColumnInfo::isPrimaryKey)
                 .findFirst().orElse(null);
         assertNotNull(pk);
@@ -155,7 +158,7 @@ class EntityParserTest {
 
     @Test
     void testNoGeneratedValueDefault() {
-        ColumnInfo pk = EntityParser.parse(SimpleEntity.class).getColumns().stream()
+        ColumnInfo pk = EntityParser.parse(SimpleEntity.class).getColumns().values().stream()
                 .filter(ColumnInfo::isPrimaryKey)
                 .findFirst().orElse(null);
         assertNotNull(pk);
