@@ -1,6 +1,6 @@
-package com.wxdgaming.batis.orm.model;
+package com.wxdgaming.batis.model;
 
-import com.wxdgaming.batis.orm.annotation.GenerationType;
+import com.wxdgaming.batis.annotation.GenerationType;
 
 /**
  * 运行时列元数据
@@ -34,111 +34,84 @@ public class ColumnInfo {
     /** 对应的 Java 类型 */
     private Class<?> javaType;
 
-    public ColumnInfo() {
-    }
-
-    public String getColumnName() {
-        return columnName;
-    }
+    public String getColumnName() { return columnName; }
 
     public ColumnInfo setColumnName(String columnName) {
         this.columnName = columnName;
         return this;
     }
 
-    public String getType() {
-        return type;
-    }
+    public String getType() { return type; }
 
     public ColumnInfo setType(String type) {
         this.type = type;
         return this;
     }
 
-    public int getLength() {
-        return length;
-    }
+    public int getLength() { return length; }
 
     public ColumnInfo setLength(int length) {
         this.length = length;
         return this;
     }
 
-    public int getScale() {
-        return scale;
-    }
+    public int getScale() { return scale; }
 
     public ColumnInfo setScale(int scale) {
         this.scale = scale;
         return this;
     }
 
-    public String getComment() {
-        return comment;
-    }
+    public String getComment() { return comment; }
 
     public ColumnInfo setComment(String comment) {
         this.comment = comment;
         return this;
     }
 
-    public String getDefaultValue() {
-        return defaultValue;
-    }
+    public String getDefaultValue() { return defaultValue; }
 
     public ColumnInfo setDefaultValue(String defaultValue) {
         this.defaultValue = defaultValue;
         return this;
     }
 
-    public boolean isNullable() {
-        return nullable;
-    }
+    public boolean isNullable() { return nullable; }
 
     public ColumnInfo setNullable(boolean nullable) {
         this.nullable = nullable;
         return this;
     }
 
-    public boolean isUnique() {
-        return unique;
-    }
+    public boolean isUnique() { return unique; }
 
     public ColumnInfo setUnique(boolean unique) {
         this.unique = unique;
         return this;
     }
 
-    public boolean isPrimaryKey() {
-        return primaryKey;
-    }
+    public boolean isPrimaryKey() { return primaryKey; }
 
     public ColumnInfo setPrimaryKey(boolean primaryKey) {
         this.primaryKey = primaryKey;
         return this;
     }
 
-    public GenerationType getGenerationType() {
-        return generationType;
-    }
+    public GenerationType getGenerationType() { return generationType; }
 
     public ColumnInfo setGenerationType(GenerationType generationType) {
         this.generationType = generationType;
         return this;
     }
 
-    public String getFieldName() {
-        return fieldName;
-    }
+    public String getFieldName() { return fieldName; }
 
     public ColumnInfo setFieldName(String fieldName) {
         this.fieldName = fieldName;
         return this;
     }
 
-    public Class<?> getJavaType() {
-        return javaType;
-    }
+    public Class<?> getJavaType() { return javaType; }
 
     public ColumnInfo setJavaType(Class<?> javaType) {
         this.javaType = javaType;

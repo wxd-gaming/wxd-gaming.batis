@@ -1,4 +1,4 @@
-package com.wxdgaming.batis.orm.annotation;
+package com.wxdgaming.batis.annotation;
 
 import java.lang.annotation.Documented;
 import java.lang.annotation.ElementType;

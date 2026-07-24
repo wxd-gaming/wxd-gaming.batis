@@ -1,4 +1,4 @@
-package com.wxdgaming.batis.orm.model;
+package com.wxdgaming.batis.model;
 
 import java.util.List;
 import java.util.Objects;
@@ -17,30 +17,21 @@ public class IndexInfo {
     /** 是否唯一索引 */
     private boolean unique;
 
-    public IndexInfo() {
-    }
-
-    public String getName() {
-        return name;
-    }
+    public String getName() { return name; }
 
     public IndexInfo setName(String name) {
         this.name = name;
         return this;
     }
 
-    public List<String> getColumns() {
-        return columns;
-    }
+    public List<String> getColumns() { return columns; }
 
     public IndexInfo setColumns(List<String> columns) {
         this.columns = columns;
         return this;
     }
 
-    public boolean isUnique() {
-        return unique;
-    }
+    public boolean isUnique() { return unique; }
 
     public IndexInfo setUnique(boolean unique) {
         this.unique = unique;

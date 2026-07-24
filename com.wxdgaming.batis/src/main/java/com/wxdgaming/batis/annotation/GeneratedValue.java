@@ -1,4 +1,4 @@
-package com.wxdgaming.batis.orm.annotation;
+package com.wxdgaming.batis.annotation;
 
 import java.lang.annotation.Documented;
 import java.lang.annotation.ElementType;
@@ -21,8 +21,6 @@ import java.lang.annotation.Target;
 @Retention(RetentionPolicy.RUNTIME)
 public @interface GeneratedValue {
 
-    /**
-     * 主键生成策略，默认 {@link GenerationType#NONE}
-     */
+    /** 主键生成策略，默认 {@link GenerationType#NONE} */
     GenerationType strategy() default GenerationType.NONE;
 }

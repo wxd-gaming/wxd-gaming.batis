@@ -1,4 +1,4 @@
-package com.wxdgaming.batis.orm.annotation;
+package com.wxdgaming.batis.annotation;
 
 import java.lang.annotation.Documented;
 import java.lang.annotation.ElementType;
@@ -18,9 +18,7 @@ import java.lang.annotation.Target;
 @Retention(RetentionPolicy.RUNTIME)
 public @interface Column {
 
-    /**
-     * 列名，不填时默认使用字段名（驼峰转下划线）
-     */
+    /** 列名，不填时默认使用字段名（驼峰转下划线） */
     String name() default "";
 
     /**
@@ -32,9 +30,7 @@ public @interface Column {
     /** 列长度（仅对字符串/可变长类型有效），默认 255 */
     int length() default 255;
 
-    /**
-     * 小数精度（仅对 DECIMAL / NUMERIC 类型有效），默认 0 表示不设置
-     */
+    /** 小数精度（仅对 DECIMAL / NUMERIC 类型有效），默认 0 表示不设置 */
     int scale() default 0;
 
     /** 列注释 */

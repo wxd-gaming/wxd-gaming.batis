@@ -1,4 +1,4 @@
-package com.wxdgaming.batis.orm.annotation;
+package com.wxdgaming.batis.annotation;
 
 import java.lang.annotation.Documented;
 import java.lang.annotation.Retention;
@@ -29,10 +29,7 @@ public @interface Index {
     /** 索引名，不填时自动生成 */
     String name() default "";
 
-    /**
-     * 索引列名列表，多列用英文逗号分隔。
-     * 字段级使用时可以留空，默认取当前标注字段的列名。
-     */
+    /** 索引列名列表，多列用英文逗号分隔。字段级使用时可以留空，默认取当前标注字段的列名。 */
     String columnList() default "";
 
     /** 是否唯一索引，默认 false（普通索引） */
