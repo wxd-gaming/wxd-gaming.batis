@@ -1,9 +1,13 @@
 package com.wxdgaming.batis.sql;
 
 import com.alibaba.fastjson.JSONObject;
+import com.wxdgaming.batis.model.ColumnInfo;
+import com.wxdgaming.batis.model.TableInfo;
+import com.wxdgaming.batis.parser.EntityParser;
 import lombok.AccessLevel;
 import lombok.NoArgsConstructor;
 
+import java.lang.reflect.Field;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
@@ -67,6 +71,87 @@ public class Handlers {
             return list;
         };
     }
+
+    // ======================== Bean 映射 ========================
+
+    /**
+     * 读取一行，映射为指定实体类的 Bean 对象
+     * <p>
+     * 通过 {@link EntityParser} 解析实体类得到 {@link TableInfo}，
+     * 按 ResultSet 列名（ColumnLabel）匹配数据库列名，再通过反射设值到 Java 字段。
+     *
+     * @param entityClass 实体类
+     * @param <T>         实体类型
+     */
+    public static <T> ResultSetHandler<T> bean(Class<T> entityClass) {
+        return rs -> {
+            if (rs.next()) {
+                return toBean(rs, entityClass);
+            }
+            return null;
+        };
+    }
+
+    /**
+     * 读取所有行，每行映射为指定实体类的 Bean 对象，返回 List&lt;T&gt;
+     *
+     * @param entityClass 实体类
+     * @param <T>         实体类型
+     */
+    public static <T> ResultSetHandler<List<T>> beanList(Class<T> entityClass) {
+        return rs -> {
+            List<T> list = new ArrayList<>();
+            while (rs.next()) {
+                list.add(toBean(rs, entityClass));
+            }
+            return list;
+        };
+    }
+
+    /** 将 ResultSet 当前行映射为实体 Bean */
+    private static <T> T toBean(ResultSet rs, Class<T> entityClass) throws SQLException {
+        TableInfo tableInfo = EntityParser.parse(entityClass);
+        try {
+            T instance = entityClass.getDeclaredConstructor().newInstance();
+            ResultSetMetaData metaData = rs.getMetaData();
+            int columnCount = metaData.getColumnCount();
+            for (int i = 1; i <= columnCount; i++) {
+                String columnLabel = metaData.getColumnLabel(i);
+                ColumnInfo colInfo = tableInfo.getColumn(columnLabel);
+                if (colInfo == null) {
+                    continue;
+                }
+                String fieldName = colInfo.getFieldName();
+                Object value = rs.getObject(i);
+                if (value == null) {
+                    continue;
+                }
+                Field field = getDeclaredField(entityClass, fieldName);
+                if (field != null) {
+                    field.setAccessible(true);
+                    field.set(instance, value);
+                }
+            }
+            return instance;
+        } catch (ReflectiveOperationException e) {
+            throw new SQLException("Failed to map ResultSet to " + entityClass.getSimpleName(), e);
+        }
+    }
+
+    /** 从类及其继承链上查找字段 */
+    private static Field getDeclaredField(Class<?> clazz, String fieldName) {
+        Class<?> current = clazz;
+        while (current != null && current != Object.class) {
+            try {
+                return current.getDeclaredField(fieldName);
+            } catch (NoSuchFieldException ignored) {
+                current = current.getSuperclass();
+            }
+        }
+        return null;
+    }
+
+    // ======================== 内部工具 ========================
 
     /**
      * 将当前行转换为 JSONObject，key 使用 ResultSetMetaData.getColumnLabel()

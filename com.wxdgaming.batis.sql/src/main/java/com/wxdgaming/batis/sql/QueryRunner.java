@@ -7,7 +7,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.util.List;
 
 /**
@@ -40,6 +39,27 @@ public class QueryRunner {
         return jdbcTemplate.getDataSource().getConnection();
     }
 
+    /**
+     * 执行查询
+     *
+     * @param sql     查询语句
+     * @param handler 结果集处理器
+     * @param <R>     处理结果类型
+     * @return 处理结果
+     */
+    public <R> R query(String sql, ResultSetHandler<R> handler) {
+        return query(sql, null, handler);
+    }
+
+    /**
+     * 执行查询
+     *
+     * @param sql     查询语句
+     * @param args    参数数组
+     * @param handler 结果集处理器
+     * @param <R>     处理结果类型
+     * @return 处理结果
+     */
     public <R> R query(String sql, Object[] args, ResultSetHandler<R> handler) {
         try (Connection conn = getConnection(); PreparedStatement stmt = conn.prepareStatement(sql)) {
             if (args != null) {
@@ -61,11 +81,7 @@ public class QueryRunner {
      * @param sql 任意 SQL 语句
      */
     public boolean execute(String sql) {
-        try (Connection conn = getConnection(); Statement stmt = conn.createStatement()) {
-            return stmt.execute(sql);
-        } catch (SQLException e) {
-            throw ExceptionUtils.asRuntimeException(e);
-        }
+        return execute(sql, null);
     }
 
     /**
@@ -93,11 +109,7 @@ public class QueryRunner {
      * @param sql DML 语句
      */
     public int update(String sql) {
-        try (Connection conn = getConnection(); Statement stmt = conn.createStatement()) {
-            return stmt.executeUpdate(sql);
-        } catch (SQLException e) {
-            throw ExceptionUtils.asRuntimeException(e);
-        }
+        return update(sql, null);
     }
 
     /**
@@ -122,7 +134,7 @@ public class QueryRunner {
     /**
      * 批量执行 SQL
      *
-     * @param sql      带占位符的 SQL
+     * @param sql       带占位符的 SQL
      * @param batchArgs 批量参数列表，每个元素是一组参数
      * @return 每条语句影响的行数数组
      */
