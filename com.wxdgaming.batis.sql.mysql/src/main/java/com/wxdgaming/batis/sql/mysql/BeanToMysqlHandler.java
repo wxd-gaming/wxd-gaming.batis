@@ -1,6 +1,7 @@
 package com.wxdgaming.batis.sql.mysql;
 
 import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.serializer.SerializerFeature;
 import com.wxdgaming.batis.annotation.GenerationType;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.StorageMode;
@@ -11,7 +12,7 @@ import com.wxdgaming.batis.sql.QueryRunner;
 import com.wxdgaming.batis.util.ProtostuffUtil;
 import lombok.extern.slf4j.Slf4j;
 
-import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -139,7 +140,8 @@ public class BeanToMysqlHandler implements BeanToSqlDbHandler<MysqlTemplate> {
         if (value == null) return null;
         StorageMode mode = col.getStorageMode();
         if (mode == StorageMode.JSON) {
-            return JSON.toJSONString(value);
+            // 输出 @type 类型信息，反序列化时可自动推断实际类型
+            return JSON.toJSONString(value, SerializerFeature.WriteClassName);
         }
         if (mode == StorageMode.BLOB || mode == StorageMode.MEDIUMBLOB || mode == StorageMode.LONGBLOB) {
             if (value instanceof byte[]) {
@@ -172,45 +174,41 @@ public class BeanToMysqlHandler implements BeanToSqlDbHandler<MysqlTemplate> {
         return value;
     }
 
-    // ===== 反射读写 =====
+    // ===== 反射读写（统一走 getter / setter，Method 在解析时缓存） =====
 
     private Object readFieldValue(Object bean, ColumnInfo col) {
-        Field field = getDeclaredField(bean.getClass(), col.getFieldName());
-        if (field == null) return null;
-        field.setAccessible(true);
+        Method getter = col.getReadMethod();
+        if (getter == null) {
+            throw new RuntimeException("实体 " + bean.getClass().getSimpleName()
+                    + " 缺少字段 " + col.getFieldName() + " 的 getter 方法，请为其添加 getter");
+        }
         try {
-            return field.get(bean);
-        } catch (IllegalAccessException e) {
-            throw new RuntimeException("读取字段 " + col.getFieldName() + " 失败", e);
+            return getter.invoke(bean);
+        } catch (Exception e) {
+            throw new RuntimeException("通过 getter 读取字段 " + col.getFieldName() + " 失败", e);
         }
     }
 
     private void writeFieldValue(Object bean, ColumnInfo col, Number value) {
-        Field field = getDeclaredField(bean.getClass(), col.getFieldName());
-        if (field == null) return;
-        field.setAccessible(true);
+        Method setter = col.getWriteMethod();
+        if (setter == null) {
+            throw new RuntimeException("实体 " + bean.getClass().getSimpleName()
+                    + " 缺少字段 " + col.getFieldName() + " 的 setter 方法，请为其添加 setter");
+        }
+        Class<?> paramType = setter.getParameterTypes()[0];
+        Object arg;
+        if (paramType == long.class || paramType == Long.class) arg = value.longValue();
+        else if (paramType == int.class || paramType == Integer.class) arg = value.intValue();
+        else if (paramType == short.class || paramType == Short.class) arg = value.shortValue();
+        else if (paramType == byte.class || paramType == Byte.class) arg = value.byteValue();
+        else if (paramType == double.class || paramType == Double.class) arg = value.doubleValue();
+        else if (paramType == float.class || paramType == Float.class) arg = value.floatValue();
+        else if (paramType == BigDecimal.class) arg = BigDecimal.valueOf(value.longValue());
+        else arg = value;
         try {
-            Class<?> t = field.getType();
-            if (t == long.class || t == Long.class) field.set(bean, value.longValue());
-            else if (t == int.class || t == Integer.class) field.set(bean, value.intValue());
-            else if (t == short.class || t == Short.class) field.set(bean, value.shortValue());
-            else if (t == byte.class || t == Byte.class) field.set(bean, value.byteValue());
-            else if (t == BigDecimal.class) field.set(bean, BigDecimal.valueOf(value.longValue()));
-            else field.set(bean, value);
-        } catch (IllegalAccessException e) {
-            throw new RuntimeException("写回字段 " + col.getFieldName() + " 失败", e);
+            setter.invoke(bean, arg);
+        } catch (Exception e) {
+            throw new RuntimeException("通过 setter 写回字段 " + col.getFieldName() + " 失败", e);
         }
-    }
-
-    private Field getDeclaredField(Class<?> clazz, String fieldName) {
-        Class<?> current = clazz;
-        while (current != null && current != Object.class) {
-            try {
-                return current.getDeclaredField(fieldName);
-            } catch (NoSuchFieldException ignored) {
-                current = current.getSuperclass();
-            }
-        }
-        return null;
     }
 }

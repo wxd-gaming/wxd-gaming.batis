@@ -12,6 +12,7 @@ import com.wxdgaming.batis.model.StorageMode;
 import com.wxdgaming.batis.model.TableInfo;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -115,7 +116,7 @@ public class EntityParser {
             for (Field field : currentClass.getDeclaredFields()) {
                 if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
                 if (!fieldNames.add(field.getName())) continue;
-                ColumnInfo col = buildColumnInfo(field);
+                ColumnInfo col = buildColumnInfo(entityClass, field);
                 columnMap.put(col.getColumnName(), col);
             }
             currentClass = currentClass.getSuperclass();
@@ -124,10 +125,14 @@ public class EntityParser {
         return columnMap;
     }
 
-    private static ColumnInfo buildColumnInfo(Field field) {
+    private static ColumnInfo buildColumnInfo(Class<?> entityClass, Field field) {
         ColumnInfo columnInfo = new ColumnInfo();
         columnInfo.setFieldName(field.getName());
         columnInfo.setJavaType(field.getType());
+        columnInfo.setField(field);
+        columnInfo.setGenericType(field.getGenericType());
+        columnInfo.setReadMethod(findReadMethod(entityClass, field));
+        columnInfo.setWriteMethod(findWriteMethod(entityClass, field));
 
         Column columnAnn = field.getAnnotation(Column.class);
         if (columnAnn != null) {
@@ -409,5 +414,74 @@ public class EntityParser {
             }
         }
         return sb.toString();
+    }
+
+    // ============== getter / setter 方法查找（解析时缓存） ==============
+
+    /** 查找 getter：优先 getXxx，boolean 类型兼容 isXxx */
+    private static Method findReadMethod(Class<?> entityClass, Field field) {
+        String cap = capitalize(field.getName());
+        Method m = findMethod(entityClass, "get" + cap);
+        if (m != null) return m;
+        Class<?> t = field.getType();
+        if (t == boolean.class || t == Boolean.class) {
+            m = findMethod(entityClass, "is" + cap);
+            if (m != null) return m;
+        }
+        return null;
+    }
+
+    /** 查找 setter：兼容字段基本类型与包装类型参数 */
+    private static Method findWriteMethod(Class<?> entityClass, Field field) {
+        String cap = capitalize(field.getName());
+        Class<?> t = field.getType();
+        Method m = findMethod(entityClass, "set" + cap, t);
+        if (m == null) {
+            Class<?> alt = t.isPrimitive() ? boxOf(t) : unboxOf(t);
+            if (alt != null) m = findMethod(entityClass, "set" + cap, alt);
+        }
+        return m;
+    }
+
+    /** 沿父类链查找方法（兼容继承字段与重写） */
+    private static Method findMethod(Class<?> start, String name, Class<?>... paramTypes) {
+        Class<?> current = start;
+        while (current != null && current != Object.class) {
+            try {
+                return current.getDeclaredMethod(name, paramTypes);
+            } catch (NoSuchMethodException ignored) {
+                current = current.getSuperclass();
+            }
+        }
+        return null;
+    }
+
+    private static String capitalize(String name) {
+        if (name == null || name.isEmpty()) return name;
+        return Character.toUpperCase(name.charAt(0)) + name.substring(1);
+    }
+
+    private static Class<?> boxOf(Class<?> p) {
+        if (p == int.class) return Integer.class;
+        if (p == long.class) return Long.class;
+        if (p == short.class) return Short.class;
+        if (p == byte.class) return Byte.class;
+        if (p == double.class) return Double.class;
+        if (p == float.class) return Float.class;
+        if (p == boolean.class) return Boolean.class;
+        if (p == char.class) return Character.class;
+        return null;
+    }
+
+    private static Class<?> unboxOf(Class<?> b) {
+        if (b == Integer.class) return int.class;
+        if (b == Long.class) return long.class;
+        if (b == Short.class) return short.class;
+        if (b == Byte.class) return byte.class;
+        if (b == Double.class) return double.class;
+        if (b == Float.class) return float.class;
+        if (b == Boolean.class) return boolean.class;
+        if (b == Character.class) return char.class;
+        return null;
     }
 }

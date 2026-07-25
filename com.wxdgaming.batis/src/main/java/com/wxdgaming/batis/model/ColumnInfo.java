@@ -1,12 +1,22 @@
 package com.wxdgaming.batis.model;
 
 import com.wxdgaming.batis.annotation.GenerationType;
+import lombok.Getter;
+import lombok.Setter;
+import lombok.experimental.Accessors;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Type;
 
 /**
  * 运行时列元数据
  *
  * @author wxd-gaming
  */
+@Getter
+@Setter
+@Accessors(chain = true)
 public class ColumnInfo {
 
     /** 列名 */
@@ -35,97 +45,14 @@ public class ColumnInfo {
     private String fieldName;
     /** 对应的 Java 类型 */
     private Class<?> javaType;
-
-    public String getColumnName() { return columnName; }
-
-    public ColumnInfo setColumnName(String columnName) {
-        this.columnName = columnName;
-        return this;
-    }
-
-    public String getType() { return type; }
-
-    public ColumnInfo setType(String type) {
-        this.type = type;
-        return this;
-    }
-
-    public int getLength() { return length; }
-
-    public ColumnInfo setLength(int length) {
-        this.length = length;
-        return this;
-    }
-
-    public int getScale() { return scale; }
-
-    public ColumnInfo setScale(int scale) {
-        this.scale = scale;
-        return this;
-    }
-
-    public String getComment() { return comment; }
-
-    public ColumnInfo setComment(String comment) {
-        this.comment = comment;
-        return this;
-    }
-
-    public String getDefaultValue() { return defaultValue; }
-
-    public ColumnInfo setDefaultValue(String defaultValue) {
-        this.defaultValue = defaultValue;
-        return this;
-    }
-
-    public boolean isNullable() { return nullable; }
-
-    public ColumnInfo setNullable(boolean nullable) {
-        this.nullable = nullable;
-        return this;
-    }
-
-    public boolean isUnique() { return unique; }
-
-    public ColumnInfo setUnique(boolean unique) {
-        this.unique = unique;
-        return this;
-    }
-
-    public boolean isPrimaryKey() { return primaryKey; }
-
-    public ColumnInfo setPrimaryKey(boolean primaryKey) {
-        this.primaryKey = primaryKey;
-        return this;
-    }
-
-    public GenerationType getGenerationType() { return generationType; }
-
-    public ColumnInfo setGenerationType(GenerationType generationType) {
-        this.generationType = generationType;
-        return this;
-    }
-
-    public StorageMode getStorageMode() { return storageMode; }
-
-    public ColumnInfo setStorageMode(StorageMode storageMode) {
-        this.storageMode = storageMode;
-        return this;
-    }
-
-    public String getFieldName() { return fieldName; }
-
-    public ColumnInfo setFieldName(String fieldName) {
-        this.fieldName = fieldName;
-        return this;
-    }
-
-    public Class<?> getJavaType() { return javaType; }
-
-    public ColumnInfo setJavaType(Class<?> javaType) {
-        this.javaType = javaType;
-        return this;
-    }
+    /** 对应的 Java 字段引用，解析时缓存 */
+    private Field field;
+    /** 字段的泛型类型（如 List&lt;Xxx&gt;），用于 JSON 反序列化时还原泛型 */
+    private Type genericType;
+    /** 读取方法（getter），解析时缓存 */
+    private Method readMethod;
+    /** 写入方法（setter），解析时缓存 */
+    private Method writeMethod;
 
     @Override
     public String toString() {
