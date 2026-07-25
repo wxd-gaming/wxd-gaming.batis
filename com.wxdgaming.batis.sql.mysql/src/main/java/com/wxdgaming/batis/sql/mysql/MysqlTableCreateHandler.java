@@ -1,13 +1,8 @@
 package com.wxdgaming.batis.sql.mysql;
 
 import com.wxdgaming.batis.annotation.GenerationType;
-import com.wxdgaming.batis.model.ColumnInfo;
-import com.wxdgaming.batis.model.IndexInfo;
-import com.wxdgaming.batis.model.TableInfo;
-import com.wxdgaming.batis.sql.JdbcTemplate;
-import com.wxdgaming.batis.sql.QueryRunner;
-import com.wxdgaming.batis.sql.TableCreateHandler;
-import lombok.Setter;
+import com.wxdgaming.batis.model.*;
+import com.wxdgaming.batis.sql.*;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
@@ -22,8 +17,19 @@ import java.util.List;
 @Slf4j
 public class MysqlTableCreateHandler implements TableCreateHandler {
 
+    public static final MysqlTableCreateHandler INSTANCE = new MysqlTableCreateHandler();
+
     @Override
     public void doAction(JdbcTemplate jdbcTemplate, TableInfo tableInfo) {
+        String buildSql = buildSql(tableInfo);
+        log.debug("创建表sql:\n{}", buildSql);
+        try (QueryRunner queryRunner = new QueryRunner(jdbcTemplate)) {
+            queryRunner.update(buildSql);
+        }
+    }
+
+    @Override
+    public String buildSql(TableInfo tableInfo) {
         StringBuilder sb = new StringBuilder(512);
         sb.append("CREATE TABLE IF NOT EXISTS `").append(tableInfo.getTableName().toLowerCase()).append("` (\n");
 
@@ -65,10 +71,7 @@ public class MysqlTableCreateHandler implements TableCreateHandler {
         }
 
         sb.append(";");
-        log.debug("创建表sql:\n{}", sb.toString());
-        try (QueryRunner queryRunner = new QueryRunner(jdbcTemplate)) {
-            queryRunner.update(sb.toString());
-        }
+        return sb.toString();
     }
 
     /** 构建单列定义 */

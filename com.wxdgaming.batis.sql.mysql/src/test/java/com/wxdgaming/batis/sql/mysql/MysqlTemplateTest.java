@@ -1,16 +1,9 @@
 package com.wxdgaming.batis.sql.mysql;
 
-import com.wxdgaming.batis.model.ColumnInfo;
-import com.wxdgaming.batis.model.IndexInfo;
-import com.wxdgaming.batis.model.TableInfo;
+import com.wxdgaming.batis.model.*;
 import com.wxdgaming.batis.parser.EntityParser;
 import com.zaxxer.hikari.HikariConfig;
-import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.MethodOrderer;
-import org.junit.jupiter.api.Order;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -58,8 +51,8 @@ class MysqlTemplateTest {
         Map<String, TableInfo> cache = template.getTableCache();
         Assertions.assertNotNull(cache, "缓存不应为 null");
         log.info("数据库共有 {} 个表", cache.size());
-        for (String name : cache.keySet()) {
-            log.info("  表: {}", name);
+        for (Map.Entry<String, TableInfo> entry : cache.entrySet()) {
+            log.info("  表: {}, {} \n\n{}", entry.getKey(), entry.getValue(), MysqlTableCreateHandler.INSTANCE.buildSql(entry.getValue()));
         }
     }
 
@@ -73,7 +66,7 @@ class MysqlTemplateTest {
         Assertions.assertNotNull(cache);
         TableInfo tableInfo = cache.get(TABLE_NAME);
         Assertions.assertNotNull(tableInfo, "建表后缓存应包含 " + TABLE_NAME);
-        log.info("建表成功：{}", tableInfo);
+        log.info("建表成功：{}\n\n{}", tableInfo, MysqlTableCreateHandler.INSTANCE.buildSql(tableInfo));
     }
 
     @Test

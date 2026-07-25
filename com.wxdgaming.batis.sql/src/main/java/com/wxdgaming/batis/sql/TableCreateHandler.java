@@ -12,4 +12,5 @@ public interface TableCreateHandler {
 
     void doAction(JdbcTemplate jdbcTemplate, TableInfo tableInfo);
 
+    String buildSql(TableInfo tableInfo);
 }
