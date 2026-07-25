@@ -21,7 +21,7 @@ public class QueryRunner implements AutoCloseable {
     private JdbcTemplate jdbcTemplate;
     private Connection connection;
     /** 是否需要关闭连接（内部获取的连接需要关闭，外部注入的连接由调用方管理） */
-    private boolean closeConnection;
+    private final boolean closeConnection;
 
     public QueryRunner(JdbcTemplate jdbcTemplate) {
         this.jdbcTemplate = jdbcTemplate;
@@ -40,8 +40,9 @@ public class QueryRunner implements AutoCloseable {
         if (connection != null) {
             return connection;
         }
+        // 惰性从 DataSource 借用连接；是否由 close() 归还由构造函数决定
+        // （JdbcTemplate 构造 -> closeConnection=true 需归还；外部 Connection 构造 -> 保持 false 不归还款）
         connection = jdbcTemplate.getDataSource().getConnection();
-        closeConnection = false;
         return connection;
     }
 
@@ -54,7 +55,6 @@ public class QueryRunner implements AutoCloseable {
                 throw ExceptionUtils.asRuntimeException(e);
             }
         }
-        closeConnection = false;
         connection = null;
     }
 

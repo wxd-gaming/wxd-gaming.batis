@@ -244,7 +244,10 @@ public class EntityParser {
                 IndexInfo indexInfo = new IndexInfo();
                 String colName = colInfo.getColumnName();
                 String name = indexAnn.name();
-                indexInfo.setName(name.isEmpty() ? "idx_" + colName : name);
+                // 无显式 name 时：唯一索引用 uk_ 前缀，非唯一用 idx_ 前缀，与 @Column(unique=true) 自动生成保持一致
+                indexInfo.setName(name.isEmpty()
+                        ? (indexAnn.unique() ? "uk_" + colName : "idx_" + colName)
+                        : name);
 
                 String columnList = indexAnn.columnList();
                 if (!columnList.isEmpty()) {

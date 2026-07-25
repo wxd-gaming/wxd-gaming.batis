@@ -5,13 +5,13 @@ import com.wxdgaming.batis.model.IndexInfo;
 import com.wxdgaming.batis.model.TableInfo;
 import com.wxdgaming.batis.parser.EntityParser;
 import com.zaxxer.hikari.HikariConfig;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -21,7 +21,9 @@ import java.util.Map;
 /**
  * MysqlTemplate 集成测试
  * <p>测试表结构加载、建表、缓存、变更等全流程。</p>
- * <p>连接配置：10.28.0.26:3306, root 空密码。</p>
+ * <p>默认使用嵌入式 MariaDB4j（随测试自动拉起/关闭，无需外部 MySQL）。
+ * 如需对照真实 MySQL，可设置系统属性：
+ * {@code -Dwxd.batis.mysql.url=jdbc:mysql://host:3306/test}。</p>
  *
  * @author wxd-gaming(無心道, 15388152619)
  */
@@ -33,21 +35,20 @@ class MysqlTemplateTest {
     static MysqlTemplate template;
     static final String TABLE_NAME = "t_role";
 
-    @BeforeEach
-    void setUp() {
+    @RegisterExtension
+    static MariaDB4jExtension maria = new MariaDB4jExtension();
+
+    @BeforeAll
+    static void setUp() {
         if (template != null) return;
         HikariConfig config = new HikariConfig();
-        config.setJdbcUrl("jdbc:mysql://10.28.0.26:13306/test?serverTimezone=Asia/Shanghai");
+        config.setJdbcUrl(maria.getJdbcUrl());
         config.setUsername("root");
         config.setPassword("");
         config.setDriverClassName("com.mysql.cj.jdbc.Driver");
         template = new MysqlTemplate(config);
     }
 
-    @AfterEach
-    void tearDown() {
-        // 不做清理，防止干扰其他用例
-    }
 
     @Test
     @Order(1)
