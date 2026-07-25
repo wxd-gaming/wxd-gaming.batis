@@ -179,8 +179,24 @@ public class Handlers {
                         + "', bytes length=" + bytes.length, e);
             }
         }
-        // AUTO 模式：直接返回原值
-        return value;
+        // AUTO 模式：做常见类型适配后返回原值
+        Object result = value;
+        Class<?> fieldType = field.getType();
+        if (fieldType == java.util.Date.class
+                || fieldType == java.sql.Timestamp.class
+                || fieldType == java.sql.Date.class
+                || fieldType == java.sql.Time.class) {
+            if (value instanceof java.time.LocalDateTime) {
+                result = java.sql.Timestamp.valueOf((java.time.LocalDateTime) value);
+            } else if (value instanceof java.time.LocalDate) {
+                result = java.sql.Timestamp.valueOf(((java.time.LocalDate) value).atStartOfDay());
+            } else if (value instanceof java.time.OffsetDateTime) {
+                result = java.sql.Timestamp.from(((java.time.OffsetDateTime) value).toInstant());
+            } else if (value instanceof java.time.Instant) {
+                result = java.sql.Timestamp.from((java.time.Instant) value);
+            }
+        }
+        return result;
     }
 
     /** 从类及其继承链上查找字段 */

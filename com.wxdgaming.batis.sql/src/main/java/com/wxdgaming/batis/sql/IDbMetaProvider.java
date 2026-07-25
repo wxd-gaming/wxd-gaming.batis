@@ -2,6 +2,7 @@ package com.wxdgaming.batis.sql;
 
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.IndexInfo;
+import com.wxdgaming.batis.model.TableInfo;
 
 import java.util.List;
 
@@ -17,11 +18,11 @@ public interface IDbMetaProvider {
     /** 获取当前数据库 catalog（schema）名 */
     String getCatalog(JdbcTemplate jdbcTemplate);
 
-    /** SQL：查询当前 catalog 下所有表名 */
+    /** SQL：查询当前 catalog 下所有表名及表注释 */
     String tableListSql();
 
-    /** Handler：解析表列表 ResultSet → 表名列表 */
-    ResultSetHandler<List<String>> tableListHandler();
+    /** Handler：解析表列表 ResultSet → TableInfo 列表（填充 tableName 与 comment） */
+    ResultSetHandler<List<TableInfo>> tableListHandler();
 
     /** SQL：查询指定表的列信息 */
     String columnListSql();

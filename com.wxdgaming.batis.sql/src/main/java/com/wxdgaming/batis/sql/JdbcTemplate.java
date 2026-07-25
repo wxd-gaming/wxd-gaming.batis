@@ -55,13 +55,14 @@ public class JdbcTemplate extends DbTemplate {
             String catalog = dbMetaProvider.getCatalog(this);
             if (catalog == null) return;
 
-            List<String> tableNames = qr.query(
+            List<TableInfo> tables = qr.query(
                     dbMetaProvider.tableListSql(),
                     new Object[]{catalog},
                     dbMetaProvider.tableListHandler()
             );
 
-            for (String tableName : tableNames) {
+            for (TableInfo tableInfo : tables) {
+                String tableName = tableInfo.getTableName();
                 String key = tableName.toLowerCase();
 
                 List<ColumnInfo> columns = qr.query(
@@ -75,9 +76,6 @@ public class JdbcTemplate extends DbTemplate {
                         new Object[]{catalog, tableName},
                         dbMetaProvider.indexListHandler()
                 );
-
-                TableInfo tableInfo = new TableInfo();
-                tableInfo.setTableName(tableName);
 
                 LinkedHashMap<String, ColumnInfo> columnMap = new LinkedHashMap<>();
                 for (ColumnInfo col : columns) {

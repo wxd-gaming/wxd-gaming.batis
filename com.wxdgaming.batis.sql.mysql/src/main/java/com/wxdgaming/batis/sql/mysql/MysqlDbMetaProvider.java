@@ -2,6 +2,7 @@ package com.wxdgaming.batis.sql.mysql;
 
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.IndexInfo;
+import com.wxdgaming.batis.model.TableInfo;
 import com.wxdgaming.batis.sql.IDbMetaProvider;
 import com.wxdgaming.batis.sql.JdbcTemplate;
 import com.wxdgaming.batis.sql.QueryRunner;
@@ -32,15 +33,18 @@ public class MysqlDbMetaProvider implements IDbMetaProvider {
 
     @Override
     public String tableListSql() {
-        return "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?";
+        return "SELECT TABLE_NAME, TABLE_COMMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?";
     }
 
     @Override
-    public ResultSetHandler<List<String>> tableListHandler() {
+    public ResultSetHandler<List<TableInfo>> tableListHandler() {
         return rs -> {
-            List<String> list = new ArrayList<>();
+            List<TableInfo> list = new ArrayList<>();
             while (rs.next()) {
-                list.add(rs.getString("TABLE_NAME"));
+                TableInfo tableInfo = new TableInfo();
+                tableInfo.setTableName(rs.getString("TABLE_NAME"));
+                tableInfo.setComment(rs.getString("TABLE_COMMENT") != null ? rs.getString("TABLE_COMMENT") : "");
+                list.add(tableInfo);
             }
             return list;
         };

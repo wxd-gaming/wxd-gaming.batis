@@ -6,6 +6,7 @@ import org.apache.commons.lang3.exception.ExceptionUtils;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.Statement;
 import java.sql.SQLException;
 import java.util.List;
 
@@ -157,6 +158,35 @@ public class QueryRunner implements AutoCloseable {
         } catch (SQLException e) {
             throw ExceptionUtils.asRuntimeException(e);
         }
+    }
+
+    /**
+     * 执行 INSERT 并返回自增主键（单主键列），无自增列时返回 null
+     *
+     * @param sql  INSERT 语句
+     * @param args 参数数组
+     * @return 自增主键，无自增列或无法获取时返回 null
+     */
+    public Number executeInsert(String sql, Object[] args) {
+        try {
+            Connection conn = getConnection();
+            try (PreparedStatement stmt = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+                if (args != null) {
+                    for (int i = 0; i < args.length; i++) {
+                        stmt.setObject(i + 1, args[i]);
+                    }
+                }
+                stmt.executeUpdate();
+                try (ResultSet rs = stmt.getGeneratedKeys()) {
+                    if (rs.next()) {
+                        return rs.getObject(1, Number.class);
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            throw ExceptionUtils.asRuntimeException(e);
+        }
+        return null;
     }
 
     /**
