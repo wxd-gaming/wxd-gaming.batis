@@ -6,7 +6,7 @@ import com.wxdgaming.batis.model.StorageMode;
 import com.wxdgaming.batis.model.TableInfo;
 import com.wxdgaming.batis.parser.EntityParser;
 import com.wxdgaming.batis.sql.QueryRunner;
-import com.wxdgaming.batis.sql.ResultSetHandler;
+import com.wxdgaming.batis.sql.SqlDbToBeanHandler;
 import com.wxdgaming.batis.util.ProtostuffUtil;
 import lombok.extern.slf4j.Slf4j;
 
@@ -23,7 +23,6 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
-import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -34,9 +33,10 @@ import java.util.List;
  * @version 2026-07-25
  **/
 @Slf4j
-public class MysqlToBeanHandler {
+public class MysqlToBeanHandler implements SqlDbToBeanHandler<MysqlTemplate> {
 
     /** 按主键查询单条记录，未定义主键时抛异常，未查询到返回 null */
+    @Override
     public <T> T queryById(MysqlTemplate mysqlTemplate, Class<T> entityClass, Object idValue) {
         TableInfo tableInfo = EntityParser.parse(entityClass);
         ColumnInfo pk = findPrimaryKey(tableInfo, entityClass);
@@ -46,6 +46,7 @@ public class MysqlToBeanHandler {
     }
 
     /** 自定义 SQL 查询单条记录，未查询到返回 null */
+    @Override
     public <T> T query(MysqlTemplate mysqlTemplate, Class<T> entityClass, String sql, Object... args) {
         log.debug("查询实体 sql:\n{}", sql);
         try (QueryRunner qr = new QueryRunner(mysqlTemplate)) {
@@ -54,6 +55,7 @@ public class MysqlToBeanHandler {
     }
 
     /** 自定义 SQL 查询多条记录 */
+    @Override
     public <T> List<T> queryList(MysqlTemplate mysqlTemplate, Class<T> entityClass, String sql, Object... args) {
         log.debug("查询实体列表 sql:\n{}", sql);
         try (QueryRunner qr = new QueryRunner(mysqlTemplate)) {
@@ -62,38 +64,17 @@ public class MysqlToBeanHandler {
     }
 
     /** 查询表中所有记录 */
+    @Override
     public <T> List<T> queryAll(MysqlTemplate mysqlTemplate, Class<T> entityClass) {
         TableInfo tableInfo = EntityParser.parse(entityClass);
         String sql = "SELECT * FROM `" + tableInfo.getTableName().toLowerCase() + "`";
         return queryList(mysqlTemplate, entityClass, sql);
     }
 
-    // ===== ResultSetHandler 工厂 =====
-
-    /** 读取第一行映射为实体，无数据返回 null */
-    public <T> ResultSetHandler<T> bean(Class<T> entityClass) {
-        return rs -> {
-            if (rs.next()) {
-                return toBean(rs, entityClass);
-            }
-            return null;
-        };
-    }
-
-    /** 读取所有行映射为实体列表 */
-    public <T> ResultSetHandler<List<T>> beanList(Class<T> entityClass) {
-        return rs -> {
-            List<T> list = new ArrayList<>();
-            while (rs.next()) {
-                list.add(toBean(rs, entityClass));
-            }
-            return list;
-        };
-    }
-
     // ===== 行映射（DB -> Bean） =====
 
     /** 将 ResultSet 当前行映射为实体，列标签与列名大小写不敏感匹配 */
+    @Override
     public <T> T toBean(ResultSet rs, Class<T> entityClass) throws SQLException {
         TableInfo tableInfo = EntityParser.parse(entityClass);
         T instance;

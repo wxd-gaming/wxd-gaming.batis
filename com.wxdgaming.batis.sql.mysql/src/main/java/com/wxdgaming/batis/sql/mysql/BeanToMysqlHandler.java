@@ -81,16 +81,17 @@ public class BeanToMysqlHandler implements BeanToSqlDbHandler<MysqlTemplate> {
 
         List<String> setCols = new ArrayList<>();
         List<String> whereCols = new ArrayList<>();
-        List<Object> params = new ArrayList<>();
+        List<Object> setParams = new ArrayList<>();
+        List<Object> whereParams = new ArrayList<>();
 
         for (ColumnInfo col : columns.values()) {
             Object dbValue = convertToDbValue(readFieldValue(bean, col), col);
             if (col.isPrimaryKey()) {
                 whereCols.add("`" + col.getColumnName().toLowerCase() + "` = ?");
-                params.add(dbValue);
+                whereParams.add(dbValue);
             } else {
                 setCols.add("`" + col.getColumnName().toLowerCase() + "` = ?");
-                params.add(dbValue);
+                setParams.add(dbValue);
             }
         }
 
@@ -99,11 +100,14 @@ public class BeanToMysqlHandler implements BeanToSqlDbHandler<MysqlTemplate> {
                     "实体 " + bean.getClass().getSimpleName() + " 未定义主键，无法执行 update");
         }
 
+        // SET 参数在前，WHERE 参数在后，顺序拼接
+        setParams.addAll(whereParams);
+
         String sql = "UPDATE `" + tableInfo.getTableName().toLowerCase() + "` SET "
                 + String.join(", ", setCols) + " WHERE " + String.join(" AND ", whereCols);
         log.debug("更新实体 sql:\n{}", sql);
         try (QueryRunner qr = new QueryRunner(mysqlTemplate)) {
-            return qr.update(sql, params.toArray());
+            return qr.update(sql, setParams.toArray());
         }
     }
 
