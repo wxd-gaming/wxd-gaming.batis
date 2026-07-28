@@ -8,5 +8,5 @@ import com.wxdgaming.batis.BeanToDbHandler;
  * @author wxd-gaming(無心道, 15388152619)
  * @version 2026-07-24 20:10
  **/
-public interface BeanToSqlDbHandler<T extends JdbcTemplate> extends BeanToDbHandler<T> {
+public interface BeanToSqlDbHandler extends BeanToDbHandler<JdbcTemplate> {
 }

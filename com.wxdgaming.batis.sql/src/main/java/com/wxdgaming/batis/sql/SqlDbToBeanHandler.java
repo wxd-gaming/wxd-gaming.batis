@@ -15,7 +15,7 @@ import java.util.List;
  * @author wxd-gaming(無心道, 15388152619)
  * @version 2026-07-25
  **/
-public interface SqlDbToBeanHandler<T extends JdbcTemplate> extends DbToBeanHandler<T> {
+public interface SqlDbToBeanHandler extends DbToBeanHandler<JdbcTemplate> {
 
     /** 数据库特定的行映射逻辑（JSON/枚举/时间/二进制等方言差异在此实现） */
     <E> E toBean(ResultSet rs, Class<E> entityClass) throws SQLException;

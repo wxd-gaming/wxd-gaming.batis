@@ -8,6 +8,7 @@ import com.wxdgaming.batis.model.StorageMode;
 import com.wxdgaming.batis.model.TableInfo;
 import com.wxdgaming.batis.parser.EntityParser;
 import com.wxdgaming.batis.sql.BeanToSqlDbHandler;
+import com.wxdgaming.batis.sql.JdbcTemplate;
 import com.wxdgaming.batis.sql.QueryRunner;
 import com.wxdgaming.batis.util.ProtostuffUtil;
 import lombok.extern.slf4j.Slf4j;
@@ -32,11 +33,11 @@ import java.util.stream.Collectors;
  * @version 2026-07-24 18:37
  **/
 @Slf4j
-public class BeanToMysqlHandler implements BeanToSqlDbHandler<MysqlTemplate> {
+public class BeanToMysqlHandler implements BeanToSqlDbHandler {
 
     /** 默认行为：根据主键是否已赋值决定 INSERT 或 UPDATE */
     @Override
-    public void doAction(MysqlTemplate mysqlTemplate, Object bean) {
+    public void doAction(JdbcTemplate mysqlTemplate, Object bean) {
         if (isPrimaryKeyAssigned(bean)) {
             update(mysqlTemplate, bean);
         } else {
@@ -45,7 +46,7 @@ public class BeanToMysqlHandler implements BeanToSqlDbHandler<MysqlTemplate> {
     }
 
     /** 写入（INSERT），自增主键不写入，并回写生成的 id */
-    public void insert(MysqlTemplate mysqlTemplate, Object bean) {
+    public void insert(JdbcTemplate mysqlTemplate, Object bean) {
         TableInfo tableInfo = EntityParser.parse(bean.getClass());
         LinkedHashMap<String, ColumnInfo> columns = tableInfo.getColumns();
 
@@ -75,7 +76,7 @@ public class BeanToMysqlHandler implements BeanToSqlDbHandler<MysqlTemplate> {
     }
 
     /** 更新（UPDATE），按主键定位，SET 非主键列，返回影响行数 */
-    public int update(MysqlTemplate mysqlTemplate, Object bean) {
+    public int update(JdbcTemplate mysqlTemplate, Object bean) {
         TableInfo tableInfo = EntityParser.parse(bean.getClass());
         LinkedHashMap<String, ColumnInfo> columns = tableInfo.getColumns();
 

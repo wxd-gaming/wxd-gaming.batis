@@ -97,6 +97,26 @@ public class Handlers {
     }
 
     /**
+     * 读取一行，映射为指定实体类的 Bean 对象（使用 JdbcTemplate 上注册的方言处理器）
+     *
+     * @param template    JdbcTemplate 实例（从中获取 {@link SqlDbToBeanHandler}）
+     * @param entityClass 实体类
+     * @param <T>         实体类型
+     */
+    public static <T> ResultSetHandler<T> bean(JdbcTemplate template, Class<T> entityClass) {
+        SqlDbToBeanHandler handler = template.getSqlDbToBeanHandler();
+        if (handler == null) {
+            return bean(entityClass);
+        }
+        return rs -> {
+            if (rs.next()) {
+                return (T) handler.toBean(rs, entityClass);
+            }
+            return null;
+        };
+    }
+
+    /**
      * 读取所有行，每行映射为指定实体类的 Bean 对象，返回 List&lt;T&gt;
      *
      * @param entityClass 实体类
@@ -107,6 +127,27 @@ public class Handlers {
             List<T> list = new ArrayList<>();
             while (rs.next()) {
                 list.add(toBean(rs, entityClass));
+            }
+            return list;
+        };
+    }
+
+    /**
+     * 读取所有行，每行映射为指定实体类的 Bean 对象（使用 JdbcTemplate 上注册的方言处理器）
+     *
+     * @param template    JdbcTemplate 实例（从中获取 {@link SqlDbToBeanHandler}）
+     * @param entityClass 实体类
+     * @param <T>         实体类型
+     */
+    public static <T> ResultSetHandler<List<T>> beanList(JdbcTemplate template, Class<T> entityClass) {
+        SqlDbToBeanHandler handler = template.getSqlDbToBeanHandler();
+        if (handler == null) {
+            return beanList(entityClass);
+        }
+        return rs -> {
+            List<T> list = new ArrayList<>();
+            while (rs.next()) {
+                list.add((T) handler.toBean(rs, entityClass));
             }
             return list;
         };

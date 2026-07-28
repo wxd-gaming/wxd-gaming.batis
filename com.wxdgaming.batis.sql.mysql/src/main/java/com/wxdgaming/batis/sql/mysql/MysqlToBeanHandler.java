@@ -5,6 +5,7 @@ import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.StorageMode;
 import com.wxdgaming.batis.model.TableInfo;
 import com.wxdgaming.batis.parser.EntityParser;
+import com.wxdgaming.batis.sql.JdbcTemplate;
 import com.wxdgaming.batis.sql.QueryRunner;
 import com.wxdgaming.batis.sql.SqlDbToBeanHandler;
 import com.wxdgaming.batis.util.ProtostuffUtil;
@@ -33,11 +34,11 @@ import java.util.List;
  * @version 2026-07-25
  **/
 @Slf4j
-public class MysqlToBeanHandler implements SqlDbToBeanHandler<MysqlTemplate> {
+public class MysqlToBeanHandler implements SqlDbToBeanHandler {
 
     /** 按主键查询单条记录，未定义主键时抛异常，未查询到返回 null */
     @Override
-    public <T> T queryById(MysqlTemplate mysqlTemplate, Class<T> entityClass, Object idValue) {
+    public <T> T queryById(JdbcTemplate mysqlTemplate, Class<T> entityClass, Object idValue) {
         TableInfo tableInfo = EntityParser.parse(entityClass);
         ColumnInfo pk = findPrimaryKey(tableInfo, entityClass);
         String sql = "SELECT * FROM `" + tableInfo.getTableName().toLowerCase()
@@ -47,7 +48,7 @@ public class MysqlToBeanHandler implements SqlDbToBeanHandler<MysqlTemplate> {
 
     /** 自定义 SQL 查询单条记录，未查询到返回 null */
     @Override
-    public <T> T query(MysqlTemplate mysqlTemplate, Class<T> entityClass, String sql, Object... args) {
+    public <T> T query(JdbcTemplate mysqlTemplate, Class<T> entityClass, String sql, Object... args) {
         log.debug("查询实体 sql:\n{}", sql);
         try (QueryRunner qr = new QueryRunner(mysqlTemplate)) {
             return qr.query(sql, args, bean(entityClass));
@@ -56,7 +57,7 @@ public class MysqlToBeanHandler implements SqlDbToBeanHandler<MysqlTemplate> {
 
     /** 自定义 SQL 查询多条记录 */
     @Override
-    public <T> List<T> queryList(MysqlTemplate mysqlTemplate, Class<T> entityClass, String sql, Object... args) {
+    public <T> List<T> queryList(JdbcTemplate mysqlTemplate, Class<T> entityClass, String sql, Object... args) {
         log.debug("查询实体列表 sql:\n{}", sql);
         try (QueryRunner qr = new QueryRunner(mysqlTemplate)) {
             return qr.query(sql, args, beanList(entityClass));
@@ -65,7 +66,7 @@ public class MysqlToBeanHandler implements SqlDbToBeanHandler<MysqlTemplate> {
 
     /** 查询表中所有记录 */
     @Override
-    public <T> List<T> queryAll(MysqlTemplate mysqlTemplate, Class<T> entityClass) {
+    public <T> List<T> queryAll(JdbcTemplate mysqlTemplate, Class<T> entityClass) {
         TableInfo tableInfo = EntityParser.parse(entityClass);
         String sql = "SELECT * FROM `" + tableInfo.getTableName().toLowerCase() + "`";
         return queryList(mysqlTemplate, entityClass, sql);

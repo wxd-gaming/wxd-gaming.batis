@@ -19,7 +19,7 @@ import java.util.List;
 @Getter
 public class QueryRunner implements AutoCloseable {
 
-    private JdbcTemplate jdbcTemplate;
+    private final JdbcTemplate jdbcTemplate;
     private Connection connection;
     /** 是否需要关闭连接（内部获取的连接需要关闭，外部注入的连接由调用方管理） */
     private final boolean closeConnection;
@@ -29,7 +29,8 @@ public class QueryRunner implements AutoCloseable {
         this.closeConnection = true;
     }
 
-    public QueryRunner(Connection connection) {
+    public QueryRunner(JdbcTemplate jdbcTemplate, Connection connection) {
+        this.jdbcTemplate = jdbcTemplate;
         this.connection = connection;
         this.closeConnection = false;
     }

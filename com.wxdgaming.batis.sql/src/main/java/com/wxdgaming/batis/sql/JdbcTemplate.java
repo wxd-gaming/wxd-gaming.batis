@@ -34,6 +34,10 @@ public class JdbcTemplate extends DbTemplate {
     private TableCreateHandler tableCreateHandler;
     /** 修改表的处理器 */
     private TableAlterHandler tableAlterHandler;
+    /** 写入实体的处理器（INSERT / UPDATE） */
+    private BeanToSqlDbHandler beanToSqlDbHandler;
+    /** 读取实体的处理器（SELECT 行映射） */
+    private SqlDbToBeanHandler sqlDbToBeanHandler;
 
     public JdbcTemplate(HikariConfig config) {
         this(new HikariDataSource(config));
