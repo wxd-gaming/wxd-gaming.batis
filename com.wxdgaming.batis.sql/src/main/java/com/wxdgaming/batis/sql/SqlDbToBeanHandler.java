@@ -8,7 +8,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * sql类型数据库 读取处理器接口，与 {@link BeanToSqlDbHandler} 对称
+ * sql类型数据库 读取处理器接口
  * <p>bean / beanList 委托给具体数据库的 {@link #toBean(ResultSet, Class)} 方言实现，
  * 因此做成 default 方法，具体数据库实现只需关心行映射逻辑。</p>
  *

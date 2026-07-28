@@ -35,8 +35,8 @@ public class JdbcTemplate extends DbTemplate {
     private TableCreateHandler tableCreateHandler;
     /** 修改表的处理器 */
     private TableAlterHandler tableAlterHandler;
-    /** 读取实体的处理器（SELECT 行映射） */
-    private SqlDbToBeanHandler sqlDbToBeanHandler;
+    /** 读取实体的处理器（SELECT 行映射，由各数据库方言模块注入 Supplier） */
+    private Supplier<SqlDbToBeanHandler> sqlDbToBeanHandlerSupplier;
     /** INSERT 实体处理器（由各数据库方言模块注入 Supplier） */
     private Supplier<IBeanToInsertHandler> beanToInsertHandlerSupplier;
     /** UPDATE 实体处理器（由各数据库方言模块注入 Supplier） */

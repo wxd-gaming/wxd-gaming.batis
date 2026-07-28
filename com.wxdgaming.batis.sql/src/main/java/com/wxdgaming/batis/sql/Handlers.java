@@ -17,6 +17,7 @@ import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Supplier;
 
 /**
  * 内置的 ResultSetHandler 工厂方法
@@ -104,10 +105,11 @@ public class Handlers {
      * @param <T>         实体类型
      */
     public static <T> ResultSetHandler<T> bean(JdbcTemplate template, Class<T> entityClass) {
-        SqlDbToBeanHandler handler = template.getSqlDbToBeanHandler();
-        if (handler == null) {
+        Supplier<SqlDbToBeanHandler> supplier = template.getSqlDbToBeanHandlerSupplier();
+        if (supplier == null) {
             return bean(entityClass);
         }
+        SqlDbToBeanHandler handler = supplier.get();
         return rs -> {
             if (rs.next()) {
                 return (T) handler.toBean(rs, entityClass);
@@ -140,10 +142,11 @@ public class Handlers {
      * @param <T>         实体类型
      */
     public static <T> ResultSetHandler<List<T>> beanList(JdbcTemplate template, Class<T> entityClass) {
-        SqlDbToBeanHandler handler = template.getSqlDbToBeanHandler();
-        if (handler == null) {
+        Supplier<SqlDbToBeanHandler> supplier = template.getSqlDbToBeanHandlerSupplier();
+        if (supplier == null) {
             return beanList(entityClass);
         }
+        SqlDbToBeanHandler handler = supplier.get();
         return rs -> {
             List<T> list = new ArrayList<>();
             while (rs.next()) {

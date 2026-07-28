@@ -41,7 +41,7 @@ public class MysqlTemplate extends JdbcTemplate {
         setDbMetaProvider(new MysqlDbMetaProvider());
         setTableCreateHandler(new MysqlTableCreateHandler());
         setTableAlterHandler(new MysqlTableAlterHandler());
-        setSqlDbToBeanHandler(new MysqlToBeanHandler());
+        setSqlDbToBeanHandlerSupplier(MysqlToBeanHandler::new);
         setBeanToInsertHandlerSupplier(MysqlBeanToInsertHandler::new);
         setBeanToUpdateHandlerSupplier(MysqlBeanToUpdateHandler::new);
     }

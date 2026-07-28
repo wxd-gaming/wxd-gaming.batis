@@ -183,7 +183,8 @@ public class QueryRunner implements AutoCloseable {
                 stmt.executeUpdate();
                 try (ResultSet rs = stmt.getGeneratedKeys()) {
                     if (rs.next()) {
-                        return rs.getObject(1, Number.class);
+                        Object val = rs.getObject(1);
+                        return val instanceof Number ? (Number) val : null;
                     }
                 }
             }
@@ -306,7 +307,8 @@ public class QueryRunner implements AutoCloseable {
                     try (ResultSet rs = stmt.getGeneratedKeys()) {
                         int idx = 0;
                         while (rs.next() && idx < beans.size()) {
-                            Number genId = rs.getObject(1, Number.class);
+                            Object val = rs.getObject(1);
+                            Number genId = val instanceof Number ? (Number) val : null;
                             if (genId != null) {
                                 template.writeGeneratedKey(beans.get(idx), genId);
                             }
