@@ -27,7 +27,7 @@ import java.time.OffsetDateTime;
 import java.util.List;
 
 /**
- * 从 mysql 读取数据并映射为实体类（SELECT），与 {@link BeanToMysqlHandler} 对应的反向操作
+ * 从 mysql 读取数据并映射为实体类（SELECT），与 {@link BeanToInsertHandler}/{@link BeanToUpdateHandler} 对应的反向操作
  * <p>映射统一走 {@link ColumnInfo} 缓存的 setter 方法，JSON 字段结合 genericType 与 @type 自动推断类型。</p>
  *
  * @author wxd-gaming(無心道, 15388152619)

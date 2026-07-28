@@ -13,6 +13,7 @@ import lombok.Setter;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.function.Supplier;
 
 /**
  * jdbc 操作
@@ -34,10 +35,12 @@ public class JdbcTemplate extends DbTemplate {
     private TableCreateHandler tableCreateHandler;
     /** 修改表的处理器 */
     private TableAlterHandler tableAlterHandler;
-    /** 写入实体的处理器（INSERT / UPDATE） */
-    private BeanToSqlDbHandler beanToSqlDbHandler;
     /** 读取实体的处理器（SELECT 行映射） */
     private SqlDbToBeanHandler sqlDbToBeanHandler;
+    /** INSERT 实体处理器（由各数据库方言模块注入 Supplier） */
+    private Supplier<IBeanToInsertHandler> beanToInsertHandlerSupplier;
+    /** UPDATE 实体处理器（由各数据库方言模块注入 Supplier） */
+    private Supplier<IBeanToUpdateHandler> beanToUpdateHandlerSupplier;
 
     public JdbcTemplate(HikariConfig config) {
         this(new HikariDataSource(config));
