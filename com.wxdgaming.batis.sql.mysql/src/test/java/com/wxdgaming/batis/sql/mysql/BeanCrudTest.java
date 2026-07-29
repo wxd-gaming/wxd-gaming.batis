@@ -96,11 +96,8 @@ class BeanCrudTest {
             qr.insertBean(order);
             long insertedId = order.getId();
 
-            // ===== 使用 template-aware bean 查询 =====
-            OrderEntity result = qr.query(
-                    "SELECT * FROM `" + TABLE_NAME + "` WHERE `id` = ?",
-                    new Object[]{insertedId},
-                    Handlers.bean(template, OrderEntity.class));
+            // ===== 使用 queryById 查询 =====
+            OrderEntity result = qr.queryById(OrderEntity.class, insertedId);
 
             assertNotNull(result, "bean 查询应返回对象");
             assertEquals(insertedId, result.getId());
@@ -129,10 +126,8 @@ class BeanCrudTest {
                 inserted.add(order);
             }
 
-            // ===== 使用 template-aware beanList 查询全部 =====
-            List<OrderEntity> list = qr.query(
-                    "SELECT * FROM `" + TABLE_NAME + "` ORDER BY `id`",
-                    Handlers.beanList(template, OrderEntity.class));
+            // ===== 使用 queryAll 查询全部 =====
+            List<OrderEntity> list = qr.queryAll(OrderEntity.class);
 
             assertNotNull(list);
             assertEquals(3, list.size(), "应查到 3 条记录");
@@ -176,10 +171,7 @@ class BeanCrudTest {
             assertEquals(1, affected, "更新应影响 1 行");
 
             // ===== 回查验证 =====
-            OrderEntity after = qr.query(
-                    "SELECT * FROM `" + TABLE_NAME + "` WHERE `id` = ?",
-                    new Object[]{insertedId},
-                    Handlers.bean(template, OrderEntity.class));
+            OrderEntity after = qr.queryById(OrderEntity.class, insertedId);
             assertNotNull(after);
             assertEquals("更新后商品", after.getTitle());
             assertEquals(5, after.getQuantity());
@@ -203,10 +195,7 @@ class BeanCrudTest {
             assertTrue(id > 0, "自增主键应 > 0");
 
             // ===== 2. 查询 =====
-            OrderEntity queried = qr.query(
-                    "SELECT * FROM `" + TABLE_NAME + "` WHERE `id` = ?",
-                    new Object[]{id},
-                    Handlers.bean(template, OrderEntity.class));
+            OrderEntity queried = qr.queryById(OrderEntity.class, id);
             assertNotNull(queried);
             assertEquals("生命周期测试", queried.getTitle());
             assertEquals(10, queried.getQuantity());
@@ -218,18 +207,13 @@ class BeanCrudTest {
             assertEquals(1, updated);
 
             // ===== 4. 回查 =====
-            OrderEntity afterUpdate = qr.query(
-                    "SELECT * FROM `" + TABLE_NAME + "` WHERE `id` = ?",
-                    new Object[]{id},
-                    Handlers.bean(template, OrderEntity.class));
+            OrderEntity afterUpdate = qr.queryById(OrderEntity.class, id);
             assertNotNull(afterUpdate);
             assertEquals("已更新-生命周期", afterUpdate.getTitle());
             assertTrue(afterUpdate.isPaid());
 
             // ===== 5. 删除 =====
-            int deleted = qr.update(
-                    "DELETE FROM `" + TABLE_NAME + "` WHERE `id` = ?",
-                    new Object[]{id});
+            int deleted = template.deleteBean(queried);
             assertEquals(1, deleted);
 
             Number count = (Number) qr.query(

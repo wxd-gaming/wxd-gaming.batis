@@ -1,6 +1,8 @@
 package com.wxdgaming.batis.sql;
 
 import com.wxdgaming.batis.model.ColumnInfo;
+import com.wxdgaming.batis.model.TableInfo;
+import com.wxdgaming.batis.parser.EntityParser;
 import lombok.Getter;
 import org.apache.commons.lang3.exception.ExceptionUtils;
 
@@ -351,6 +353,104 @@ public class QueryRunner implements AutoCloseable {
         }
 
         return executeBatch(sql, batchArgs);
+    }
+
+    // ===== SELECT 实体便捷方法（委托给 IBeanToSelectHandler） =====
+
+    private IBeanToSelectHandler requireSelectHandler() {
+        Supplier<IBeanToSelectHandler> supplier = jdbcTemplate.getBeanToSelectHandlerSupplier();
+        if (supplier == null) {
+            throw new UnsupportedOperationException(
+                    "未注册 beanToSelectHandlerSupplier，请调用 JdbcTemplate#setBeanToSelectHandlerSupplier()");
+        }
+        return supplier.get();
+    }
+
+    /**
+     * 按主键查询单个实体（基于实体类）
+     * <p>单主键时 id 直接传值，复合主键时 id 传 Object[]。</p>
+     *
+     * @param entityClass 实体类
+     * @param id          主键值（单主键）或 Object[]（复合主键）
+     * @param <T>         实体类型
+     * @return 实体对象，未找到时返回 null
+     */
+    public <T> T queryById(Class<T> entityClass, Object id) {
+        TableInfo tableInfo = EntityParser.parse(entityClass);
+        IBeanToSelectHandler handler = requireSelectHandler();
+        String sql = handler.buildSelectByIdSql(tableInfo);
+
+        int pkCount = 0;
+        for (ColumnInfo col : tableInfo.getColumns().values()) {
+            if (col.isPrimaryKey()) pkCount++;
+        }
+        Object[] params = pkCount == 1 ? new Object[]{id} : (Object[]) id;
+
+        return query(sql, params, Handlers.bean(jdbcTemplate, entityClass));
+    }
+
+    /**
+     * 查询全部实体
+     *
+     * @param entityClass 实体类
+     * @param <T>         实体类型
+     * @return 实体列表，不存在时返回空 List
+     */
+    public <T> List<T> queryAll(Class<T> entityClass) {
+        TableInfo tableInfo = EntityParser.parse(entityClass);
+        IBeanToSelectHandler handler = requireSelectHandler();
+        String sql = handler.buildSelectAllSql(tableInfo);
+        return query(sql, Handlers.beanList(jdbcTemplate, entityClass));
+    }
+
+    /**
+     * 带条件查询单条实体
+     * <p>{@code whereSection} 为 {@code null} 或空字符串时等价于 {@link #queryAll} 并返回第一条。</p>
+     *
+     * @param entityClass  实体类
+     * @param whereSection WHERE 子句（不含 WHERE 关键字），例如 {@code "status = ? AND paid = ?"}
+     * @param params       参数列表
+     * @param <T>          实体类型
+     * @return 实体对象，未找到时返回 null
+     */
+    public <T> T queryOne(Class<T> entityClass, String whereSection, Object... params) {
+        TableInfo tableInfo = EntityParser.parse(entityClass);
+        IBeanToSelectHandler handler = requireSelectHandler();
+        String sql;
+        Object[] args;
+        if (whereSection == null || whereSection.trim().isEmpty()) {
+            sql = handler.buildSelectAllSql(tableInfo);
+            args = null;
+        } else {
+            sql = handler.buildSelectAllSql(tableInfo) + " WHERE " + whereSection;
+            args = params.length > 0 ? params : null;
+        }
+        return query(sql, args, Handlers.bean(jdbcTemplate, entityClass));
+    }
+
+    /**
+     * 带条件查询实体列表
+     * <p>{@code whereSection} 为 {@code null} 或空字符串时等价于 {@link #queryAll}。</p>
+     *
+     * @param entityClass  实体类
+     * @param whereSection WHERE 子句（不含 WHERE 关键字），例如 {@code "status = ?"}
+     * @param params       参数列表
+     * @param <T>          实体类型
+     * @return 实体列表，不存在时返回空 List
+     */
+    public <T> List<T> queryList(Class<T> entityClass, String whereSection, Object... params) {
+        TableInfo tableInfo = EntityParser.parse(entityClass);
+        IBeanToSelectHandler handler = requireSelectHandler();
+        String sql;
+        Object[] args;
+        if (whereSection == null || whereSection.trim().isEmpty()) {
+            sql = handler.buildSelectAllSql(tableInfo);
+            args = null;
+        } else {
+            sql = handler.buildSelectAllSql(tableInfo) + " WHERE " + whereSection;
+            args = params.length > 0 ? params : null;
+        }
+        return query(sql, args, Handlers.beanList(jdbcTemplate, entityClass));
     }
 
 }

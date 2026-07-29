@@ -41,6 +41,14 @@ public class JdbcTemplate extends DbTemplate {
     private Supplier<IBeanToInsertHandler> beanToInsertHandlerSupplier;
     /** UPDATE 实体处理器（由各数据库方言模块注入 Supplier） */
     private Supplier<IBeanToUpdateHandler> beanToUpdateHandlerSupplier;
+    /** 删除表的处理器 */
+    private TableDropHandler tableDropHandler;
+    /** 截断表的处理器 */
+    private TableTruncateHandler tableTruncateHandler;
+    /** 删除实体数据的处理器 */
+    private IDeleteHandler deleteHandler;
+    /** SELECT 实体处理器（由各数据库方言模块注入 Supplier） */
+    private Supplier<IBeanToSelectHandler> beanToSelectHandlerSupplier;
 
     public JdbcTemplate(HikariConfig config) {
         this(new HikariDataSource(config));
@@ -140,6 +148,79 @@ public class JdbcTemplate extends DbTemplate {
     /** 清空表结构缓存，下次调用 checkTable 时会重新加载 */
     public void clearTableCache() {
         this.tableCache = null;
+    }
+
+    // ===== Drop / Truncate / Delete 便捷方法 =====
+
+    /**
+     * 删除表（基于实体类）
+     */
+    public void dropTable(Class<?> cls) {
+        TableInfo tableInfo = EntityParser.parse(cls);
+        dropTable(tableInfo);
+    }
+
+    /**
+     * 删除表（基于 TableInfo）
+     */
+    public void dropTable(TableInfo tableInfo) {
+        if (tableDropHandler != null) {
+            tableDropHandler.doAction(this, tableInfo);
+            clearTableCache();
+        }
+    }
+
+    /**
+     * 截断表（基于实体类）
+     */
+    public void truncateTable(Class<?> cls) {
+        TableInfo tableInfo = EntityParser.parse(cls);
+        truncateTable(tableInfo);
+    }
+
+    /**
+     * 截断表（基于 TableInfo）
+     */
+    public void truncateTable(TableInfo tableInfo) {
+        if (tableTruncateHandler != null) {
+            tableTruncateHandler.doAction(this, tableInfo);
+        }
+    }
+
+    /**
+     * 清空表中所有数据（基于实体类）
+     */
+    public void deleteAll(Class<?> cls) {
+        TableInfo tableInfo = EntityParser.parse(cls);
+        deleteAll(tableInfo);
+    }
+
+    /**
+     * 清空表中所有数据（基于 TableInfo）
+     */
+    public void deleteAll(TableInfo tableInfo) {
+        if (deleteHandler != null) {
+            try (QueryRunner qr = new QueryRunner(this)) {
+                qr.update(deleteHandler.buildDeleteAllSql(tableInfo));
+            }
+        }
+    }
+
+    /**
+     * 根据主键删除单个实体
+     *
+     * @param bean 实体对象（需包含主键字段值）
+     * @return 影响的行数
+     */
+    public int deleteBean(Object bean) {
+        if (deleteHandler == null) {
+            throw new UnsupportedOperationException("未注册 deleteHandler");
+        }
+        try (QueryRunner qr = new QueryRunner(this)) {
+            return qr.update(
+                    deleteHandler.buildDeleteByIdSql(bean),
+                    deleteHandler.buildDeleteByIdParams(bean));
+        }
     }
 
 }
