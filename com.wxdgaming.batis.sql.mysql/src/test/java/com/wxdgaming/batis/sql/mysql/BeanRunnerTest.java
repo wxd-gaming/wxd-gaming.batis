@@ -1,5 +1,6 @@
 package com.wxdgaming.batis.sql.mysql;
 
+import com.wxdgaming.batis.sql.BeanRunner;
 import com.wxdgaming.batis.sql.Handlers;
 import com.wxdgaming.batis.sql.JdbcTemplate;
 import com.wxdgaming.batis.sql.QueryRunner;
@@ -18,17 +19,17 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Bean CRUD 快捷操作集成测试
- * <p>测试 {@link QueryRunner#insertBean(Object)}、
- * {@link QueryRunner#updateBean(Object)} 以及
+ * <p>测试 {@link BeanRunner#insertBean(Object)}、
+ * {@link BeanRunner#updateBean(Object)} 以及
  * {@link Handlers#bean(JdbcTemplate, Class)}} /
  * {@link Handlers#beanList(JdbcTemplate, Class)} 查询。</p>
  *
  * @author wxd-gaming(無心道, 15388152619)
  */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
-class BeanCrudTest {
+class BeanRunnerTest {
 
-    static final Logger log = LoggerFactory.getLogger(BeanCrudTest.class);
+    static final Logger log = LoggerFactory.getLogger(BeanRunnerTest.class);
     static final String TABLE_NAME = "t_order";
 
     static MysqlTemplate template;
@@ -64,7 +65,7 @@ class BeanCrudTest {
     @Test
     @Order(1)
     void testInsertBean() {
-        try (var qr = new QueryRunner(template)) {
+        try (var br = new BeanRunner(template)) {
             // ===== 构造订单 =====
             OrderEntity order = new OrderEntity();
             order.setTitle("测试商品A");
@@ -75,7 +76,7 @@ class BeanCrudTest {
             order.setTotalAmount(new BigDecimal("10.00"));
 
             // ===== 执行插入 =====
-            Number genId = qr.insertBean(order);
+            Number genId = br.insertBean(order);
             assertNotNull(genId, "自增主键不应为 null");
             assertTrue(genId.longValue() > 0, "自增主键应 > 0");
 
@@ -90,14 +91,14 @@ class BeanCrudTest {
     @Test
     @Order(2)
     void testQueryByBean() {
-        try (var qr = new QueryRunner(template)) {
+        try (var br = new BeanRunner(template)) {
             // ===== 先插入一条 =====
             OrderEntity order = buildSampleOrder("查询Bean测试", 3, 1000, false, new BigDecimal("30.00"));
-            qr.insertBean(order);
+            br.insertBean(order);
             long insertedId = order.getId();
 
             // ===== 使用 queryById 查询 =====
-            OrderEntity result = qr.queryById(OrderEntity.class, insertedId);
+            OrderEntity result = br.queryById(OrderEntity.class, insertedId);
 
             assertNotNull(result, "bean 查询应返回对象");
             assertEquals(insertedId, result.getId());
@@ -115,19 +116,19 @@ class BeanCrudTest {
     @Test
     @Order(3)
     void testQueryBeanList() {
-        try (var qr = new QueryRunner(template)) {
+        try (var br = new BeanRunner(template)) {
             // ===== 批量插入 3 条 =====
             List<OrderEntity> inserted = new ArrayList<>();
             for (int i = 1; i <= 3; i++) {
                 OrderEntity order = buildSampleOrder(
                         "批量商品" + i, i, i * 100, i % 2 == 0,
                         new BigDecimal(String.format("%.2f", i * 1.5)));
-                qr.insertBean(order);
+                br.insertBean(order);
                 inserted.add(order);
             }
 
             // ===== 使用 queryAll 查询全部 =====
-            List<OrderEntity> list = qr.queryAll(OrderEntity.class);
+            List<OrderEntity> list = br.queryAll(OrderEntity.class);
 
             assertNotNull(list);
             assertEquals(3, list.size(), "应查到 3 条记录");
@@ -154,10 +155,10 @@ class BeanCrudTest {
     @Test
     @Order(4)
     void testUpdateBean() {
-        try (var qr = new QueryRunner(template)) {
+        try (var br = template.beanRunner()) {
             // ===== 先插入 =====
             OrderEntity order = buildSampleOrder("更新前", 1, 200, false, new BigDecimal("2.00"));
-            qr.insertBean(order);
+            br.insertBean(order);
             long insertedId = order.getId();
 
             // ===== 修改实体部分字段，执行 updateBean =====
@@ -167,11 +168,11 @@ class BeanCrudTest {
             order.setPaid(true);
             order.setTotalAmount(new BigDecimal("49.95"));
 
-            int affected = qr.updateBean(order);
+            int affected = br.updateBean(order);
             assertEquals(1, affected, "更新应影响 1 行");
 
             // ===== 回查验证 =====
-            OrderEntity after = qr.queryById(OrderEntity.class, insertedId);
+            OrderEntity after = br.queryById(OrderEntity.class, insertedId);
             assertNotNull(after);
             assertEquals("更新后商品", after.getTitle());
             assertEquals(5, after.getQuantity());
@@ -187,15 +188,15 @@ class BeanCrudTest {
     @Order(5)
     void testBeanLifecycle() {
         // 完整的 bean 生命周期：插入 → 查询 → 更新 → 查询 → 删除
-        try (var qr = new QueryRunner(template)) {
+        try (var br = template.beanRunner()) {
             // ===== 1. 插入 =====
             OrderEntity order = buildSampleOrder("生命周期测试", 10, 888, false, new BigDecimal("88.80"));
-            qr.insertBean(order);
+            br.insertBean(order);
             long id = order.getId();
             assertTrue(id > 0, "自增主键应 > 0");
 
             // ===== 2. 查询 =====
-            OrderEntity queried = qr.queryById(OrderEntity.class, id);
+            OrderEntity queried = br.queryById(OrderEntity.class, id);
             assertNotNull(queried);
             assertEquals("生命周期测试", queried.getTitle());
             assertEquals(10, queried.getQuantity());
@@ -203,20 +204,25 @@ class BeanCrudTest {
             // ===== 3. 更新 =====
             queried.setTitle("已更新-生命周期");
             queried.setPaid(true);
-            int updated = qr.updateBean(queried);
+            int updated = br.updateBean(queried);
             assertEquals(1, updated);
 
             // ===== 4. 回查 =====
-            OrderEntity afterUpdate = qr.queryById(OrderEntity.class, id);
+            OrderEntity afterUpdate = br.queryById(OrderEntity.class, id);
             assertNotNull(afterUpdate);
             assertEquals("已更新-生命周期", afterUpdate.getTitle());
             assertTrue(afterUpdate.isPaid());
 
+            List<OrderEntity> orderEntities = br.queryAll(OrderEntity.class);
+            for (OrderEntity orderEntity : orderEntities) {
+                log.info("Bean 生命周期测试结果: {}", orderEntity);
+            }
+
             // ===== 5. 删除 =====
-            int deleted = template.deleteBean(queried);
+            int deleted = br.deleteBean(queried);
             assertEquals(1, deleted);
 
-            Number count = (Number) qr.query(
+            Number count = (Number) br.getQueryRunner().query(
                     "SELECT COUNT(*) FROM `" + TABLE_NAME + "`",
                     Handlers.firstCell());
             assertEquals(0, count.intValue(), "删除后 COUNT 应为 0");

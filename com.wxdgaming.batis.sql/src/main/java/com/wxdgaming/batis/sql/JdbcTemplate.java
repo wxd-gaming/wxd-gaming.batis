@@ -106,6 +106,14 @@ public class JdbcTemplate extends DbTemplate {
         this.tableCache = cache;
     }
 
+    public QueryRunner queryRunner() {
+        return new QueryRunner(this);
+    }
+
+    public BeanRunner beanRunner() {
+        return new BeanRunner(this);
+    }
+
     /**
      * 检查并同步表结构
      * <p>先解析实体类得到 {@link TableInfo}，再委托给 {@link #checkTable(TableInfo)}</p>
@@ -184,42 +192,6 @@ public class JdbcTemplate extends DbTemplate {
     public void truncateTable(TableInfo tableInfo) {
         if (tableTruncateHandler != null) {
             tableTruncateHandler.doAction(this, tableInfo);
-        }
-    }
-
-    /**
-     * 清空表中所有数据（基于实体类）
-     */
-    public void deleteAll(Class<?> cls) {
-        TableInfo tableInfo = EntityParser.parse(cls);
-        deleteAll(tableInfo);
-    }
-
-    /**
-     * 清空表中所有数据（基于 TableInfo）
-     */
-    public void deleteAll(TableInfo tableInfo) {
-        if (deleteHandler != null) {
-            try (QueryRunner qr = new QueryRunner(this)) {
-                qr.update(deleteHandler.buildDeleteAllSql(tableInfo));
-            }
-        }
-    }
-
-    /**
-     * 根据主键删除单个实体
-     *
-     * @param bean 实体对象（需包含主键字段值）
-     * @return 影响的行数
-     */
-    public int deleteBean(Object bean) {
-        if (deleteHandler == null) {
-            throw new UnsupportedOperationException("未注册 deleteHandler");
-        }
-        try (QueryRunner qr = new QueryRunner(this)) {
-            return qr.update(
-                    deleteHandler.buildDeleteByIdSql(bean),
-                    deleteHandler.buildDeleteByIdParams(bean));
         }
     }
 

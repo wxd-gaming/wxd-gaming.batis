@@ -27,9 +27,9 @@ import java.util.Map;
  * @author wxd-gaming(無心道, 15388152619)
  */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
-class MysqlTemplateTest {
+class QueryRunnerTest {
 
-    static final Logger log = LoggerFactory.getLogger(MysqlTemplateTest.class);
+    static final Logger log = LoggerFactory.getLogger(QueryRunnerTest.class);
 
     static MysqlTemplate template;
     static final String TABLE_NAME = "t_role";
