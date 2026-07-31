@@ -3,7 +3,8 @@ package com.wxdgaming.batis.sql.mysql;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.TableInfo;
 import com.wxdgaming.batis.parser.EntityParser;
-import com.wxdgaming.batis.sql.IDeleteHandler;
+import com.wxdgaming.batis.sql.BeanToDeleteHandler;
+import com.wxdgaming.batis.sql.BeanValueUtil;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
@@ -17,7 +18,7 @@ import java.util.List;
  * @version 2026-07-28
  **/
 @Slf4j
-public class MysqlDeleteHandler implements IDeleteHandler {
+public class MysqlBeanToDeleteHandler implements BeanToDeleteHandler {
 
     @Override
     public String buildDeleteByIdSql(Object bean) {

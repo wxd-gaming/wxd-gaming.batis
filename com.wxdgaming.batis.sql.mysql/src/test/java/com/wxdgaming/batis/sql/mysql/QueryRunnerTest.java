@@ -9,7 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.alibaba.fastjson.JSONObject;
-import com.wxdgaming.batis.sql.Handlers;
+import com.wxdgaming.batis.sql.ResultSetHandlers;
 import com.wxdgaming.batis.sql.QueryRunner;
 
 import java.math.BigDecimal;
@@ -219,7 +219,7 @@ class QueryRunnerTest {
             Number idNum = (Number) qr.query(
                     "SELECT `id` FROM `" + TABLE_NAME + "` WHERE `account` = ?",
                     new Object[]{role.getAccount()},
-                    Handlers.firstCell());
+                    ResultSetHandlers.firstCell());
             Assertions.assertNotNull(idNum, "应能查到自增 id");
             long id = idNum.longValue();
             Assertions.assertTrue(id > 0, "自增 id 应 > 0");
@@ -228,7 +228,7 @@ class QueryRunnerTest {
             RoleEntity byBean = qr.query(
                     "SELECT * FROM `" + TABLE_NAME + "` WHERE `id` = ?",
                     new Object[]{id},
-                    Handlers.bean(RoleEntity.class));
+                    ResultSetHandlers.bean(template, RoleEntity.class));
             Assertions.assertNotNull(byBean, "bean 查询应返回对象");
             Assertions.assertEquals(id, byBean.getId());
             Assertions.assertEquals(role.getName(), byBean.getName());
@@ -244,7 +244,7 @@ class QueryRunnerTest {
             JSONObject row = qr.query(
                     "SELECT * FROM `" + TABLE_NAME + "` WHERE `id` = ?",
                     new Object[]{id},
-                    Handlers.row());
+                    ResultSetHandlers.row());
             Assertions.assertNotNull(row, "row 查询应返回 JSONObject");
             Assertions.assertEquals(role.getName(), row.getString("name"));
             Assertions.assertEquals(Integer.valueOf(role.getLevel()), row.getInteger("level"));
@@ -260,7 +260,7 @@ class QueryRunnerTest {
             // ===== 4. 查询方式三：JSONObject 多行（list） =====
             List<JSONObject> rows = qr.query(
                     "SELECT * FROM `" + TABLE_NAME + "` ORDER BY `id`",
-                    Handlers.list());
+                    ResultSetHandlers.list());
             Assertions.assertNotNull(rows);
             Assertions.assertEquals(1, rows.size(), "list 应只有 1 行");
             JSONObject first = rows.get(0);
@@ -271,7 +271,7 @@ class QueryRunnerTest {
             // ===== 5. 列表 Bean 映射（beanList） =====
             List<RoleEntity> beanList = qr.query(
                     "SELECT * FROM `" + TABLE_NAME + "` ORDER BY `id`",
-                    Handlers.beanList(RoleEntity.class));
+                    ResultSetHandlers.beanList(template, RoleEntity.class));
             Assertions.assertEquals(1, beanList.size(), "beanList 应只有 1 条");
             Assertions.assertEquals(role.getAccount(), beanList.get(0).getAccount());
 
@@ -283,7 +283,7 @@ class QueryRunnerTest {
             RoleEntity after = qr.query(
                     "SELECT * FROM `" + TABLE_NAME + "` WHERE `id` = ?",
                     new Object[]{id},
-                    Handlers.bean(RoleEntity.class));
+                    ResultSetHandlers.bean(template, RoleEntity.class));
             Assertions.assertNotNull(after);
             Assertions.assertEquals(9999, after.getScore(), "score 更新后应生效");
             Assertions.assertTrue(after.isBanned(), "banned 更新后应生效");
@@ -295,7 +295,7 @@ class QueryRunnerTest {
             Assertions.assertEquals(1, deleted, "删除应影响 1 行");
             Number remain = (Number) qr.query(
                     "SELECT COUNT(*) FROM `" + TABLE_NAME + "`",
-                    Handlers.firstCell());
+                    ResultSetHandlers.firstCell());
             Assertions.assertEquals(0, remain.intValue(), "删除后 COUNT 应为 0");
 
             log.info("RoleEntity 写入 + 多种查询（bean / row / list / beanList）+ 更新 + 删除 全流程测试通过");

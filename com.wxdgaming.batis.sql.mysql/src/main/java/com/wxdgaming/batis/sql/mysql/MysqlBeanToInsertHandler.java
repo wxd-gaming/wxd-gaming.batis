@@ -4,7 +4,8 @@ import com.wxdgaming.batis.annotation.GenerationType;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.TableInfo;
 import com.wxdgaming.batis.parser.EntityParser;
-import com.wxdgaming.batis.sql.IBeanToInsertHandler;
+import com.wxdgaming.batis.sql.BeanToInsertHandler;
+import com.wxdgaming.batis.sql.BeanValueUtil;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
@@ -20,7 +21,7 @@ import java.util.stream.Collectors;
  * @version 2026-07-28
  **/
 @Slf4j
-public class MysqlBeanToInsertHandler implements IBeanToInsertHandler {
+public class MysqlBeanToInsertHandler implements BeanToInsertHandler {
 
     @Override
     public String buildInsertSql(Object bean) {

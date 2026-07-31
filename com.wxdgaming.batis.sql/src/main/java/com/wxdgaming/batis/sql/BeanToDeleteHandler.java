@@ -9,7 +9,7 @@ import com.wxdgaming.batis.model.TableInfo;
  * @author wxd-gaming(無心道, 15388152619)
  * @version 2026-07-28
  **/
-public interface IDeleteHandler {
+public interface BeanToDeleteHandler {
 
     /** 构建 DELETE 语句（按当前 bean 的主键值定位删除） */
     String buildDeleteByIdSql(Object bean);

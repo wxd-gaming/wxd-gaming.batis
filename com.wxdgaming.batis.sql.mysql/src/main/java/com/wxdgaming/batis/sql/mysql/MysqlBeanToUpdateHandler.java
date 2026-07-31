@@ -3,7 +3,8 @@ package com.wxdgaming.batis.sql.mysql;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.TableInfo;
 import com.wxdgaming.batis.parser.EntityParser;
-import com.wxdgaming.batis.sql.IBeanToUpdateHandler;
+import com.wxdgaming.batis.sql.BeanToUpdateHandler;
+import com.wxdgaming.batis.sql.BeanValueUtil;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
@@ -18,7 +19,7 @@ import java.util.List;
  * @version 2026-07-28
  **/
 @Slf4j
-public class MysqlBeanToUpdateHandler implements IBeanToUpdateHandler {
+public class MysqlBeanToUpdateHandler implements BeanToUpdateHandler {
 
     @Override
     public String buildUpdateSql(Object bean) {

@@ -3,7 +3,7 @@ package com.wxdgaming.batis.sql.mysql;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.IndexInfo;
 import com.wxdgaming.batis.model.TableInfo;
-import com.wxdgaming.batis.sql.IDbMetaProvider;
+import com.wxdgaming.batis.sql.DbMetaHandler;
 import com.wxdgaming.batis.sql.JdbcTemplate;
 import com.wxdgaming.batis.sql.QueryRunner;
 import com.wxdgaming.batis.sql.ResultSetHandler;
@@ -13,13 +13,13 @@ import java.util.LinkedHashMap;
 import java.util.List;
 
 /**
- * MySQL 数据库元数据提供者
+ * MySQL 数据库元数据处理器
  * <p>基于 information_schema 查询表结构、列信息、索引信息</p>
  *
  * @author wxd-gaming(無心道, 15388152619)
  * @version 2026-07-24
  **/
-public class MysqlDbMetaProvider implements IDbMetaProvider {
+public class MysqlDbMetaHandler implements DbMetaHandler {
 
     @Override
     public String getCatalog(JdbcTemplate jdbcTemplate) {

@@ -7,13 +7,13 @@ import com.wxdgaming.batis.model.TableInfo;
 import java.util.List;
 
 /**
- * 数据库元数据提供者接口
+ * 数据库元数据处理器接口
  * <p>各数据库方言通过实现此接口提供表结构查询的 SQL 和 ResultSet 解析逻辑</p>
  *
  * @author wxd-gaming(無心道, 15388152619)
  * @version 2026-07-24
  **/
-public interface IDbMetaProvider {
+public interface DbMetaHandler {
 
     /** 获取当前数据库 catalog（schema）名 */
     String getCatalog(JdbcTemplate jdbcTemplate);

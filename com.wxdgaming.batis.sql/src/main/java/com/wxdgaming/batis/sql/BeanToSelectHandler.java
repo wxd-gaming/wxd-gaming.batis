@@ -9,7 +9,7 @@ import com.wxdgaming.batis.model.TableInfo;
  * @author wxd-gaming(無心道, 15388152619)
  * @version 2026-07-28
  **/
-public interface IBeanToSelectHandler {
+public interface BeanToSelectHandler {
 
     /** 构建按主键查询的 SQL（形如 SELECT * FROM `table` WHERE `pk` = ?） */
     String buildSelectByIdSql(TableInfo tableInfo);

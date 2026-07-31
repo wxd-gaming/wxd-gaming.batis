@@ -1,7 +1,7 @@
 package com.wxdgaming.batis.sql.mysql;
 
 import com.wxdgaming.batis.sql.BeanRunner;
-import com.wxdgaming.batis.sql.Handlers;
+import com.wxdgaming.batis.sql.ResultSetHandlers;
 import com.wxdgaming.batis.sql.JdbcTemplate;
 import com.wxdgaming.batis.sql.QueryRunner;
 import com.zaxxer.hikari.HikariConfig;
@@ -21,8 +21,8 @@ import static org.junit.jupiter.api.Assertions.*;
  * Bean CRUD 快捷操作集成测试
  * <p>测试 {@link BeanRunner#insertBean(Object)}、
  * {@link BeanRunner#updateBean(Object)} 以及
- * {@link Handlers#bean(JdbcTemplate, Class)}} /
- * {@link Handlers#beanList(JdbcTemplate, Class)} 查询。</p>
+ * {@link ResultSetHandlers#bean(JdbcTemplate, Class)}} /
+ * {@link ResultSetHandlers#beanList(JdbcTemplate, Class)} 查询。</p>
  *
  * @author wxd-gaming(無心道, 15388152619)
  */
@@ -224,7 +224,7 @@ class BeanRunnerTest {
 
             Number count = (Number) br.getQueryRunner().query(
                     "SELECT COUNT(*) FROM `" + TABLE_NAME + "`",
-                    Handlers.firstCell());
+                    ResultSetHandlers.firstCell());
             assertEquals(0, count.intValue(), "删除后 COUNT 应为 0");
 
             log.info("Bean 完整生命周期测试通过");

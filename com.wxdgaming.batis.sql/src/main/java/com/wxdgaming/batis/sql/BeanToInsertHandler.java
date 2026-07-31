@@ -9,7 +9,7 @@ import com.wxdgaming.batis.model.ColumnInfo;
  * @author wxd-gaming(無心道, 15388152619)
  * @version 2026-07-28
  **/
-public interface IBeanToInsertHandler {
+public interface BeanToInsertHandler {
 
     /** 构建 INSERT INTO 语句 */
     String buildInsertSql(Object bean);

@@ -15,7 +15,7 @@ import java.util.regex.Pattern;
 
 /**
  * mysql JdbcTemplate
- * <p>自动装配 MysqlDbMetaProvider、MysqlTableCreateHandler、MysqlTableAlterHandler</p>
+ * <p>自动装配 MysqlDbMetaHandler、MysqlTableCreateHandler、MysqlTableAlterHandler</p>
  * <p>构造时自动检查目标数据库是否存在，不存在则创建（通过连接 mysql 系统库执行 CREATE DATABASE IF NOT EXISTS）。</p>
  *
  * @author wxd-gaming(無心道, 15388152619)
@@ -38,16 +38,16 @@ public class MysqlTemplate extends JdbcTemplate {
     }
 
     private void initDefaults() {
-        setDbMetaProvider(new MysqlDbMetaProvider());
+        setDbMetaProvider(new MysqlDbMetaHandler());
         setTableCreateHandler(new MysqlTableCreateHandler());
         setTableAlterHandler(new MysqlTableAlterHandler());
-        setSqlDbToBeanHandlerSupplier(MysqlToBeanHandler::new);
-        setBeanToInsertHandlerSupplier(MysqlBeanToInsertHandler::new);
-        setBeanToUpdateHandlerSupplier(MysqlBeanToUpdateHandler::new);
+        setSqlDbToBeanHandler(new MysqlDbToBeanHandler());
+        setBeanToInsertHandler(new MysqlBeanToInsertHandler());
+        setBeanToUpdateHandler(new MysqlBeanToUpdateHandler());
         setTableDropHandler(new MysqlTableDropHandler());
         setTableTruncateHandler(new MysqlTableTruncateHandler());
-        setDeleteHandler(new MysqlDeleteHandler());
-        setBeanToSelectHandlerSupplier(MysqlBeanToSelectHandler::new);
+        setDeleteHandler(new MysqlBeanToDeleteHandler());
+        setBeanToSelectHandler(new MysqlBeanToSelectHandler());
     }
 
     /**

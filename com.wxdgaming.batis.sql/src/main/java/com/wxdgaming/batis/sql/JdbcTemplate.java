@@ -13,7 +13,6 @@ import lombok.Setter;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.function.Supplier;
 
 /**
  * jdbc 操作
@@ -29,26 +28,26 @@ public class JdbcTemplate extends DbTemplate {
 
     /** 表结构缓存，key 为小写表名 */
     private HashMap<String, TableInfo> tableCache;
-    /** 数据库元数据提供者（方言差异在此注入） */
-    private IDbMetaProvider dbMetaProvider;
+    /** 数据库元数据处理器（方言差异在此注入） */
+    private DbMetaHandler dbMetaProvider;
     /** 创建表的处理器 */
     private TableCreateHandler tableCreateHandler;
     /** 修改表的处理器 */
     private TableAlterHandler tableAlterHandler;
-    /** 读取实体的处理器（SELECT 行映射，由各数据库方言模块注入 Supplier） */
-    private Supplier<SqlDbToBeanHandler> sqlDbToBeanHandlerSupplier;
-    /** INSERT 实体处理器（由各数据库方言模块注入 Supplier） */
-    private Supplier<IBeanToInsertHandler> beanToInsertHandlerSupplier;
-    /** UPDATE 实体处理器（由各数据库方言模块注入 Supplier） */
-    private Supplier<IBeanToUpdateHandler> beanToUpdateHandlerSupplier;
+    /** 读取实体的处理器（SELECT 行映射，由各数据库方言模块注入） */
+    private SqlDbToBeanHandler sqlDbToBeanHandler;
+    /** INSERT 实体处理器（由各数据库方言模块注入） */
+    private BeanToInsertHandler beanToInsertHandler;
+    /** UPDATE 实体处理器（由各数据库方言模块注入） */
+    private BeanToUpdateHandler beanToUpdateHandler;
     /** 删除表的处理器 */
     private TableDropHandler tableDropHandler;
     /** 截断表的处理器 */
     private TableTruncateHandler tableTruncateHandler;
     /** 删除实体数据的处理器 */
-    private IDeleteHandler deleteHandler;
-    /** SELECT 实体处理器（由各数据库方言模块注入 Supplier） */
-    private Supplier<IBeanToSelectHandler> beanToSelectHandlerSupplier;
+    private BeanToDeleteHandler deleteHandler;
+    /** SELECT 实体处理器（由各数据库方言模块注入） */
+    private BeanToSelectHandler beanToSelectHandler;
 
     public JdbcTemplate(HikariConfig config) {
         this(new HikariDataSource(config));

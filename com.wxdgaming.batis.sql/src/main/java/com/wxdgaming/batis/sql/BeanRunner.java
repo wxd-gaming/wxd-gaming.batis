@@ -13,7 +13,6 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.function.Supplier;
 
 /**
  * Bean CRUD 操作器，封装实体级别的插入、查询、更新、删除操作
@@ -54,24 +53,24 @@ public class BeanRunner implements AutoCloseable {
         }
     }
 
-    // ===== 实体插入/更新（委托给 IBeanToInsertHandler / IBeanToUpdateHandler） =====
+    // ===== 实体插入/更新（委托给 BeanToInsertHandler / BeanToUpdateHandler） =====
 
-    private IBeanToInsertHandler requireInsertHandler() {
-        Supplier<IBeanToInsertHandler> supplier = jdbcTemplate.getBeanToInsertHandlerSupplier();
-        if (supplier == null) {
+    private BeanToInsertHandler requireInsertHandler() {
+        BeanToInsertHandler handler = jdbcTemplate.getBeanToInsertHandler();
+        if (handler == null) {
             throw new UnsupportedOperationException(
-                    "未注册 beanToInsertHandlerSupplier，请调用 JdbcTemplate#setBeanToInsertHandlerSupplier()");
+                    "未注册 beanToInsertHandler，请调用 JdbcTemplate#setBeanToInsertHandler()");
         }
-        return supplier.get();
+        return handler;
     }
 
-    private IBeanToUpdateHandler requireUpdateHandler() {
-        Supplier<IBeanToUpdateHandler> supplier = jdbcTemplate.getBeanToUpdateHandlerSupplier();
-        if (supplier == null) {
+    private BeanToUpdateHandler requireUpdateHandler() {
+        BeanToUpdateHandler handler = jdbcTemplate.getBeanToUpdateHandler();
+        if (handler == null) {
             throw new UnsupportedOperationException(
-                    "未注册 beanToUpdateHandlerSupplier，请调用 JdbcTemplate#setBeanToUpdateHandlerSupplier()");
+                    "未注册 beanToUpdateHandler，请调用 JdbcTemplate#setBeanToUpdateHandler()");
         }
-        return supplier.get();
+        return handler;
     }
 
     /**
@@ -81,7 +80,7 @@ public class BeanRunner implements AutoCloseable {
      * @return 自增主键，无自增列时返回 null
      */
     public Number insertBean(Object bean) {
-        IBeanToInsertHandler handler = requireInsertHandler();
+        BeanToInsertHandler handler = requireInsertHandler();
         Number genId = queryRunner.executeInsert(handler.buildInsertSql(bean), handler.buildInsertParams(bean));
         handler.writeGeneratedKey(bean, genId);
         return genId;
@@ -94,7 +93,7 @@ public class BeanRunner implements AutoCloseable {
      * @return 影响的行数
      */
     public int updateBean(Object bean) {
-        IBeanToUpdateHandler handler = requireUpdateHandler();
+        BeanToUpdateHandler handler = requireUpdateHandler();
         return queryRunner.update(handler.buildUpdateSql(bean), handler.buildUpdateParams(bean));
     }
 
@@ -108,20 +107,19 @@ public class BeanRunner implements AutoCloseable {
     public int[] insertBeanList(List<?> beans) {
         if (beans == null || beans.isEmpty()) return new int[0];
 
-        Supplier<IBeanToInsertHandler> supplier = jdbcTemplate.getBeanToInsertHandlerSupplier();
-        if (supplier == null) {
+        BeanToInsertHandler handler = jdbcTemplate.getBeanToInsertHandler();
+        if (handler == null) {
             throw new UnsupportedOperationException(
-                    "未注册 beanToInsertHandlerSupplier，请调用 JdbcTemplate#setBeanToInsertHandlerSupplier()");
+                    "未注册 beanToInsertHandler，请调用 JdbcTemplate#setBeanToInsertHandler()");
         }
 
         Object firstBean = beans.getFirst();
-        IBeanToInsertHandler template = supplier.get();
-        String sql = template.buildInsertSql(firstBean);
-        ColumnInfo identityColumn = template.getIdentityColumn(firstBean);
+        String sql = handler.buildInsertSql(firstBean);
+        ColumnInfo identityColumn = handler.getIdentityColumn(firstBean);
 
         List<Object[]> batchArgs = new ArrayList<>(beans.size());
         for (Object bean : beans) {
-            batchArgs.add(supplier.get().buildInsertParams(bean));
+            batchArgs.add(handler.buildInsertParams(bean));
         }
 
         try {
@@ -144,7 +142,7 @@ public class BeanRunner implements AutoCloseable {
                             Object val = rs.getObject(1);
                             Number genId = val instanceof Number ? (Number) val : null;
                             if (genId != null) {
-                                template.writeGeneratedKey(beans.get(idx), genId);
+                                handler.writeGeneratedKey(beans.get(idx), genId);
                             }
                             idx++;
                         }
@@ -167,17 +165,16 @@ public class BeanRunner implements AutoCloseable {
     public int[] updateBeanList(List<?> beans) {
         if (beans == null || beans.isEmpty()) return new int[0];
 
-        Supplier<IBeanToUpdateHandler> supplier = jdbcTemplate.getBeanToUpdateHandlerSupplier();
-        if (supplier == null) {
+        BeanToUpdateHandler handler = jdbcTemplate.getBeanToUpdateHandler();
+        if (handler == null) {
             throw new UnsupportedOperationException(
-                    "未注册 beanToUpdateHandlerSupplier，请调用 JdbcTemplate#setBeanToUpdateHandlerSupplier()");
+                    "未注册 beanToUpdateHandler，请调用 JdbcTemplate#setBeanToUpdateHandler()");
         }
 
         String sql = null;
         List<Object[]> batchArgs = new ArrayList<>(beans.size());
 
         for (Object bean : beans) {
-            IBeanToUpdateHandler handler = supplier.get();
             if (sql == null) {
                 sql = handler.buildUpdateSql(bean);
             }
@@ -187,15 +184,15 @@ public class BeanRunner implements AutoCloseable {
         return queryRunner.executeBatch(sql, batchArgs);
     }
 
-    // ===== SELECT 实体便捷方法（委托给 IBeanToSelectHandler） =====
+    // ===== SELECT 实体便捷方法（委托给 BeanToSelectHandler） =====
 
-    private IBeanToSelectHandler requireSelectHandler() {
-        Supplier<IBeanToSelectHandler> supplier = jdbcTemplate.getBeanToSelectHandlerSupplier();
-        if (supplier == null) {
+    private BeanToSelectHandler requireSelectHandler() {
+        BeanToSelectHandler handler = jdbcTemplate.getBeanToSelectHandler();
+        if (handler == null) {
             throw new UnsupportedOperationException(
-                    "未注册 beanToSelectHandlerSupplier，请调用 JdbcTemplate#setBeanToSelectHandlerSupplier()");
+                    "未注册 beanToSelectHandler，请调用 JdbcTemplate#setBeanToSelectHandler()");
         }
-        return supplier.get();
+        return handler;
     }
 
     /**
@@ -209,7 +206,7 @@ public class BeanRunner implements AutoCloseable {
      */
     public <T> T queryById(Class<T> entityClass, Object id) {
         TableInfo tableInfo = EntityParser.parse(entityClass);
-        IBeanToSelectHandler handler = requireSelectHandler();
+        BeanToSelectHandler handler = requireSelectHandler();
         String sql = handler.buildSelectByIdSql(tableInfo);
 
         int pkCount = 0;
@@ -218,7 +215,7 @@ public class BeanRunner implements AutoCloseable {
         }
         Object[] params = pkCount == 1 ? new Object[]{id} : (Object[]) id;
 
-        return queryRunner.query(sql, params, Handlers.bean(jdbcTemplate, entityClass));
+        return queryRunner.query(sql, params, ResultSetHandlers.bean(jdbcTemplate, entityClass));
     }
 
     /**
@@ -230,9 +227,9 @@ public class BeanRunner implements AutoCloseable {
      */
     public <T> List<T> queryAll(Class<T> entityClass) {
         TableInfo tableInfo = EntityParser.parse(entityClass);
-        IBeanToSelectHandler handler = requireSelectHandler();
+        BeanToSelectHandler handler = requireSelectHandler();
         String sql = handler.buildSelectAllSql(tableInfo);
-        return queryRunner.query(sql, Handlers.beanList(jdbcTemplate, entityClass));
+        return queryRunner.query(sql, ResultSetHandlers.beanList(jdbcTemplate, entityClass));
     }
 
     /**
@@ -247,7 +244,7 @@ public class BeanRunner implements AutoCloseable {
      */
     public <T> T queryOne(Class<T> entityClass, String whereSection, Object... params) {
         TableInfo tableInfo = EntityParser.parse(entityClass);
-        IBeanToSelectHandler handler = requireSelectHandler();
+        BeanToSelectHandler handler = requireSelectHandler();
         String sql;
         Object[] args;
         if (whereSection == null || whereSection.trim().isEmpty()) {
@@ -257,7 +254,7 @@ public class BeanRunner implements AutoCloseable {
             sql = handler.buildSelectAllSql(tableInfo) + " WHERE " + whereSection;
             args = params.length > 0 ? params : null;
         }
-        return queryRunner.query(sql, args, Handlers.bean(jdbcTemplate, entityClass));
+        return queryRunner.query(sql, args, ResultSetHandlers.bean(jdbcTemplate, entityClass));
     }
 
     /**
@@ -272,7 +269,7 @@ public class BeanRunner implements AutoCloseable {
      */
     public <T> List<T> queryList(Class<T> entityClass, String whereSection, Object... params) {
         TableInfo tableInfo = EntityParser.parse(entityClass);
-        IBeanToSelectHandler handler = requireSelectHandler();
+        BeanToSelectHandler handler = requireSelectHandler();
         String sql;
         Object[] args;
         if (whereSection == null || whereSection.trim().isEmpty()) {
@@ -282,7 +279,7 @@ public class BeanRunner implements AutoCloseable {
             sql = handler.buildSelectAllSql(tableInfo) + " WHERE " + whereSection;
             args = params.length > 0 ? params : null;
         }
-        return queryRunner.query(sql, args, Handlers.beanList(jdbcTemplate, entityClass));
+        return queryRunner.query(sql, args, ResultSetHandlers.beanList(jdbcTemplate, entityClass));
     }
 
     // ===== DELETE =====

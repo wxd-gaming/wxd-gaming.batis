@@ -2,7 +2,7 @@ package com.wxdgaming.batis.sql.mysql;
 
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.TableInfo;
-import com.wxdgaming.batis.sql.IBeanToSelectHandler;
+import com.wxdgaming.batis.sql.BeanToSelectHandler;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -15,7 +15,7 @@ import java.util.List;
  * @author wxd-gaming(無心道, 15388152619)
  * @version 2026-07-28
  **/
-public class MysqlBeanToSelectHandler implements IBeanToSelectHandler {
+public class MysqlBeanToSelectHandler implements BeanToSelectHandler {
 
     @Override
     public String buildSelectByIdSql(TableInfo tableInfo) {

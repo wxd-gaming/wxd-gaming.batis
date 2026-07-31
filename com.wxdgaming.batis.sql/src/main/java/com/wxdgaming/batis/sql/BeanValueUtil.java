@@ -1,4 +1,4 @@
-package com.wxdgaming.batis.sql.mysql;
+package com.wxdgaming.batis.sql;
 
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.serializer.SerializerFeature;
@@ -16,7 +16,7 @@ import java.time.LocalTime;
 import java.time.OffsetDateTime;
 
 /**
- * Bean ←→ DB 值转换工具，供本包内的 Handler 使用
+ * Bean ←→ DB 值转换工具，供 SQL 模块的 Handler 使用
  *
  * @author wxd-gaming(無心道, 15388152619)
  * @version 2026-07-28
@@ -24,7 +24,7 @@ import java.time.OffsetDateTime;
 public class BeanValueUtil {
 
     /** 从 bean 中读取字段值 */
-    static Object readFieldValue(Object bean, ColumnInfo col) {
+    public static Object readFieldValue(Object bean, ColumnInfo col) {
         Method getter = col.getReadMethod();
         if (getter == null) {
             throw new RuntimeException("实体 " + bean.getClass().getSimpleName()
@@ -38,7 +38,7 @@ public class BeanValueUtil {
     }
 
     /** 将 Java 值转换为数据库可接受的类型 */
-    static Object convertToDbValue(Object value, ColumnInfo col) {
+    public static Object convertToDbValue(Object value, ColumnInfo col) {
         if (value == null) return null;
         StorageMode mode = col.getStorageMode();
         if (mode == StorageMode.JSON) {
@@ -66,7 +66,7 @@ public class BeanValueUtil {
     }
 
     /** 将自增主键 Number 回写到 bean 的指定字段 */
-    static void writeGeneratedKey(Object bean, ColumnInfo col, Number value) {
+    public static void writeGeneratedKey(Object bean, ColumnInfo col, Number value) {
         if (value == null) return;
         Method setter = col.getWriteMethod();
         if (setter == null) {
