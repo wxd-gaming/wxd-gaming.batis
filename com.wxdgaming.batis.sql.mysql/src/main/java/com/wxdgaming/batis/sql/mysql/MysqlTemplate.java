@@ -47,7 +47,7 @@ public class MysqlTemplate extends JdbcTemplate {
         setSqlDbToBeanHandler(new MysqlDbToBeanHandler(valueHandler));
         setBeanToInsertHandler(new MysqlBeanToInsertHandler(valueHandler));
         setBeanToUpdateHandler(new MysqlBeanToUpdateHandler(valueHandler));
-        setDeleteHandler(new MysqlBeanToDeleteHandler(valueHandler));
+        setBeanToDeleteHandler(new MysqlBeanToDeleteHandler(valueHandler));
         setBeanToSelectHandler(new MysqlBeanToSelectHandler());
     }
 

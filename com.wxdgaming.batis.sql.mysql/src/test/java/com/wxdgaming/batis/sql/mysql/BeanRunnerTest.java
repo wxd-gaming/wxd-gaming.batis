@@ -123,9 +123,9 @@ class BeanRunnerTest {
                 OrderEntity order = buildSampleOrder(
                         "批量商品" + i, i, i * 100, i % 2 == 0,
                         new BigDecimal(String.format("%.2f", i * 1.5)));
-                br.insertBean(order);
                 inserted.add(order);
             }
+            br.insertBeanList(inserted);
 
             // ===== 使用 queryAll 查询全部 =====
             List<OrderEntity> list = br.queryAll(OrderEntity.class);

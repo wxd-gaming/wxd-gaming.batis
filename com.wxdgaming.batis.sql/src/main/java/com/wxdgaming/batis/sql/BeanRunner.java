@@ -296,10 +296,10 @@ public class BeanRunner implements AutoCloseable {
      * 清空表中所有数据（基于 TableInfo）
      */
     public void deleteAll(TableInfo tableInfo) {
-        if (jdbcTemplate.getDeleteHandler() == null) {
+        if (jdbcTemplate.getBeanToDeleteHandler() == null) {
             throw new UnsupportedOperationException("未注册 deleteHandler");
         }
-        queryRunner.update(jdbcTemplate.getDeleteHandler().buildDeleteAllSql(tableInfo));
+        queryRunner.update(jdbcTemplate.getBeanToDeleteHandler().buildDeleteAllSql(tableInfo));
     }
 
     /**
@@ -309,12 +309,12 @@ public class BeanRunner implements AutoCloseable {
      * @return 影响的行数
      */
     public int deleteBean(Object bean) {
-        if (jdbcTemplate.getDeleteHandler() == null) {
+        if (jdbcTemplate.getBeanToDeleteHandler() == null) {
             throw new UnsupportedOperationException("未注册 deleteHandler");
         }
         return queryRunner.update(
-                jdbcTemplate.getDeleteHandler().buildDeleteByIdSql(bean),
-                jdbcTemplate.getDeleteHandler().buildDeleteByIdParams(bean)
+                jdbcTemplate.getBeanToDeleteHandler().buildDeleteByIdSql(bean),
+                jdbcTemplate.getBeanToDeleteHandler().buildDeleteByIdParams(bean)
         );
     }
 
