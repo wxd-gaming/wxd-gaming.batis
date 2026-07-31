@@ -38,15 +38,16 @@ public class MysqlTemplate extends JdbcTemplate {
     }
 
     private void initDefaults() {
+        MysqlBeanValueHandler valueHandler = new MysqlBeanValueHandler();
         setDbMetaProvider(new MysqlDbMetaHandler());
         setTableCreateHandler(new MysqlTableCreateHandler());
         setTableAlterHandler(new MysqlTableAlterHandler());
-        setSqlDbToBeanHandler(new MysqlDbToBeanHandler());
-        setBeanToInsertHandler(new MysqlBeanToInsertHandler());
-        setBeanToUpdateHandler(new MysqlBeanToUpdateHandler());
         setTableDropHandler(new MysqlTableDropHandler());
         setTableTruncateHandler(new MysqlTableTruncateHandler());
-        setDeleteHandler(new MysqlBeanToDeleteHandler());
+        setSqlDbToBeanHandler(new MysqlDbToBeanHandler(valueHandler));
+        setBeanToInsertHandler(new MysqlBeanToInsertHandler(valueHandler));
+        setBeanToUpdateHandler(new MysqlBeanToUpdateHandler(valueHandler));
+        setDeleteHandler(new MysqlBeanToDeleteHandler(valueHandler));
         setBeanToSelectHandler(new MysqlBeanToSelectHandler());
     }
 

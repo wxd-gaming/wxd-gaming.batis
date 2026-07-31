@@ -4,7 +4,7 @@ import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.TableInfo;
 import com.wxdgaming.batis.parser.EntityParser;
 import com.wxdgaming.batis.sql.BeanToUpdateHandler;
-import com.wxdgaming.batis.sql.BeanValueUtil;
+import com.wxdgaming.batis.sql.BeanValueHandler;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
@@ -20,6 +20,12 @@ import java.util.List;
  **/
 @Slf4j
 public class MysqlBeanToUpdateHandler implements BeanToUpdateHandler {
+
+    private final BeanValueHandler valueHandler;
+
+    public MysqlBeanToUpdateHandler(BeanValueHandler valueHandler) {
+        this.valueHandler = valueHandler;
+    }
 
     @Override
     public String buildUpdateSql(Object bean) {
@@ -57,8 +63,8 @@ public class MysqlBeanToUpdateHandler implements BeanToUpdateHandler {
         List<Object> whereParams = new ArrayList<>();
 
         for (ColumnInfo col : columns.values()) {
-            Object dbValue = BeanValueUtil.convertToDbValue(
-                    BeanValueUtil.readFieldValue(bean, col), col);
+            Object dbValue = valueHandler.convertToDbValue(
+                    valueHandler.readFieldValue(bean, col), col);
             if (col.isPrimaryKey()) {
                 whereParams.add(dbValue);
             } else {

@@ -34,18 +34,18 @@ public class JdbcTemplate extends DbTemplate {
     private TableCreateHandler tableCreateHandler;
     /** 修改表的处理器 */
     private TableAlterHandler tableAlterHandler;
+    /** 删除表的处理器 */
+    private TableDropHandler tableDropHandler;
+    /** 截断表的处理器 */
+    private TableTruncateHandler tableTruncateHandler;
     /** 读取实体的处理器（SELECT 行映射，由各数据库方言模块注入） */
     private SqlDbToBeanHandler sqlDbToBeanHandler;
     /** INSERT 实体处理器（由各数据库方言模块注入） */
     private BeanToInsertHandler beanToInsertHandler;
     /** UPDATE 实体处理器（由各数据库方言模块注入） */
     private BeanToUpdateHandler beanToUpdateHandler;
-    /** 删除表的处理器 */
-    private TableDropHandler tableDropHandler;
-    /** 截断表的处理器 */
-    private TableTruncateHandler tableTruncateHandler;
     /** 删除实体数据的处理器 */
-    private BeanToDeleteHandler deleteHandler;
+    private BeanToDeleteHandler beanToDeleteHandler;
     /** SELECT 实体处理器（由各数据库方言模块注入） */
     private BeanToSelectHandler beanToSelectHandler;
 

@@ -5,7 +5,7 @@ import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.TableInfo;
 import com.wxdgaming.batis.parser.EntityParser;
 import com.wxdgaming.batis.sql.BeanToInsertHandler;
-import com.wxdgaming.batis.sql.BeanValueUtil;
+import com.wxdgaming.batis.sql.BeanValueHandler;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
@@ -22,6 +22,12 @@ import java.util.stream.Collectors;
  **/
 @Slf4j
 public class MysqlBeanToInsertHandler implements BeanToInsertHandler {
+
+    private final BeanValueHandler valueHandler;
+
+    public MysqlBeanToInsertHandler(BeanValueHandler valueHandler) {
+        this.valueHandler = valueHandler;
+    }
 
     @Override
     public String buildInsertSql(Object bean) {
@@ -51,8 +57,8 @@ public class MysqlBeanToInsertHandler implements BeanToInsertHandler {
         List<Object> params = new ArrayList<>();
         for (ColumnInfo col : tableInfo.getColumns().values()) {
             if (isIdentityPk(col)) continue;
-            params.add(BeanValueUtil.convertToDbValue(
-                    BeanValueUtil.readFieldValue(bean, col), col));
+            params.add(valueHandler.convertToDbValue(
+                    valueHandler.readFieldValue(bean, col), col));
         }
         return params.toArray();
     }
@@ -70,7 +76,7 @@ public class MysqlBeanToInsertHandler implements BeanToInsertHandler {
     public void writeGeneratedKey(Object bean, Number genId) {
         ColumnInfo identityColumn = getIdentityColumn(bean);
         if (identityColumn != null && genId != null) {
-            BeanValueUtil.writeGeneratedKey(bean, identityColumn, genId);
+            valueHandler.writeGeneratedKey(bean, identityColumn, genId);
         }
     }
 

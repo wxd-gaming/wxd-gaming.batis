@@ -4,7 +4,7 @@ import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.TableInfo;
 import com.wxdgaming.batis.parser.EntityParser;
 import com.wxdgaming.batis.sql.BeanToDeleteHandler;
-import com.wxdgaming.batis.sql.BeanValueUtil;
+import com.wxdgaming.batis.sql.BeanValueHandler;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
@@ -19,6 +19,12 @@ import java.util.List;
  **/
 @Slf4j
 public class MysqlBeanToDeleteHandler implements BeanToDeleteHandler {
+
+    private final BeanValueHandler valueHandler;
+
+    public MysqlBeanToDeleteHandler(BeanValueHandler valueHandler) {
+        this.valueHandler = valueHandler;
+    }
 
     @Override
     public String buildDeleteByIdSql(Object bean) {
@@ -51,8 +57,8 @@ public class MysqlBeanToDeleteHandler implements BeanToDeleteHandler {
         List<Object> whereParams = new ArrayList<>();
         for (ColumnInfo col : columns.values()) {
             if (col.isPrimaryKey()) {
-                whereParams.add(BeanValueUtil.convertToDbValue(
-                        BeanValueUtil.readFieldValue(bean, col), col));
+                whereParams.add(valueHandler.convertToDbValue(
+                        valueHandler.readFieldValue(bean, col), col));
             }
         }
         return whereParams.toArray();
