@@ -1,6 +1,7 @@
 package com.wxdgaming.batis.sql;
 
 import com.wxdgaming.batis.DbTemplate;
+import com.wxdgaming.batis.cache.EntityCache;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.IndexInfo;
 import com.wxdgaming.batis.model.TableInfo;
@@ -111,6 +112,21 @@ public class JdbcTemplate extends DbTemplate {
 
     public BeanRunner beanRunner() {
         return new BeanRunner(this);
+    }
+
+    /**
+     * 创建带缓存的 BeanRunner（默认 Caffeine 本地缓存 + 延迟刷盘模式）
+     * <p>单例复用即可，线程安全。</p>
+     */
+    public CachedBeanRunner cachedBeanRunner() {
+        return new CachedBeanRunner(this);
+    }
+
+    /**
+     * 创建带自定义缓存的 BeanRunner
+     */
+    public CachedBeanRunner cachedBeanRunner(EntityCache<String, Object> cache) {
+        return new CachedBeanRunner(this, cache);
     }
 
     /**

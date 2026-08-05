@@ -104,7 +104,7 @@ public class BeanRunner implements AutoCloseable {
      * @param beans 实体列表
      * @return 各条语句影响的行数数组
      */
-    public int[] insertBeanList(List<?> beans) {
+    public <T> int[] insertBeanList(List<T> beans) {
         if (beans == null || beans.isEmpty()) return new int[0];
 
         BeanToInsertHandler handler = jdbcTemplate.getBeanToInsertHandler();
@@ -162,7 +162,7 @@ public class BeanRunner implements AutoCloseable {
      * @param beans 实体列表
      * @return 各条语句影响的行数数组
      */
-    public int[] updateBeanList(List<?> beans) {
+    public <T> int[] updateBeanList(List<T> beans) {
         if (beans == null || beans.isEmpty()) return new int[0];
 
         BeanToUpdateHandler handler = jdbcTemplate.getBeanToUpdateHandler();
@@ -316,6 +316,34 @@ public class BeanRunner implements AutoCloseable {
                 jdbcTemplate.getBeanToDeleteHandler().buildDeleteByIdSql(bean),
                 jdbcTemplate.getBeanToDeleteHandler().buildDeleteByIdParams(bean)
         );
+    }
+
+    /**
+     * 批量删除实体列表，根据各实体的主键值构建 DELETE SQL 并批量执行
+     * <p>所有实体必须为同一类型。</p>
+     *
+     * @param beans 实体列表
+     * @return 各条语句影响的行数数组
+     */
+    public <T> int[] deleteListBean(List<T> beans) {
+        if (beans == null || beans.isEmpty()) return new int[0];
+
+        BeanToDeleteHandler handler = jdbcTemplate.getBeanToDeleteHandler();
+        if (handler == null) {
+            throw new UnsupportedOperationException("未注册 deleteHandler");
+        }
+
+        String sql = null;
+        List<Object[]> batchArgs = new ArrayList<>(beans.size());
+
+        for (Object bean : beans) {
+            if (sql == null) {
+                sql = handler.buildDeleteByIdSql(bean);
+            }
+            batchArgs.add(handler.buildDeleteByIdParams(bean));
+        }
+
+        return queryRunner.executeBatch(sql, batchArgs);
     }
 
 }
