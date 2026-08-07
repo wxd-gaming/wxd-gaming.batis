@@ -4,6 +4,7 @@ import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.TableInfo;
 import com.wxdgaming.batis.parser.EntityParser;
 import lombok.Getter;
+import lombok.Setter;
 import org.apache.commons.lang3.exception.ExceptionUtils;
 
 import java.sql.Connection;
@@ -27,6 +28,9 @@ public class BeanRunner implements AutoCloseable {
     private final QueryRunner queryRunner;
     /** 是否需要在 close 时关闭内部的 QueryRunner（外部注入的不关闭） */
     private final boolean closeQueryRunner;
+    /** 批量提交大小，从 JdbcTemplate 继承默认值，可随时修改；&lt;=0 表示不分组一次性提交 */
+    @Setter
+    private int batchSize;
 
     /**
      * 独立模式：自行创建 QueryRunner，close 时归还连接
@@ -35,6 +39,7 @@ public class BeanRunner implements AutoCloseable {
         this.jdbcTemplate = jdbcTemplate;
         this.queryRunner = new QueryRunner(jdbcTemplate);
         this.closeQueryRunner = true;
+        this.batchSize = jdbcTemplate.getBatchSize();
     }
 
     /**
@@ -44,6 +49,7 @@ public class BeanRunner implements AutoCloseable {
         this.jdbcTemplate = queryRunner.getJdbcTemplate();
         this.queryRunner = queryRunner;
         this.closeQueryRunner = false;
+        this.batchSize = this.jdbcTemplate.getBatchSize();
     }
 
     @Override
@@ -100,6 +106,7 @@ public class BeanRunner implements AutoCloseable {
     /**
      * 批量插入实体列表，自动构建 INSERT SQL，返回各条影响行数
      * <p>所有实体必须为同一类型；自增主键会自动回写到对应实体。</p>
+     * <p>当数据量超过 {@link #batchSize} 时自动分组提交。</p>
      *
      * @param beans 实体列表
      * @return 各条语句影响的行数数组
@@ -107,6 +114,23 @@ public class BeanRunner implements AutoCloseable {
     public <T> int[] insertBeanList(List<T> beans) {
         if (beans == null || beans.isEmpty()) return new int[0];
 
+        if (batchSize <= 0 || beans.size() <= batchSize) {
+            return doInsertBatch(beans);
+        }
+
+        List<int[]> allResults = new ArrayList<>();
+        for (int offset = 0; offset < beans.size(); offset += batchSize) {
+            int end = Math.min(offset + batchSize, beans.size());
+            int[] results = doInsertBatch(beans.subList(offset, end));
+            allResults.add(results);
+        }
+        return flattenResults(allResults, beans.size());
+    }
+
+    /**
+     * 执行单批 INSERT，负责 PreparedStatement 创建、参数填充、批量执行和自增键回写
+     */
+    private <T> int[] doInsertBatch(List<T> beans) {
         BeanToInsertHandler handler = jdbcTemplate.getBeanToInsertHandler();
         if (handler == null) {
             throw new UnsupportedOperationException(
@@ -158,6 +182,7 @@ public class BeanRunner implements AutoCloseable {
     /**
      * 批量更新实体列表，自动构建 UPDATE SQL，返回各条影响行数
      * <p>所有实体必须为同一类型。</p>
+     * <p>当数据量超过 {@link #batchSize} 时自动分组提交。</p>
      *
      * @param beans 实体列表
      * @return 各条语句影响的行数数组
@@ -181,7 +206,17 @@ public class BeanRunner implements AutoCloseable {
             batchArgs.add(handler.buildUpdateParams(bean));
         }
 
-        return queryRunner.executeBatch(sql, batchArgs);
+        if (batchSize <= 0 || batchArgs.size() <= batchSize) {
+            return queryRunner.executeBatch(sql, batchArgs);
+        }
+
+        List<int[]> allResults = new ArrayList<>();
+        for (int i = 0; i < batchArgs.size(); i += batchSize) {
+            int end = Math.min(i + batchSize, batchArgs.size());
+            int[] results = queryRunner.executeBatch(sql, batchArgs.subList(i, end));
+            allResults.add(results);
+        }
+        return flattenResults(allResults, batchArgs.size());
     }
 
     // ===== SELECT 实体便捷方法（委托给 BeanToSelectHandler） =====
@@ -321,6 +356,7 @@ public class BeanRunner implements AutoCloseable {
     /**
      * 批量删除实体列表，根据各实体的主键值构建 DELETE SQL 并批量执行
      * <p>所有实体必须为同一类型。</p>
+     * <p>当数据量超过 {@link #batchSize} 时自动分组提交。</p>
      *
      * @param beans 实体列表
      * @return 各条语句影响的行数数组
@@ -343,7 +379,36 @@ public class BeanRunner implements AutoCloseable {
             batchArgs.add(handler.buildDeleteByIdParams(bean));
         }
 
-        return queryRunner.executeBatch(sql, batchArgs);
+        if (batchSize <= 0 || batchArgs.size() <= batchSize) {
+            return queryRunner.executeBatch(sql, batchArgs);
+        }
+
+        List<int[]> allResults = new ArrayList<>();
+        for (int i = 0; i < batchArgs.size(); i += batchSize) {
+            int end = Math.min(i + batchSize, batchArgs.size());
+            int[] results = queryRunner.executeBatch(sql, batchArgs.subList(i, end));
+            allResults.add(results);
+        }
+        return flattenResults(allResults, batchArgs.size());
+    }
+
+    // ===== 内部工具方法 =====
+
+    /**
+     * 将多个分批结果数组合并为一个结果数组
+     *
+     * @param resultsList 各批次的结果数组列表
+     * @param totalSize   原始数据总条数
+     * @return 合并后的结果数组
+     */
+    private static int[] flattenResults(List<int[]> resultsList, int totalSize) {
+        int[] result = new int[totalSize];
+        int pos = 0;
+        for (int[] arr : resultsList) {
+            System.arraycopy(arr, 0, result, pos, arr.length);
+            pos += arr.length;
+        }
+        return result;
     }
 
 }

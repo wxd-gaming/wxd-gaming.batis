@@ -3,6 +3,8 @@ package com.wxdgaming.batis.sql;
 import com.wxdgaming.batis.cache.CacheKeyBuilder;
 import com.wxdgaming.batis.cache.EntityCache;
 import com.wxdgaming.batis.cache.LocalEntityCache;
+import lombok.Getter;
+import lombok.Setter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -75,6 +77,10 @@ public class CachedBeanRunner {
     private final ConcurrentHashMap<String, Object> dirtyUpdates = new ConcurrentHashMap<>();
     /** 待 DELETE：key → bean（保留引用以提取主键参数） */
     private final ConcurrentHashMap<String, Object> dirtyDeletes = new ConcurrentHashMap<>();
+    /** 批量提交大小，从 JdbcTemplate 继承默认值，可随时修改；&lt;=0 表示不分组一次性提交 */
+    @Setter
+    @Getter
+    private int batchSize;
 
     public CachedBeanRunner(JdbcTemplate jdbcTemplate) {
         this(jdbcTemplate, new LocalEntityCache<>());
@@ -83,6 +89,7 @@ public class CachedBeanRunner {
     public CachedBeanRunner(JdbcTemplate jdbcTemplate, EntityCache<String, Object> cache) {
         this.jdbcTemplate = jdbcTemplate;
         this.cache = cache;
+        this.batchSize = jdbcTemplate.getBatchSize();
 
         // 注册淘汰回调：缓存过期时自动将脏数据刷到 DB，防止数据丢失
         this.cache.onEvict(entry -> handleEviction(entry.getKey(), entry.getValue()));
@@ -320,6 +327,7 @@ public class CachedBeanRunner {
         for (List<Object> group : insertGroups.values()) {
             if (group.isEmpty()) continue;
             try (BeanRunner runner = jdbcTemplate.beanRunner()) {
+                runner.setBatchSize(this.batchSize);
                 int[] results = runner.insertBeanList(group);
                 insertAffected += sum(results);
                 log.info("批量刷盘 INSERT {}: {} 条, 影响 {} 行",
@@ -331,6 +339,7 @@ public class CachedBeanRunner {
         for (List<Object> group : updateGroups.values()) {
             if (group.isEmpty()) continue;
             try (BeanRunner runner = jdbcTemplate.beanRunner()) {
+                runner.setBatchSize(this.batchSize);
                 int[] results = runner.updateBeanList(group);
                 updateAffected += sum(results);
                 log.info("批量刷盘 UPDATE {}: {} 条, 影响 {} 行",
@@ -342,6 +351,7 @@ public class CachedBeanRunner {
         for (List<Object> group : deleteGroups.values()) {
             if (group.isEmpty()) continue;
             try (BeanRunner runner = jdbcTemplate.beanRunner()) {
+                runner.setBatchSize(this.batchSize);
                 int[] results = runner.deleteListBean(group);
                 deleteAffected += sum(results);
                 // 从缓存中移除已删除的 key
