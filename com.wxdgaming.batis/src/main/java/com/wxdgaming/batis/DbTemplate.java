@@ -16,4 +16,7 @@ public class DbTemplate {
     /** 批量提交大小，默认 500；&lt;=0 表示不分组一次性提交 */
     private int batchSize = 500;
 
+    /** 数据库操作性能统计（线程安全） */
+    private final DbStats stats = new DbStats();
+
 }

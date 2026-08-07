@@ -86,9 +86,11 @@ public class BeanRunner implements AutoCloseable {
      * @return 自增主键，无自增列时返回 null
      */
     public Number insertBean(Object bean) {
+        long start = System.currentTimeMillis();
         BeanToInsertHandler handler = requireInsertHandler();
         Number genId = queryRunner.executeInsert(handler.buildInsertSql(bean), handler.buildInsertParams(bean));
         handler.writeGeneratedKey(bean, genId);
+        jdbcTemplate.getStats().recordInsert(System.currentTimeMillis() - start, 1);
         return genId;
     }
 
@@ -99,8 +101,11 @@ public class BeanRunner implements AutoCloseable {
      * @return 影响的行数
      */
     public int updateBean(Object bean) {
+        long start = System.currentTimeMillis();
         BeanToUpdateHandler handler = requireUpdateHandler();
-        return queryRunner.update(handler.buildUpdateSql(bean), handler.buildUpdateParams(bean));
+        int rows = queryRunner.update(handler.buildUpdateSql(bean), handler.buildUpdateParams(bean));
+        jdbcTemplate.getStats().recordUpdate(System.currentTimeMillis() - start, 1);
+        return rows;
     }
 
     /**
@@ -114,17 +119,21 @@ public class BeanRunner implements AutoCloseable {
     public <T> int[] insertBeanList(List<T> beans) {
         if (beans == null || beans.isEmpty()) return new int[0];
 
+        long start = System.currentTimeMillis();
+        int[] result;
         if (batchSize <= 0 || beans.size() <= batchSize) {
-            return doInsertBatch(beans);
+            result = doInsertBatch(beans);
+        } else {
+            List<int[]> allResults = new ArrayList<>();
+            for (int offset = 0; offset < beans.size(); offset += batchSize) {
+                int end = Math.min(offset + batchSize, beans.size());
+                int[] results = doInsertBatch(beans.subList(offset, end));
+                allResults.add(results);
+            }
+            result = flattenResults(allResults, beans.size());
         }
-
-        List<int[]> allResults = new ArrayList<>();
-        for (int offset = 0; offset < beans.size(); offset += batchSize) {
-            int end = Math.min(offset + batchSize, beans.size());
-            int[] results = doInsertBatch(beans.subList(offset, end));
-            allResults.add(results);
-        }
-        return flattenResults(allResults, beans.size());
+        jdbcTemplate.getStats().recordInsert(System.currentTimeMillis() - start, beans.size());
+        return result;
     }
 
     /**
@@ -148,31 +157,47 @@ public class BeanRunner implements AutoCloseable {
 
         try {
             Connection conn = queryRunner.getConnection();
-            try (PreparedStatement stmt = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
-                for (Object[] args : batchArgs) {
-                    if (args != null) {
-                        for (int i = 0; i < args.length; i++) {
-                            stmt.setObject(i + 1, args[i]);
-                        }
-                    }
-                    stmt.addBatch();
-                }
-                int[] results = stmt.executeBatch();
-
-                if (identityColumn != null) {
-                    try (ResultSet rs = stmt.getGeneratedKeys()) {
-                        int idx = 0;
-                        while (rs.next() && idx < beans.size()) {
-                            Object val = rs.getObject(1);
-                            Number genId = val instanceof Number ? (Number) val : null;
-                            if (genId != null) {
-                                handler.writeGeneratedKey(beans.get(idx), genId);
+            boolean autoCommit = conn.getAutoCommit();
+            try {
+                conn.setAutoCommit(false);
+                try (PreparedStatement stmt = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+                    for (Object[] args : batchArgs) {
+                        if (args != null) {
+                            for (int i = 0; i < args.length; i++) {
+                                stmt.setObject(i + 1, args[i]);
                             }
-                            idx++;
+                        }
+                        stmt.addBatch();
+                    }
+                    int[] results = stmt.executeBatch();
+
+                    if (identityColumn != null) {
+                        try (ResultSet rs = stmt.getGeneratedKeys()) {
+                            int idx = 0;
+                            while (rs.next() && idx < beans.size()) {
+                                Object val = rs.getObject(1);
+                                Number genId = val instanceof Number ? (Number) val : null;
+                                if (genId != null) {
+                                    handler.writeGeneratedKey(beans.get(idx), genId);
+                                }
+                                idx++;
+                            }
                         }
                     }
+                    conn.commit();
+                    return results;
                 }
-                return results;
+            } catch (SQLException e) {
+                try {
+                    conn.rollback();
+                } catch (SQLException ignored) {
+                }
+                throw ExceptionUtils.asRuntimeException(e);
+            } finally {
+                try {
+                    conn.setAutoCommit(autoCommit);
+                } catch (SQLException ignored) {
+                }
             }
         } catch (SQLException e) {
             throw ExceptionUtils.asRuntimeException(e);
@@ -190,6 +215,7 @@ public class BeanRunner implements AutoCloseable {
     public <T> int[] updateBeanList(List<T> beans) {
         if (beans == null || beans.isEmpty()) return new int[0];
 
+        long start = System.currentTimeMillis();
         BeanToUpdateHandler handler = jdbcTemplate.getBeanToUpdateHandler();
         if (handler == null) {
             throw new UnsupportedOperationException(
@@ -206,17 +232,20 @@ public class BeanRunner implements AutoCloseable {
             batchArgs.add(handler.buildUpdateParams(bean));
         }
 
+        int[] result;
         if (batchSize <= 0 || batchArgs.size() <= batchSize) {
-            return queryRunner.executeBatch(sql, batchArgs);
+            result = queryRunner.executeBatch(sql, batchArgs);
+        } else {
+            List<int[]> allResults = new ArrayList<>();
+            for (int i = 0; i < batchArgs.size(); i += batchSize) {
+                int end = Math.min(i + batchSize, batchArgs.size());
+                int[] results = queryRunner.executeBatch(sql, batchArgs.subList(i, end));
+                allResults.add(results);
+            }
+            result = flattenResults(allResults, batchArgs.size());
         }
-
-        List<int[]> allResults = new ArrayList<>();
-        for (int i = 0; i < batchArgs.size(); i += batchSize) {
-            int end = Math.min(i + batchSize, batchArgs.size());
-            int[] results = queryRunner.executeBatch(sql, batchArgs.subList(i, end));
-            allResults.add(results);
-        }
-        return flattenResults(allResults, batchArgs.size());
+        jdbcTemplate.getStats().recordUpdate(System.currentTimeMillis() - start, beans.size());
+        return result;
     }
 
     // ===== SELECT 实体便捷方法（委托给 BeanToSelectHandler） =====
@@ -344,13 +373,16 @@ public class BeanRunner implements AutoCloseable {
      * @return 影响的行数
      */
     public int deleteBean(Object bean) {
+        long start = System.currentTimeMillis();
         if (jdbcTemplate.getBeanToDeleteHandler() == null) {
             throw new UnsupportedOperationException("未注册 deleteHandler");
         }
-        return queryRunner.update(
+        int rows = queryRunner.update(
                 jdbcTemplate.getBeanToDeleteHandler().buildDeleteByIdSql(bean),
                 jdbcTemplate.getBeanToDeleteHandler().buildDeleteByIdParams(bean)
         );
+        jdbcTemplate.getStats().recordDelete(System.currentTimeMillis() - start, 1);
+        return rows;
     }
 
     /**
@@ -364,6 +396,7 @@ public class BeanRunner implements AutoCloseable {
     public <T> int[] deleteListBean(List<T> beans) {
         if (beans == null || beans.isEmpty()) return new int[0];
 
+        long start = System.currentTimeMillis();
         BeanToDeleteHandler handler = jdbcTemplate.getBeanToDeleteHandler();
         if (handler == null) {
             throw new UnsupportedOperationException("未注册 deleteHandler");
@@ -379,17 +412,20 @@ public class BeanRunner implements AutoCloseable {
             batchArgs.add(handler.buildDeleteByIdParams(bean));
         }
 
+        int[] result;
         if (batchSize <= 0 || batchArgs.size() <= batchSize) {
-            return queryRunner.executeBatch(sql, batchArgs);
+            result = queryRunner.executeBatch(sql, batchArgs);
+        } else {
+            List<int[]> allResults = new ArrayList<>();
+            for (int i = 0; i < batchArgs.size(); i += batchSize) {
+                int end = Math.min(i + batchSize, batchArgs.size());
+                int[] results = queryRunner.executeBatch(sql, batchArgs.subList(i, end));
+                allResults.add(results);
+            }
+            result = flattenResults(allResults, batchArgs.size());
         }
-
-        List<int[]> allResults = new ArrayList<>();
-        for (int i = 0; i < batchArgs.size(); i += batchSize) {
-            int end = Math.min(i + batchSize, batchArgs.size());
-            int[] results = queryRunner.executeBatch(sql, batchArgs.subList(i, end));
-            allResults.add(results);
-        }
-        return flattenResults(allResults, batchArgs.size());
+        jdbcTemplate.getStats().recordDelete(System.currentTimeMillis() - start, beans.size());
+        return result;
     }
 
     // ===== 内部工具方法 =====

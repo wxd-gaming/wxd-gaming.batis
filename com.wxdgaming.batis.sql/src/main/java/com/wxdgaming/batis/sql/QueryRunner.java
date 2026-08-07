@@ -201,16 +201,33 @@ public class QueryRunner implements AutoCloseable {
     public int[] executeBatch(String sql, List<Object[]> batchArgs) {
         try {
             Connection conn = getConnection();
-            try (PreparedStatement stmt = conn.prepareStatement(sql)) {
-                for (Object[] args : batchArgs) {
-                    if (args != null) {
-                        for (int i = 0; i < args.length; i++) {
-                            stmt.setObject(i + 1, args[i]);
+            boolean autoCommit = conn.getAutoCommit();
+            try {
+                conn.setAutoCommit(false);
+                try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                    for (Object[] args : batchArgs) {
+                        if (args != null) {
+                            for (int i = 0; i < args.length; i++) {
+                                stmt.setObject(i + 1, args[i]);
+                            }
                         }
+                        stmt.addBatch();
                     }
-                    stmt.addBatch();
+                    int[] result = stmt.executeBatch();
+                    conn.commit();
+                    return result;
                 }
-                return stmt.executeBatch();
+            } catch (SQLException e) {
+                try {
+                    conn.rollback();
+                } catch (SQLException ignored) {
+                }
+                throw ExceptionUtils.asRuntimeException(e);
+            } finally {
+                try {
+                    conn.setAutoCommit(autoCommit);
+                } catch (SQLException ignored) {
+                }
             }
         } catch (SQLException e) {
             throw ExceptionUtils.asRuntimeException(e);
