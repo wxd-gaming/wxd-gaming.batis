@@ -6,6 +6,8 @@ import com.wxdgaming.batis.annotation.GenerationType;
 import com.wxdgaming.batis.annotation.Id;
 import com.wxdgaming.batis.annotation.Index;
 import com.wxdgaming.batis.annotation.Table;
+import com.wxdgaming.batis.converter.NoneTypeConverter;
+import com.wxdgaming.batis.converter.TypeConverter;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.IndexInfo;
 import com.wxdgaming.batis.model.StorageMode;
@@ -162,6 +164,19 @@ public class EntityParser {
             columnInfo.setType(inferType(field.getType(), 255, storageMode));
             columnInfo.setLength(255);
             columnInfo.setNullable(true);
+        }
+
+        // 3. 解析自定义 TypeConverter
+        if (columnAnn != null && columnAnn.converter() != NoneTypeConverter.class) {
+            try {
+                TypeConverter<?, ?> converterInstance = columnAnn.converter()
+                        .getDeclaredConstructor().newInstance();
+                columnInfo.setConverter(converterInstance);
+            } catch (Exception e) {
+                throw new RuntimeException(
+                        "实例化字段 " + field.getName() + " 的类型转换器失败: "
+                                + columnAnn.converter().getName(), e);
+            }
         }
 
         if (field.getAnnotation(Id.class) != null) {

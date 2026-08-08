@@ -3,6 +3,7 @@ package com.wxdgaming.batis.sql.mysql;
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.parser.Feature;
 import com.alibaba.fastjson.serializer.SerializerFeature;
+import com.wxdgaming.batis.converter.TypeConverter;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.StorageMode;
 import com.wxdgaming.batis.sql.AbstractBeanValueHandler;
@@ -11,6 +12,7 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.lang.reflect.Type;
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.sql.Blob;
 import java.sql.SQLException;
 import java.sql.Timestamp;
@@ -19,6 +21,8 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * MySQL 方言的 Bean ↔ DB 双向值转换实现
@@ -35,6 +39,22 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
     @Override
     public Object convertToDbValue(Object value, ColumnInfo col) {
         if (value == null) return null;
+
+        // 优先使用自定义 TypeConverter（完全接管该字段的转换）
+        @SuppressWarnings({"rawtypes"})
+        TypeConverter converter = col.getConverter();
+        if (converter != null) {
+            try {
+                @SuppressWarnings("unchecked")
+                Object object = converter.convertToDatabaseColumn(value);
+                return object;
+            } catch (Exception e) {
+                throw new RuntimeException(
+                        "自定义转换器 " + converter.getClass().getSimpleName()
+                                + " convertToDatabaseColumn 失败，字段: " + col.getFieldName(), e);
+            }
+        }
+
         StorageMode mode = col.getStorageMode();
         if (mode == StorageMode.JSON) {
             for (int i = 0; ; i++) {
@@ -63,25 +83,35 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
                 }
             }
         }
-        if (value instanceof java.util.Date)
-            return new Timestamp(((java.util.Date) value).getTime());
-        if (value instanceof LocalDateTime)
-            return Timestamp.valueOf((LocalDateTime) value);
-        if (value instanceof LocalDate)
-            return Timestamp.valueOf(((LocalDate) value).atStartOfDay());
-        if (value instanceof LocalTime)
-            return java.sql.Time.valueOf((LocalTime) value);
-        if (value instanceof OffsetDateTime)
-            return Timestamp.from(((OffsetDateTime) value).toInstant());
-        if (value instanceof Instant)
-            return Timestamp.from((Instant) value);
-        if (value instanceof Enum)
-            return ((Enum<?>) value).name();
-        return value;
+        return switch (value) {
+            case java.util.Date date -> new Timestamp(date.getTime());
+            case LocalDateTime localDateTime -> Timestamp.valueOf(localDateTime);
+            case LocalDate localDate -> Timestamp.valueOf(localDate.atStartOfDay());
+            case LocalTime localTime -> java.sql.Time.valueOf(localTime);
+            case OffsetDateTime offsetDateTime -> Timestamp.from(offsetDateTime.toInstant());
+            case Instant instant -> Timestamp.from(instant);
+            case Enum<?> anEnum -> anEnum.name();
+            default -> value;
+        };
     }
 
     @Override
     public Object convertFromDbValue(Object value, ColumnInfo col) {
+        // 优先使用自定义 TypeConverter（完全接管该字段的转换）
+        @SuppressWarnings({"rawtypes"})
+        TypeConverter converter = col.getConverter();
+        if (converter != null) {
+            try {
+                @SuppressWarnings("unchecked")
+                Object object = converter.convertToEntityAttribute(value);
+                return object;
+            } catch (Exception e) {
+                throw new RuntimeException(
+                        "自定义转换器 " + converter.getClass().getSimpleName()
+                                + " convertToEntityAttribute 失败，字段: " + col.getFieldName(), e);
+            }
+        }
+
         StorageMode mode = col.getStorageMode();
         if (mode == StorageMode.JSON) {
             Type genericType = col.getGenericType();
@@ -112,8 +142,7 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
         if (value instanceof byte[]) {
             return (byte[]) value;
         }
-        if (value instanceof Blob) {
-            Blob blob = (Blob) value;
+        if (value instanceof Blob blob) {
             try {
                 return blob.getBytes(1, (int) blob.length());
             } catch (SQLException e) {
@@ -132,8 +161,7 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
         if (javaType.isEnum() && value instanceof String) {
             return Enum.valueOf((Class<? extends Enum>) javaType, (String) value);
         }
-        if (value instanceof Number) {
-            Number num = (Number) value;
+        if (value instanceof Number num) {
             if (javaType == long.class || javaType == Long.class) return num.longValue();
             if (javaType == int.class || javaType == Integer.class) return num.intValue();
             if (javaType == short.class || javaType == Short.class) return num.shortValue();

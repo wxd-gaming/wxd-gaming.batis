@@ -1,5 +1,7 @@
 package com.wxdgaming.batis.annotation;
 
+import com.wxdgaming.batis.converter.NoneTypeConverter;
+import com.wxdgaming.batis.converter.TypeConverter;
 import com.wxdgaming.batis.model.StorageMode;
 
 import java.lang.annotation.Documented;
@@ -58,4 +60,14 @@ public @interface Column {
      * </ul>
      */
     StorageMode storageMode() default StorageMode.AUTO;
+
+    /**
+     * 自定义类型转换器类，需实现 {@link com.wxdgaming.batis.converter.TypeConverter}
+     * <p>
+     * 指定后，该字段的 Bean↔DB 值转换将完全由转换器接管，
+     * 不再走框架默认的类型映射逻辑（包括 {@link #storageMode()} 设置也会被忽略）。
+     * <p>
+     * 转换器类必须有无参构造函数，实例会被框架缓存并复用（须线程安全）。
+     */
+    Class<? extends TypeConverter<?, ?>> converter() default NoneTypeConverter.class;
 }

@@ -1,6 +1,7 @@
 package com.wxdgaming.batis.model;
 
 import com.wxdgaming.batis.annotation.GenerationType;
+import com.wxdgaming.batis.converter.TypeConverter;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.experimental.Accessors;
@@ -53,6 +54,8 @@ public class ColumnInfo {
     private Method readMethod;
     /** 写入方法（setter），解析时缓存 */
     private Method writeMethod;
+    /** 自定义类型转换器，从 @Column(converter=...) 解析而来，可能为 null */
+    private TypeConverter<?, ?> converter;
 
     @Override
     public String toString() {
