@@ -4,6 +4,9 @@ import com.wxdgaming.batis.model.ColumnInfo;
 
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Bean 值处理抽象基类，提供纯反射方法的通用实现
@@ -60,6 +63,9 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
         else if (paramType == double.class || paramType == Double.class) arg = genId.doubleValue();
         else if (paramType == float.class || paramType == Float.class) arg = genId.floatValue();
         else if (paramType == BigDecimal.class) arg = BigDecimal.valueOf(genId.longValue());
+        else if (paramType == BigInteger.class) arg = BigInteger.valueOf(genId.longValue());
+        else if (paramType == AtomicInteger.class) arg = new AtomicInteger(genId.intValue());
+        else if (paramType == AtomicLong.class) arg = new AtomicLong(genId.longValue());
         else arg = genId;
         try {
             setter.invoke(bean, arg);

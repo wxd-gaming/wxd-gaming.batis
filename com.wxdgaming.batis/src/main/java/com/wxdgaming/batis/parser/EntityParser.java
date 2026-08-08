@@ -16,9 +16,13 @@ import com.wxdgaming.batis.model.TableInfo;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.OffsetDateTime;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -28,6 +32,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
@@ -234,11 +239,20 @@ public class EntityParser {
                 || javaType == Long.class
                 || javaType == Float.class
                 || javaType == Double.class
+                || javaType == Character.class
                 || javaType == BigDecimal.class
+                || javaType == BigInteger.class
                 || javaType == Date.class
-                || javaType == java.time.LocalDate.class
-                || javaType == java.time.LocalTime.class
-                || javaType == java.time.LocalDateTime.class
+                || javaType == java.sql.Date.class
+                || javaType == java.sql.Time.class
+                || javaType == java.sql.Timestamp.class
+                || javaType == LocalDate.class
+                || javaType == LocalTime.class
+                || javaType == LocalDateTime.class
+                || javaType == Instant.class
+                || javaType == OffsetDateTime.class
+                || javaType == ZonedDateTime.class
+                || javaType == UUID.class
                 || javaType == byte[].class;
     }
 
@@ -400,6 +414,13 @@ public class EntityParser {
         if (javaType == LocalDate.class) return "DATE";
         if (javaType == LocalTime.class) return "TIME";
         if (javaType == byte[].class) return "BLOB";
+        if (javaType == char.class || javaType == Character.class) return "CHAR(1)";
+        if (javaType == BigInteger.class) return "BIGINT";
+        if (javaType == UUID.class) return "VARCHAR(36)";
+        if (javaType == Instant.class || javaType == OffsetDateTime.class
+                || javaType == ZonedDateTime.class || javaType == java.sql.Timestamp.class) return "DATETIME";
+        if (javaType == java.sql.Date.class) return "DATE";
+        if (javaType == java.sql.Time.class) return "TIME";
         return "VARCHAR(" + length + ")";
     }
 

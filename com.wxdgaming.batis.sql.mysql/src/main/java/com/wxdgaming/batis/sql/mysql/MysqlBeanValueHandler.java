@@ -21,8 +21,11 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+
+import java.time.ZonedDateTime;
 
 /**
  * MySQL 方言的 Bean ↔ DB 双向值转换实现
@@ -89,7 +92,13 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
             case LocalDate localDate -> Timestamp.valueOf(localDate.atStartOfDay());
             case LocalTime localTime -> java.sql.Time.valueOf(localTime);
             case OffsetDateTime offsetDateTime -> Timestamp.from(offsetDateTime.toInstant());
+            case ZonedDateTime zonedDateTime -> Timestamp.from(zonedDateTime.toInstant());
             case Instant instant -> Timestamp.from(instant);
+            case BigInteger bigInt -> bigInt.longValue();
+            case AtomicInteger ai -> ai.get();
+            case AtomicLong al -> al.get();
+            case Character c -> c.toString();
+            case UUID uuid -> uuid.toString();
             case Enum<?> anEnum -> anEnum.name();
             default -> value;
         };
@@ -170,6 +179,10 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
             if (javaType == float.class || javaType == Float.class) return num.floatValue();
             if (javaType == BigDecimal.class) return new BigDecimal(num.toString());
             if (javaType == boolean.class || javaType == Boolean.class) return num.intValue() != 0;
+            if (javaType == BigInteger.class) return BigInteger.valueOf(num.longValue());
+            if (javaType == AtomicInteger.class) return new AtomicInteger(num.intValue());
+            if (javaType == AtomicLong.class) return new AtomicLong(num.longValue());
+            if (javaType == Character.class || javaType == char.class) return (char) num.intValue();
         }
         if (value instanceof Boolean && (javaType == boolean.class || javaType == Boolean.class)) {
             return value;
@@ -177,6 +190,13 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
         Object temporal = convertTemporal(value, javaType);
         if (temporal != null) {
             return temporal;
+        }
+        if (javaType == UUID.class) {
+            return UUID.fromString(value.toString());
+        }
+        if (javaType == Character.class || javaType == char.class) {
+            if (value instanceof String s && !s.isEmpty()) return s.charAt(0);
+            return value.toString().charAt(0);
         }
         if (javaType == String.class) {
             return value.toString();
@@ -220,6 +240,8 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
         if (javaType == LocalDate.class) return ts.toLocalDateTime().toLocalDate();
         if (javaType == LocalTime.class) return ts.toLocalDateTime().toLocalTime();
         if (javaType == Instant.class) return ts.toInstant();
+        if (javaType == ZonedDateTime.class) return ts.toInstant().atZone(java.time.ZoneId.systemDefault());
+        if (javaType == OffsetDateTime.class) return ts.toInstant().atOffset(java.time.ZoneOffset.UTC);
         return null;
     }
 }
