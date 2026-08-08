@@ -1,11 +1,13 @@
 package com.wxdgaming.batis.sql.mysql;
 
 import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.parser.Feature;
 import com.alibaba.fastjson.serializer.SerializerFeature;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.StorageMode;
 import com.wxdgaming.batis.sql.AbstractBeanValueHandler;
 import com.wxdgaming.batis.util.ProtostuffUtil;
+import lombok.extern.slf4j.Slf4j;
 
 import java.lang.reflect.Type;
 import java.math.BigDecimal;
@@ -24,18 +26,42 @@ import java.time.OffsetDateTime;
  * @author wxd-gaming(無心道, 15388152619)
  * @version 2026-07-31
  */
+@Slf4j
 public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
+
+    /** JSON/Protostuff 序列化最大重试次数，应对多线程并发修改集合的并发问题 */
+    private static final int MAX_SERIALIZE_RETRIES = 3;
 
     @Override
     public Object convertToDbValue(Object value, ColumnInfo col) {
         if (value == null) return null;
         StorageMode mode = col.getStorageMode();
         if (mode == StorageMode.JSON) {
-            return JSON.toJSONString(value, SerializerFeature.WriteClassName);
+            for (int i = 0; ; i++) {
+                try {
+                    return JSON.toJSONString(value, SerializerFeature.WriteClassName);
+                } catch (Exception e) {
+                    if (i >= MAX_SERIALIZE_RETRIES - 1) {
+                        throw new RuntimeException("JSON序列化字段" + col.getFieldName() + "失败，已重试" + MAX_SERIALIZE_RETRIES + "次", e);
+                    }
+                    log.error("JSON序列化字段{}失败，第{}次重试", col.getFieldName(), i + 1, e);
+                    Thread.yield();
+                }
+            }
         }
         if (mode == StorageMode.BLOB || mode == StorageMode.MEDIUMBLOB || mode == StorageMode.LONGBLOB) {
             if (value instanceof byte[]) return value;
-            return ProtostuffUtil.encode(value);
+            for (int i = 0; ; i++) {
+                try {
+                    return ProtostuffUtil.encode(value);
+                } catch (Exception e) {
+                    if (i >= MAX_SERIALIZE_RETRIES - 1) {
+                        throw new RuntimeException("Protostuff序列化字段" + col.getFieldName() + "失败，已重试" + MAX_SERIALIZE_RETRIES + "次", e);
+                    }
+                    log.error("Protostuff序列化字段{}失败，第{}次重试", col.getFieldName(), i + 1, e);
+                    Thread.yield();
+                }
+            }
         }
         if (value instanceof java.util.Date)
             return new Timestamp(((java.util.Date) value).getTime());
@@ -61,7 +87,7 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
             Type genericType = col.getGenericType();
             String jsonStr = value.toString();
             try {
-                return JSON.parseObject(jsonStr, genericType != null ? genericType : col.getJavaType());
+                return JSON.parseObject(jsonStr, genericType != null ? genericType : col.getJavaType(), Feature.SupportAutoType);
             } catch (Exception e) {
                 throw new RuntimeException("JSON 反序列化字段 " + col.getFieldName() + " 失败，value=" + jsonStr, e);
             }

@@ -84,6 +84,19 @@ public class DbStats {
         return insertStats.getTotalMs() + updateStats.getTotalMs() + deleteStats.getTotalMs();
     }
 
+    /** 整体累计平均吞吐量 (records/sec) = 总记录数 × 1000 / 总耗时(ms) */
+    public double getCumulativeQps() {
+        long totalRecords = getTotalRecords();
+        long totalMsVal = getTotalMs();
+        if (totalRecords == 0 || totalMsVal == 0) return 0;
+        return totalRecords * 1000.0 / totalMsVal;
+    }
+
+    /** 整体单次吞吐量 = 三种操作各自单次QPS之和 */
+    public double getInstantQps() {
+        return insertStats.getInstantQps() + updateStats.getInstantQps() + deleteStats.getInstantQps();
+    }
+
     /** 重置所有统计 */
     public void reset() {
         insertStats.reset();
@@ -103,18 +116,21 @@ public class DbStats {
         appendOpStats(sb, "DELETE", deleteStats);
 
         sb.append("\n=== Cumulative ===\n");
-        sb.append(String.format("总调用: %d, 总记录: %d, 总耗时: %dms",
-                getTotalCalls(), getTotalRecords(), getTotalMs()));
+        sb.append(String.format("总调用: %d, 总记录: %d, 总耗时: %dms, 累计QPS: %.1f/s",
+                getTotalCalls(), getTotalRecords(), getTotalMs(), getCumulativeQps()));
 
         return sb.toString();
     }
 
     private static void appendOpStats(StringBuilder sb, String name, OpStats stats) {
         sb.append(String.format(
-                "\n[%s] 调用: %d, 记录: %d, 总耗时: %dms, 平均: %dms, 最大: %dms, 最小: %dms\n",
+                "\n[%s] 调用: %d, 记录: %d, 累计QPS: %.1f/s, 单次QPS: %.1f/s\n"
+                        + "  总耗时: %dms, 平均: %dms, 最大: %dms, 最小: %dms\n",
                 name,
                 stats.getCallCount(),
                 stats.getRecordCount(),
+                stats.getCumulativeQps(),
+                stats.getInstantQps(),
                 stats.getTotalMs(),
                 stats.getAvgMs(),
                 stats.getMaxMs(),
@@ -232,6 +248,26 @@ public class DbStats {
             return cnt == 0 ? 0 : totalMs.get() / cnt;
         }
 
+        /**
+         * 累计平均吞吐量 (records/sec) = 累计记录总数 × 1000 / 累计总耗时(ms)。
+         * 无记录时返回 0。
+         */
+        public double getCumulativeQps() {
+            long totalRecords = recordCount.get();
+            long totalMsVal = totalMs.get();
+            if (totalRecords == 0 || totalMsVal == 0) return 0;
+            return totalRecords * 1000.0 / totalMsVal;
+        }
+
+        /**
+         * 单次吞吐量 (records/sec)，基于最近一次操作的记录数和耗时推算。
+         * = lastRecords × 1000 / lastMs。无记录时返回 0。
+         */
+        public double getInstantQps() {
+            long last = lastMs;
+            return last > 0 ? (lastRecords * 1000.0) / last : 0;
+        }
+
         /** 返回耗时边界的副本 */
         public long[] getBoundaries() { return boundaries.clone(); }
 
@@ -263,7 +299,8 @@ public class DbStats {
             return new OpStatsSnapshot(
                     callCount.get(), recordCount.get(), totalMs.get(),
                     getMaxMs(), getMinMs(), getAvgMs(), lastMs, lastRecords,
-                    boundaries.clone(), getHistogram()
+                    boundaries.clone(), getHistogram(),
+                    getCumulativeQps(), getInstantQps()
             );
         }
     }
@@ -283,6 +320,8 @@ public class DbStats {
             long lastMs,
             int  lastRecords,
             long[] boundaries,
-            long[] histogram
+            long[] histogram,
+            double cumulativeQps,
+            double instantQps
     ) {}
 }

@@ -109,31 +109,59 @@ public class BeanRunner implements AutoCloseable {
     }
 
     /**
-     * 批量插入实体列表，自动构建 INSERT SQL，返回各条影响行数
-     * <p>所有实体必须为同一类型；自增主键会自动回写到对应实体。</p>
-     * <p>当数据量超过 {@link #batchSize} 时自动分组提交。</p>
+     * 安全批量插入：先尝试批量插入，失败后自动降级为逐条插入（无事务，每条 autocommit）。
+     * <p>降级场景仅在数据异常时触发，虽慢但不常发生。</p>
      *
      * @param beans 实体列表
-     * @return 各条语句影响的行数数组
+     * @param <T>   实体类型
+     * @return 批量结果；调用方通过 {@link BatchResult#hasFailures()} 判断是否有失败
      */
-    public <T> int[] insertBeanList(List<T> beans) {
-        if (beans == null || beans.isEmpty()) return new int[0];
+    public <T> BatchResult<T> insertBeanList(List<T> beans) {
+        BatchResult<T> result = new BatchResult<>(beans);
+        if (beans == null || beans.isEmpty()) return result;
 
         long start = System.currentTimeMillis();
-        int[] result;
+
         if (batchSize <= 0 || beans.size() <= batchSize) {
-            result = doInsertBatch(beans);
+            doInsertBatchSafe(beans, 0, result);
         } else {
-            List<int[]> allResults = new ArrayList<>();
+            int baseIndex = 0;
             for (int offset = 0; offset < beans.size(); offset += batchSize) {
                 int end = Math.min(offset + batchSize, beans.size());
-                int[] results = doInsertBatch(beans.subList(offset, end));
-                allResults.add(results);
+                doInsertBatchSafe(beans.subList(offset, end), baseIndex, result);
+                baseIndex += batchSize;
             }
-            result = flattenResults(allResults, beans.size());
         }
-        jdbcTemplate.getStats().recordInsert(System.currentTimeMillis() - start, beans.size());
+
+        jdbcTemplate.getStats().recordInsert(
+                System.currentTimeMillis() - start, result.getSuccessCount());
         return result;
+    }
+
+    /**
+     * 单组安全插入：先批量尝试，失败则逐条降级
+     */
+    private <T> void doInsertBatchSafe(List<T> beans, int baseIndex, BatchResult<T> result) {
+        // Fast path: 批量插入
+        try {
+            doInsertBatch(beans);
+            for (int i = 0; i < beans.size(); i++) {
+                result.recordSuccess();
+            }
+            return;
+        } catch (Exception batchEx) {
+            // 批量失败，降级到逐条
+        }
+
+        // Slow path: 逐条插入（无事务，每条 autocommit）
+        for (int i = 0; i < beans.size(); i++) {
+            try {
+                insertBean(beans.get(i));
+                result.recordSuccess();
+            } catch (Exception singleEx) {
+                result.recordFailure(baseIndex + i, beans.get(i), singleEx);
+            }
+        }
     }
 
     /**
@@ -205,47 +233,74 @@ public class BeanRunner implements AutoCloseable {
     }
 
     /**
-     * 批量更新实体列表，自动构建 UPDATE SQL，返回各条影响行数
-     * <p>所有实体必须为同一类型。</p>
-     * <p>当数据量超过 {@link #batchSize} 时自动分组提交。</p>
+     * 安全批量更新：先尝试批量更新，失败后自动降级为逐条更新（无事务，每条 autocommit）。
      *
      * @param beans 实体列表
-     * @return 各条语句影响的行数数组
+     * @param <T>   实体类型
+     * @return 批量结果
      */
-    public <T> int[] updateBeanList(List<T> beans) {
-        if (beans == null || beans.isEmpty()) return new int[0];
+    public <T> BatchResult<T> updateBeanList(List<T> beans) {
+        BatchResult<T> result = new BatchResult<>(beans);
+        if (beans == null || beans.isEmpty()) return result;
 
         long start = System.currentTimeMillis();
-        BeanToUpdateHandler handler = jdbcTemplate.getBeanToUpdateHandler();
-        if (handler == null) {
-            throw new UnsupportedOperationException(
-                    "未注册 beanToUpdateHandler，请调用 JdbcTemplate#setBeanToUpdateHandler()");
+
+        if (batchSize <= 0 || beans.size() <= batchSize) {
+            doUpdateBatchSafe(beans, 0, result);
+        } else {
+            int baseIndex = 0;
+            for (int offset = 0; offset < beans.size(); offset += batchSize) {
+                int end = Math.min(offset + batchSize, beans.size());
+                doUpdateBatchSafe(beans.subList(offset, end), baseIndex, result);
+                baseIndex += batchSize;
+            }
         }
 
+        jdbcTemplate.getStats().recordUpdate(
+                System.currentTimeMillis() - start, result.getSuccessCount());
+        return result;
+    }
+
+    /**
+     * 单组安全更新：先批量尝试，失败则逐条降级
+     */
+    private <T> void doUpdateBatchSafe(List<T> beans, int baseIndex, BatchResult<T> result) {
+        // Fast path: 批量更新
+        try {
+            doUpdateBatchInternal(beans);
+            for (int i = 0; i < beans.size(); i++) {
+                result.recordSuccess();
+            }
+            return;
+        } catch (Exception batchEx) {
+            // 批量失败，降级到逐条
+        }
+
+        // Slow path: 逐条更新（无事务，每条 autocommit）
+        for (int i = 0; i < beans.size(); i++) {
+            try {
+                updateBean(beans.get(i));
+                result.recordSuccess();
+            } catch (Exception singleEx) {
+                result.recordFailure(baseIndex + i, beans.get(i), singleEx);
+            }
+        }
+    }
+
+    /**
+     * 构建批量 UPDATE 参数并执行（不记录 stats，内部使用）
+     */
+    private int[] doUpdateBatchInternal(List<?> beans) {
+        BeanToUpdateHandler handler = requireUpdateHandler();
         String sql = null;
         List<Object[]> batchArgs = new ArrayList<>(beans.size());
-
         for (Object bean : beans) {
             if (sql == null) {
                 sql = handler.buildUpdateSql(bean);
             }
             batchArgs.add(handler.buildUpdateParams(bean));
         }
-
-        int[] result;
-        if (batchSize <= 0 || batchArgs.size() <= batchSize) {
-            result = queryRunner.executeBatch(sql, batchArgs);
-        } else {
-            List<int[]> allResults = new ArrayList<>();
-            for (int i = 0; i < batchArgs.size(); i += batchSize) {
-                int end = Math.min(i + batchSize, batchArgs.size());
-                int[] results = queryRunner.executeBatch(sql, batchArgs.subList(i, end));
-                allResults.add(results);
-            }
-            result = flattenResults(allResults, batchArgs.size());
-        }
-        jdbcTemplate.getStats().recordUpdate(System.currentTimeMillis() - start, beans.size());
-        return result;
+        return queryRunner.executeBatch(sql, batchArgs);
     }
 
     // ===== SELECT 实体便捷方法（委托给 BeanToSelectHandler） =====

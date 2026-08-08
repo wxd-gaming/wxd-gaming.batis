@@ -328,10 +328,11 @@ public class CachedBeanRunner {
             if (group.isEmpty()) continue;
             try (BeanRunner runner = jdbcTemplate.beanRunner()) {
                 runner.setBatchSize(this.batchSize);
-                int[] results = runner.insertBeanList(group);
-                insertAffected += sum(results);
+                BatchResult<Object> objectBatchResult = runner.insertBeanList(group);
+                int sum = objectBatchResult.getSuccessCount();
+                insertAffected += sum;
                 log.info("批量刷盘 INSERT {}: {} 条, 影响 {} 行",
-                        group.getFirst().getClass().getSimpleName(), group.size(), sum(results));
+                        group.getFirst().getClass().getSimpleName(), group.size(), sum);
             }
         }
 
@@ -340,10 +341,10 @@ public class CachedBeanRunner {
             if (group.isEmpty()) continue;
             try (BeanRunner runner = jdbcTemplate.beanRunner()) {
                 runner.setBatchSize(this.batchSize);
-                int[] results = runner.updateBeanList(group);
-                updateAffected += sum(results);
+                BatchResult<Object> objectBatchResult = runner.updateBeanList(group);
+                updateAffected += objectBatchResult.getSuccessCount();
                 log.info("批量刷盘 UPDATE {}: {} 条, 影响 {} 行",
-                        group.getFirst().getClass().getSimpleName(), group.size(), sum(results));
+                        group.getFirst().getClass().getSimpleName(), group.size(), objectBatchResult.getSuccessCount());
             }
         }
 
@@ -353,13 +354,14 @@ public class CachedBeanRunner {
             try (BeanRunner runner = jdbcTemplate.beanRunner()) {
                 runner.setBatchSize(this.batchSize);
                 int[] results = runner.deleteListBean(group);
-                deleteAffected += sum(results);
+                int sum = sum(results);
+                deleteAffected += sum;
                 // 从缓存中移除已删除的 key
                 for (Object bean : group) {
                     cache.remove(CacheKeyBuilder.buildKey(bean));
                 }
                 log.info("批量刷盘 DELETE {}: {} 条, 影响 {} 行",
-                        group.getFirst().getClass().getSimpleName(), group.size(), sum(results));
+                        group.getFirst().getClass().getSimpleName(), group.size(), sum);
             }
         }
 
@@ -445,11 +447,15 @@ public class CachedBeanRunner {
 
     // ==================== 监控 ====================
 
-    public int dirtyInsertCount()     { return dirtyInserts.size(); }
-    public int dirtyUpdateCount()     { return dirtyUpdates.size(); }
-    public int dirtyDeleteCount()     { return dirtyDeletes.size(); }
-    public int dirtyTotalCount()      { return dirtyInsertCount() + dirtyUpdateCount() + dirtyDeleteCount(); }
-    public long cacheSize()           { return cache.size(); }
+    public int dirtyInsertCount() {return dirtyInserts.size();}
+
+    public int dirtyUpdateCount() {return dirtyUpdates.size();}
+
+    public int dirtyDeleteCount() {return dirtyDeletes.size();}
+
+    public int dirtyTotalCount() {return dirtyInsertCount() + dirtyUpdateCount() + dirtyDeleteCount();}
+
+    public long cacheSize() {return cache.size();}
 
     /** 清空所有缓存和脏数据（谨慎使用，会丢失未刷盘数据！） */
     public void clearAll() {
@@ -464,7 +470,7 @@ public class CachedBeanRunner {
 
     /** 按前缀过滤脏数据并移除已收集的条目 */
     private List<Object> filterByPrefix(ConcurrentHashMap<String, Object> map,
-                                         String keyPrefix, boolean remove) {
+                                        String keyPrefix, boolean remove) {
         List<Object> result = new ArrayList<>();
         for (Map.Entry<String, Object> entry : map.entrySet()) {
             if (keyPrefix == null || entry.getKey().startsWith(keyPrefix)) {

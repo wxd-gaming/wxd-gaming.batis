@@ -90,7 +90,7 @@ public class MariaDB4jExtension implements BeforeAllCallback, AfterAllCallback {
         // 在 dataDir 复用时库已存在会抛 "database exists"，故改为幂等方式。
         // 注意使用 jdbc:mysql:// 前缀以匹配 MySQL Connector/J（与 MysqlTemplate 一致）。
         String createUrl = "jdbc:mysql://localhost:" + port
-                + "/?user=root&useSSL=false&serverTimezone=Asia/Shanghai";
+                + "/?user=root&useSSL=false&serverTimezone=Asia/Shanghai&rewriteBatchedStatements=true";
         try (Connection conn = DriverManager.getConnection(createUrl);
              Statement st = conn.createStatement()) {
             st.execute("CREATE DATABASE IF NOT EXISTS `test`");

@@ -13,28 +13,35 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * DbStats 性能统计测试
+ * DbStats 性能统计测试（多线程模拟真实环境）
  * <p>
  * 测试流程：
  * <ol>
- *   <li>清空表 → 每间隔 1 秒插入 1000 条，累计插入 50000 条</li>
+ *   <li>清空表 → 多线程并发插入 50000 条（每线程每批 1000 条，间隔 1 秒）</li>
  *   <li>查询全部数据</li>
- *   <li>每间隔 1 秒更新 1000 条，将所有数据更新一遍</li>
+ *   <li>多线程并发更新 50000 条（每线程每批 1000 条，间隔 1 秒）</li>
  *   <li>输出 DbStats 性能统计报告</li>
  * </ol>
  *
  * @author wxd-gaming(無心道, 15388152619)
- * @version 2026-08-07
+ * @version 2026-08-08
  */
-@DisplayName("DbStats 性能统计测试")
+@DisplayName("DbStats 性能统计测试（多线程）")
 class DbStatsPerformanceTest {
 
     static final Logger log = LoggerFactory.getLogger(DbStatsPerformanceTest.class);
     static final int TOTAL = 50000;
     static final int BATCH = 1000;
     static final long INTERVAL_MS = 1000L;
+    /** 并发线程数（模拟真实环境中多个客户端同时操作数据库） */
+    static final int THREAD_COUNT = 5;
 
     static MysqlTemplate template;
 
@@ -65,40 +72,67 @@ class DbStatsPerformanceTest {
     }
 
     @Test
-    @DisplayName("50000 条批量插入 + 50000 条批量更新 — 性能统计")
-    void performanceTest() {
+    @DisplayName("50000 条多线程插入 + 50000 条多线程更新 — 性能统计")
+    void performanceTest() throws InterruptedException {
+        int totalBatches = TOTAL / BATCH;
+
         // ======================================================================
-        // Phase 1: 批量插入 50000 条（50 批 × 1000 条，每批间隔 1 秒）
+        // Phase 1: 多线程并发插入 50000 条
         // ======================================================================
-        log.info("╔══════════════════════════════════════════════════════════════╗");
-        log.info("║  Phase 1: 开始插入 {} 条数据 (每 {} 条间隔 {}ms)          ║", TOTAL, BATCH, INTERVAL_MS);
-        log.info("╚══════════════════════════════════════════════════════════════╝");
+        log.info("""
+                
+                ╔══════════════════════════════════════════════════════════════╗
+                ║  Phase 1: {} 线程并发插入 {} 条数据 (每批 {} 条, 批间隔 {}ms)║
+                ╚══════════════════════════════════════════════════════════════╝""",
+                THREAD_COUNT, TOTAL, BATCH, INTERVAL_MS);
 
         long insertStart = System.currentTimeMillis();
-        for (int round = 0; round < TOTAL / BATCH; round++) {
-            List<AccountEntity> batch = buildBatch(round);
-            try (var br = template.beanRunner()) {
-                br.insertBeanList(batch);
-            }
-            int done = (round + 1) * BATCH;
-            log.info("  已插入: {}/{} 条 | 最近一次: {}ms, {} 条",
-                    done, TOTAL,
-                    template.getStats().getInsertStats().getLastMs(),
-                    template.getStats().getInsertStats().getLastRecords());
+        ExecutorService insertPool = Executors.newFixedThreadPool(THREAD_COUNT);
+        CountDownLatch insertLatch = new CountDownLatch(THREAD_COUNT);
+        AtomicInteger insertProgress = new AtomicInteger(0);
 
-            if (round < TOTAL / BATCH - 1) {
-                sleep(INTERVAL_MS);
-            }
+        for (int t = 0; t < THREAD_COUNT; t++) {
+            final int threadIndex = t;
+            insertPool.submit(() -> {
+                try {
+                    for (int round = threadIndex; round < totalBatches; round += THREAD_COUNT) {
+                        List<AccountEntity> batch = buildBatch(round);
+                        try (var br = template.beanRunner()) {
+                            br.insertBeanList(batch);
+                        }
+                        int done = insertProgress.addAndGet(BATCH);
+                        log.info("  [Thread-{}] 已插入: {}/{} 条 | 最近一次: {}ms, {} 条",
+                                threadIndex, done, TOTAL,
+                                template.getStats().getInsertStats().getLastMs(),
+                                template.getStats().getInsertStats().getLastRecords());
+
+                        if (round + THREAD_COUNT < totalBatches) {
+                            sleep(INTERVAL_MS);
+                        }
+                    }
+                } catch (Exception e) {
+                    log.error("插入线程 {} 异常", threadIndex, e);
+                } finally {
+                    insertLatch.countDown();
+                }
+            });
         }
+
+        insertLatch.await();
+        insertPool.shutdown();
+        insertPool.awaitTermination(10, TimeUnit.SECONDS);
+
         long insertElapsed = System.currentTimeMillis() - insertStart;
         log.info("Phase 1 完成 — 真实耗时: {}ms (含间隔等待)", insertElapsed);
 
         // ======================================================================
         // Phase 2: 查询全部数据（为更新做准备）
         // ======================================================================
-        log.info("\n╔══════════════════════════════════════════════════════════════╗");
-        log.info("║  Phase 2: 查询全部数据，准备批量更新                         ║");
-        log.info("╚══════════════════════════════════════════════════════════════╝");
+        log.info("""
+                
+                ╔══════════════════════════════════════════════════════════════╗
+                ║  Phase 2: 查询全部数据，准备批量更新                         ║
+                ╚══════════════════════════════════════════════════════════════╝""");
 
         List<AccountEntity> allAccounts;
         try (var br = template.beanRunner()) {
@@ -109,36 +143,59 @@ class DbStatsPerformanceTest {
         }
 
         // ======================================================================
-        // Phase 3: 批量更新 50000 条（50 批 × 1000 条，每批间隔 1 秒）
+        // Phase 3: 多线程并发更新 50000 条
         // ======================================================================
-        log.info("\n╔══════════════════════════════════════════════════════════════╗");
-        log.info("║  Phase 3: 开始更新全部 {} 条数据 (每 {} 条间隔 {}ms)       ║", TOTAL, BATCH, INTERVAL_MS);
-        log.info("╚══════════════════════════════════════════════════════════════╝");
+        log.info("""
+                
+                ╔══════════════════════════════════════════════════════════════╗
+                ║  Phase 3: {} 线程并发更新全部 {} 条数据 (每批 {} 条, 批间隔 {}ms)║
+                ╚══════════════════════════════════════════════════════════════╝""",
+                THREAD_COUNT, TOTAL, BATCH, INTERVAL_MS);
 
         long updateStart = System.currentTimeMillis();
-        for (int round = 0; round < TOTAL / BATCH; round++) {
-            int offset = round * BATCH;
-            List<AccountEntity> batch = allAccounts.subList(offset, offset + BATCH);
-            // 修改字段值以触发更新
-            for (AccountEntity account : batch) {
-                account.setBalance(new BigDecimal("999.99"));
-                account.setVipLevel((account.getVipLevel() + 1) % 10);
-                account.setLastLoginTime(new Date());
-                account.setFrozen((round % 2) == 0);
-            }
-            try (var br = template.beanRunner()) {
-                br.updateBeanList(batch);
-            }
-            int done = (round + 1) * BATCH;
-            log.info("  已更新: {}/{} 条 | 最近一次: {}ms, {} 条",
-                    done, TOTAL,
-                    template.getStats().getUpdateStats().getLastMs(),
-                    template.getStats().getUpdateStats().getLastRecords());
+        ExecutorService updatePool = Executors.newFixedThreadPool(THREAD_COUNT);
+        CountDownLatch updateLatch = new CountDownLatch(THREAD_COUNT);
+        AtomicInteger updateProgress = new AtomicInteger(0);
 
-            if (round < TOTAL / BATCH - 1) {
-                sleep(INTERVAL_MS);
-            }
+        for (int t = 0; t < THREAD_COUNT; t++) {
+            final int threadIndex = t;
+            updatePool.submit(() -> {
+                try {
+                    for (int round = threadIndex; round < totalBatches; round += THREAD_COUNT) {
+                        int offset = round * BATCH;
+                        List<AccountEntity> batch = allAccounts.subList(offset, offset + BATCH);
+                        // 修改字段值以触发更新
+                        for (AccountEntity account : batch) {
+                            account.setBalance(new BigDecimal("999.99"));
+                            account.setVipLevel((account.getVipLevel() + threadIndex + 1) % 10);
+                            account.setLastLoginTime(new Date());
+                            account.setFrozen((round % 2) == 0);
+                        }
+                        try (var br = template.beanRunner()) {
+                            br.updateBeanList(batch);
+                        }
+                        int done = updateProgress.addAndGet(BATCH);
+                        log.info("  [Thread-{}] 已更新: {}/{} 条 | 最近一次: {}ms, {} 条",
+                                threadIndex, done, TOTAL,
+                                template.getStats().getUpdateStats().getLastMs(),
+                                template.getStats().getUpdateStats().getLastRecords());
+
+                        if (round + THREAD_COUNT < totalBatches) {
+                            sleep(INTERVAL_MS);
+                        }
+                    }
+                } catch (Exception e) {
+                    log.error("更新线程 {} 异常", threadIndex, e);
+                } finally {
+                    updateLatch.countDown();
+                }
+            });
         }
+
+        updateLatch.await();
+        updatePool.shutdown();
+        updatePool.awaitTermination(10, TimeUnit.SECONDS);
+
         long updateElapsed = System.currentTimeMillis() - updateStart;
         log.info("Phase 3 完成 — 真实耗时: {}ms (含间隔等待)", updateElapsed);
 
