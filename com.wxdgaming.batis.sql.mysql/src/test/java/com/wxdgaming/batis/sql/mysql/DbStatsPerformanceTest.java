@@ -18,6 +18,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * DbStats 性能统计测试（多线程模拟真实环境）
@@ -44,6 +45,8 @@ class DbStatsPerformanceTest {
     static final int THREAD_COUNT = 5;
 
     static MysqlTemplate template;
+    /** 全局唯一 ID 生成器，基于当前纳秒时间戳起始 */
+    static final AtomicLong ID_GENERATOR = new AtomicLong(System.nanoTime());
 
     @RegisterExtension
     static MariaDB4jExtension maria = new MariaDB4jExtension();
@@ -57,7 +60,7 @@ class DbStatsPerformanceTest {
         config.setDriverClassName("com.mysql.cj.jdbc.Driver");
         template = new MysqlTemplate(config);
         // 确保表结构存在（幂等）
-        template.checkTable(AccountEntity.class);
+        template.checkTable(AccountEntityManualId.class);
     }
 
     /**
@@ -66,7 +69,7 @@ class DbStatsPerformanceTest {
     @BeforeEach
     void cleanStart() {
         try (var qr = new QueryRunner(template)) {
-            qr.update("DELETE FROM `t_account`");
+            qr.update("DELETE FROM `t_account_manual`");
         }
         template.getStats().reset();
     }
@@ -96,15 +99,15 @@ class DbStatsPerformanceTest {
             insertPool.submit(() -> {
                 try {
                     for (int round = threadIndex; round < totalBatches; round += THREAD_COUNT) {
-                        List<AccountEntity> batch = buildBatch(round);
+                        List<AccountEntityManualId> batch = buildBatch(round);
+                        long batchStart = System.currentTimeMillis();
                         try (var br = template.beanRunner()) {
                             br.insertBeanList(batch);
                         }
+                        long batchMs = System.currentTimeMillis() - batchStart;
                         int done = insertProgress.addAndGet(BATCH);
-                        log.info("  [Thread-{}] 已插入: {}/{} 条 | 最近一次: {}ms, {} 条",
-                                threadIndex, done, TOTAL,
-                                template.getStats().getInsertStats().getLastMs(),
-                                template.getStats().getInsertStats().getLastRecords());
+                        log.info("  [Thread-{}] 已插入: {}/{} 条 | 本批耗时: {}ms",
+                                threadIndex, done, TOTAL, batchMs);
 
                         if (round + THREAD_COUNT < totalBatches) {
                             sleep(INTERVAL_MS);
@@ -134,10 +137,10 @@ class DbStatsPerformanceTest {
                 ║  Phase 2: 查询全部数据，准备批量更新                         ║
                 ╚══════════════════════════════════════════════════════════════╝""");
 
-        List<AccountEntity> allAccounts;
+        List<AccountEntityManualId> allAccounts;
         try (var br = template.beanRunner()) {
             long qStart = System.currentTimeMillis();
-            allAccounts = br.queryAll(AccountEntity.class);
+            allAccounts = br.queryAll(AccountEntityManualId.class);
             log.info("  查询 {} 条记录，耗时: {}ms", allAccounts.size(),
                     System.currentTimeMillis() - qStart);
         }
@@ -163,22 +166,22 @@ class DbStatsPerformanceTest {
                 try {
                     for (int round = threadIndex; round < totalBatches; round += THREAD_COUNT) {
                         int offset = round * BATCH;
-                        List<AccountEntity> batch = allAccounts.subList(offset, offset + BATCH);
+                        List<AccountEntityManualId> batch = allAccounts.subList(offset, offset + BATCH);
                         // 修改字段值以触发更新
-                        for (AccountEntity account : batch) {
+                        for (AccountEntityManualId account : batch) {
                             account.setBalance(new BigDecimal("999.99"));
                             account.setVipLevel((account.getVipLevel() + threadIndex + 1) % 10);
                             account.setLastLoginTime(new Date());
                             account.setFrozen((round % 2) == 0);
                         }
+                        long batchStart = System.currentTimeMillis();
                         try (var br = template.beanRunner()) {
                             br.updateBeanList(batch);
                         }
+                        long batchMs = System.currentTimeMillis() - batchStart;
                         int done = updateProgress.addAndGet(BATCH);
-                        log.info("  [Thread-{}] 已更新: {}/{} 条 | 最近一次: {}ms, {} 条",
-                                threadIndex, done, TOTAL,
-                                template.getStats().getUpdateStats().getLastMs(),
-                                template.getStats().getUpdateStats().getLastRecords());
+                        log.info("  [Thread-{}] 已更新: {}/{} 条 | 本批耗时: {}ms",
+                                threadIndex, done, TOTAL, batchMs);
 
                         if (round + THREAD_COUNT < totalBatches) {
                             sleep(INTERVAL_MS);
@@ -250,7 +253,7 @@ class DbStatsPerformanceTest {
         // 验证数据完整性
         // ======================================================================
         try (var qr = new QueryRunner(template)) {
-            Number count = (Number) qr.query("SELECT COUNT(*) FROM `t_account`",
+            Number count = (Number) qr.query("SELECT COUNT(*) FROM `t_account_manual`",
                     com.wxdgaming.batis.sql.ResultSetHandlers.firstCell());
             Assertions.assertEquals(TOTAL, count.intValue(),
                     "表中的记录数应为 " + TOTAL);
@@ -262,10 +265,11 @@ class DbStatsPerformanceTest {
     /**
      * 构建一批测试数据（唯一 accountName 避免唯一索引冲突）
      */
-    private static List<AccountEntity> buildBatch(int round) {
-        List<AccountEntity> batch = new ArrayList<>(BATCH);
+    private static List<AccountEntityManualId> buildBatch(int round) {
+        List<AccountEntityManualId> batch = new ArrayList<>(BATCH);
         for (int i = 0; i < BATCH; i++) {
-            AccountEntity account = new AccountEntity();
+            AccountEntityManualId account = new AccountEntityManualId();
+            account.setId(ID_GENERATOR.incrementAndGet());
             account.setAccountName("perf_" + (round * BATCH + i));
             account.setBalance(new BigDecimal(String.format("%.2f", 100.0 + i % 100)));
             account.setVipLevel(i % 10);

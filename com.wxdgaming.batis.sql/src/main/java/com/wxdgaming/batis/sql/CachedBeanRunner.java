@@ -68,7 +68,7 @@ public class CachedBeanRunner {
     /** Tombstone 哨兵，标记该 Key 已被逻辑删除但尚未刷到 DB */
     private static final Object TOMBSTONE = new Object();
 
-    private final JdbcTemplate jdbcTemplate;
+    @Getter private final JdbcTemplate jdbcTemplate;
     private final EntityCache<String, Object> cache;
 
     /** 待 INSERT：key → bean */
@@ -78,9 +78,7 @@ public class CachedBeanRunner {
     /** 待 DELETE：key → bean（保留引用以提取主键参数） */
     private final ConcurrentHashMap<String, Object> dirtyDeletes = new ConcurrentHashMap<>();
     /** 批量提交大小，从 JdbcTemplate 继承默认值，可随时修改；&lt;=0 表示不分组一次性提交 */
-    @Setter
-    @Getter
-    private int batchSize;
+    @Setter @Getter private int batchSize;
 
     public CachedBeanRunner(JdbcTemplate jdbcTemplate) {
         this(jdbcTemplate, new LocalEntityCache<>());

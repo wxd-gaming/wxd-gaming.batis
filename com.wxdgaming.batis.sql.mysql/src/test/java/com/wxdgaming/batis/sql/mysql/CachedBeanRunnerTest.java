@@ -1,5 +1,6 @@
 package com.wxdgaming.batis.sql.mysql;
 
+import com.wxdgaming.batis.DbStats;
 import com.wxdgaming.batis.cache.LocalEntityCache;
 import com.wxdgaming.batis.sql.BeanRunner;
 import com.wxdgaming.batis.sql.CachedBeanRunner;
@@ -840,6 +841,10 @@ class CachedBeanRunnerTest {
                 delayedUpdates.get(), immediateUpdates.get(),
                 delayedDeletes.get(), immediateDeletes.get(),
                 queryByIdCount.get(), flushCount.get(), queryAllCount.get());
+
+        DbStats stats = cachedRunner.getJdbcTemplate().getStats();
+        String prettyString = stats.toPrettyString();
+        log.info("DB 统计: \n{}", prettyString);
 
         assertTrue(totalOps > 0, "应至少执行了一些操作");
     }
