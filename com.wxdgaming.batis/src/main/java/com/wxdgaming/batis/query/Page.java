@@ -44,11 +44,15 @@ public final class Page<T> {
         return sort;
     }
 
-    /** 总页数 */
+    /**
+     * 总页数：向上取整（{@code (total + size - 1) / size}），size 为 0 时返回 0 防除零。
+     * <p>size 允许为 0 仅出现在无数据构造的边界页，正常分页 size &gt;= 1（由 {@link Pageable} 保证）。</p>
+     */
     public int getTotalPages() {
         return size == 0 ? 0 : (int) ((total + size - 1) / size);
     }
 
+    /** 是否存在下一页：当前页码严格小于总页数 */
     public boolean hasNext() {
         return page < getTotalPages();
     }

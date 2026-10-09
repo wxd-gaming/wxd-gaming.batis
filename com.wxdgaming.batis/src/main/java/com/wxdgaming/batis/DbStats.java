@@ -210,7 +210,8 @@ public class DbStats {
                 if (elapsedMs <= curMax) break;
             } while (!maxMs.compareAndSet(curMax, elapsedMs));
 
-            // 更新 min（CAS 循环，首次时 curMin == 0 直接写入）
+            // 更新 min（CAS 循环）：以 0 当作"尚未初始化"哨兵——首次记录(curMin==0)必须写入，
+            // 之后只有更小的耗时才替换；否则 min 会永远停在初始值 0
             long curMin;
             do {
                 curMin = minMs.get();

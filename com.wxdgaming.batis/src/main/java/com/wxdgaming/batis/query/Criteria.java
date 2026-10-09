@@ -60,7 +60,7 @@ public final class Criteria {
         return new Criteria(Kind.LEAF, criterion, null);
     }
 
-    /** 访问树结构（渲染入口） */
+    /** 访问树结构（渲染入口）：前序遍历，叶子访问顺序与 {@link #flatten()} 一致 */
     public <S> S accept(Visitor<S> visitor) {
         return switch (kind) {
             case LEAF -> visitor.visitLeaf(leaf);
@@ -98,6 +98,11 @@ public final class Criteria {
                 new Criterion(fragment, CriterionOperator.RAW, List.of(params)), null);
     }
 
+    /**
+     * 组合子条件：过滤 null、空集合直接拒绝、单一条件塌缩为自身。
+     * <p>塌缩单个子节点是为保持树形最简——避免 {@code AND(x)} 这种冗余包裹改变渲染括号，
+     * 从而让 {@code allOf(单条件)} 与裸条件渲染出完全相同的 SQL 与参数序。</p>
+     */
     private static Criteria composite(Kind kind, Criteria... conditions) {
         List<Criteria> list = new ArrayList<>();
         for (Criteria c : conditions) {
@@ -125,17 +130,25 @@ public final class Criteria {
         return not(this);
     }
 
-    /** 叶子条件序列，顺序即占位符顺序 */
+    /**
+     * 深度优先展平为叶子条件序列——<b>顺序即 SQL 占位符顺序即参数绑定顺序</b>。
+     * <p>这是查询 DSL 的命门不变式：sql 层 SelectSqlBuilder 按同一 DFS 顺序渲染占位符并追加
+     * LIMIT/OFFSET 参数，最终绑定参数序恒为 {@code [WHERE 展平参数..., LIMIT, OFFSET]}。
+     * 因此 {@link #collect} 的遍历次序（左到右、AND/OR 依子节点声明序、NOT 透传内部）绝不能与渲染端分叉，
+     * 否则参数会错位绑定到错误的占位符。{@code CriteriaFlattenTest} 锁死了本契约。</p>
+     */
     public List<Criterion> flatten() {
         List<Criterion> result = new ArrayList<>();
         collect(result);
         return result;
     }
 
+    /** 前序收集叶子：与 {@link #accept} 渲染访问器共用同一遍历顺序，保证展平与渲染参数一一对应 */
     private void collect(List<Criterion> out) {
         switch (kind) {
             case LEAF -> out.add(leaf);
             case AND, OR -> children.forEach(c -> c.collect(out));
+            // NOT 不改参数顺序，直接收集被取反子节点的叶子
             case NOT -> children.getFirst().collect(out);
         }
     }

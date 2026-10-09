@@ -54,6 +54,8 @@ public class LocalEntityCache<K, V> implements EntityCache<K, V> {
                 .refreshAfterWrite(refreshAfterWrite, timeUnit)
                 .recordStats()
                 .removalListener((K key, V value, RemovalCause cause) -> {
+                    // 只在"被动淘汰"（过期/容量溢出）时回调兜底刷盘；显式 remove/invalidate 属主动移除，
+                    // 其脏数据由 CachedBeanRunner 就地处理，不能在这里重复触发刷盘
                     if (cause.wasEvicted() && value != null && evictionListener != null) {
                         try {
                             evictionListener.accept(Map.entry(key, value));
@@ -63,6 +65,8 @@ public class LocalEntityCache<K, V> implements EntityCache<K, V> {
                     }
                 })
                 .build(k -> {
+                    // 故意不提供全局 loader：本缓存的加载语义是"每 Key 携带各自的查库函数"，
+                    // 直接调 Caffeine 的 get(key) 会走到这里并报错，强制使用方走 getOrLoad(key, loader)
                     throw new IllegalStateException(
                             "请使用 getOrLoad(key, loader)，不要直接调用 get(key)");
                 });
@@ -73,6 +77,10 @@ public class LocalEntityCache<K, V> implements EntityCache<K, V> {
         return cache.getIfPresent(key);
     }
 
+    /**
+     * 防击穿的单飞加载：同一 Key 并发下 Caffeine 只放行一个线程执行 loader，其余等待复用结果。
+     * <p>loader 抛异常时降级返回 null（不缓存失败），避免瞬时 DB 抖动污染缓存。</p>
+     */
     @Override
     public V getOrLoad(K key, Function<K, V> loader) {
         try {
@@ -85,6 +93,8 @@ public class LocalEntityCache<K, V> implements EntityCache<K, V> {
 
     @Override
     public void put(K key, V value) {
+        // 忽略 null 值：不把"无数据"写进缓存（穿透防护交给上层 CachedBeanRunner 的 Tombstone 哨兵，
+        // 哨兵本身是非 null 引用，因此能通过此处的过滤被正常缓存）
         if (value != null) {
             cache.put(key, value);
         }

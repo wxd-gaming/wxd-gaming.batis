@@ -42,11 +42,14 @@ public class IndexInfo {
     public boolean equals(Object o) {
         if (this == o) return true;
         if (!(o instanceof IndexInfo indexInfo)) return false;
+        // 仅按索引名判等：实体解析末尾用 distinct() 去重，同名索引只保留一条
+        // （字段级索引与 @Column(unique) 自动派生的 uk_ 索引可能同名，靠名字收敛避免重复建索引）
         return Objects.equals(name, indexInfo.name);
     }
 
     @Override
     public int hashCode() {
+        // 与 equals 保持一致：只用 name 参与散列
         return Objects.hashCode(name);
     }
 

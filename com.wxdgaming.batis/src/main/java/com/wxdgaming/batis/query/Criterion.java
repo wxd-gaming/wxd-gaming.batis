@@ -18,7 +18,11 @@ public record Criterion(String column, CriterionOperator op, List<Object> values
         return new Criterion(column, op, List.of(values));
     }
 
-    /** 占位符数量 */
+    /**
+     * 该叶子贡献的占位符数量。
+     * <p>IS_NULL / IS_NOT_NULL 无值、EQ_COL 的右侧是列标识符而非绑定参数，故均为 0；
+     * 其余按 values 数量计。渲染端据此校验"值个数 == 占位符个数"，防止参数错位。</p>
+     */
     public int placeholderCount() {
         return switch (op) {
             case IS_NULL, IS_NOT_NULL, EQ_COL -> 0;

@@ -22,10 +22,15 @@ public class MysqlBeanToDeleteHandler implements BeanToDeleteHandler {
 
     private final BeanValueHandler valueHandler;
 
+    /** 注入与写/读端共享的值转换协作者（主键参数也需按方言转换后再绑定） */
     public MysqlBeanToDeleteHandler(BeanValueHandler valueHandler) {
         this.valueHandler = valueHandler;
     }
 
+    /**
+     * 构建按主键删除语句：{@code DELETE FROM `t` WHERE `id` = ?}（复合主键以 AND 串联）。
+     * <p>无主键实体直接抛异常：没有 WHERE 的 DELETE 等于清表，绝不能静默生成。</p>
+     */
     @Override
     public String buildDeleteByIdSql(Object bean) {
         TableInfo tableInfo = EntityParser.parse(bean.getClass());
@@ -49,6 +54,7 @@ public class MysqlBeanToDeleteHandler implements BeanToDeleteHandler {
         return sql;
     }
 
+    /** 提取 WHERE 主键参数：与 buildDeleteByIdSql 的 ? 同序（按列声明顺序收集主键列），并做方言值转换 */
     @Override
     public Object[] buildDeleteByIdParams(Object bean) {
         TableInfo tableInfo = EntityParser.parse(bean.getClass());
@@ -64,6 +70,11 @@ public class MysqlBeanToDeleteHandler implements BeanToDeleteHandler {
         return whereParams.toArray();
     }
 
+    /**
+     * 构建无 WHERE 的全表 DELETE（逐行清空数据）。
+     * <p>与 TRUNCATE 的分工见 {@link MysqlTableTruncateHandler}：DELETE 逐行删除、事务内可回滚、
+     * 触发行级触发器；TRUNCATE 是 DDL、隐式提交且通常重置自增计数器。由调用方按需选用，本方法只负责生成 SQL 文本。</p>
+     */
     @Override
     public String buildDeleteAllSql(TableInfo tableInfo) {
         String sql = "DELETE FROM `" + tableInfo.getTableName().toLowerCase() + "`";

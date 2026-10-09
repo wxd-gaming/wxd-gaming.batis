@@ -11,7 +11,11 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Type;
 
 /**
- * 运行时列元数据
+ * 运行时列元数据：EntityParser 对"一个持久化字段"的完整描述。
+ * <p>关键区分——{@link #type}（物理字面量，方言相关，可能为 null）与 {@link #sqlType}（逻辑类型）互斥：
+ * 自动推断的列只填 sqlType，显式书写物理类型的列只填 type；DDL 渲染时由方言层据此选择来源。
+ * {@link #field} 与 {@link #readMethod}/{@link #writeMethod} 在解析期一次性缓存，
+ * 运行期读写实体走它们而非重复反射。</p>
  *
  * @author wxd-gaming
  */

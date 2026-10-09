@@ -5,7 +5,10 @@ import java.util.Collection;
 import java.util.List;
 
 /**
- * 单列条件构造器
+ * 单列条件构造器：由 {@link Criteria#where(String)} 创建，链式产出一个叶子 {@link Criteria}。
+ * <p>每个方法只操作同一列，返回的叶子内 values 顺序即该列占位符顺序（如 {@code between(lo,hi)} 固定 lo 在前）。
+ * {@code eq/ne} 对 null 值做了语义收敛：自动降级为 IS NULL / IS NOT NULL，因为 SQL 里 {@code col = NULL}
+ * 恒为未知而非真，直接绑 null 会得到错误结果。</p>
  *
  * @author wxd-gaming(無心道, 15388152619)
  * @version 2026-10-09
@@ -60,9 +63,12 @@ public final class CriteriaBuilder {
     }
 
     public Criteria in(Collection<?> values) {
+        // 空集合会产生 `col IN ()` 语法错误，且语义上等价于恒假——与其悄悄生成坏 SQL，
+        // 不如快速失败，强制调用方在空集合场景短路掉整条查询
         if (values == null || values.isEmpty()) {
             throw new IllegalArgumentException("IN 条件值不能为空，空集合场景请直接短路业务逻辑");
         }
+        // List.copyOf 做不可变快照，防止外部集合后续被改动导致已建好的 Criteria 参数漂移
         return Criteria.of(new Criterion(column, CriterionOperator.IN, List.copyOf(values)));
     }
 

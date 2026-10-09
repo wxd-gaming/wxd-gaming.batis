@@ -15,7 +15,8 @@ import java.util.regex.Pattern;
 
 /**
  * mysql JdbcTemplate
- * <p>自动装配 MysqlDbMetaHandler、MysqlTableCreateHandler、MysqlTableAlterHandler</p>
+ * <p>构造时经 initDefaults 自动装配 MySQL 方言的全部 SPI：元数据回读、建表/改表/删表/截断、
+ * 列类型渲染、四类 Bean&lt;-&gt;SQL 处理器与异常翻译器（清单见该方法注释）。</p>
  * <p>构造时自动检查目标数据库是否存在，不存在则创建（通过连接 mysql 系统库执行 CREATE DATABASE IF NOT EXISTS）。</p>
  *
  * @author wxd-gaming(無心道, 15388152619)
@@ -27,19 +28,39 @@ public class MysqlTemplate extends JdbcTemplate {
     private static final Pattern DB_NAME_PATTERN = Pattern.compile("jdbc:mysql://[^/]+/([^?&#]+)");
     private static final Logger log = LoggerFactory.getLogger(MysqlTemplate.class);
 
+    /**
+     * 由 HikariCP 配置构造：先走 {@link #ensureDatabaseAndCreateDataSource} 自动建库再建连接池。
+     * <p>super(...) 必须先把 DataSource 造出来，因此自动建库这步只能作为 super 的参数表达式执行；
+     * initDefaults 在 super 之后调用，保证方言 SPI 注入时 dataSource 已就绪。</p>
+     */
     public MysqlTemplate(HikariConfig config) {
         super(ensureDatabaseAndCreateDataSource(config));
         initDefaults();
     }
 
+    /**
+     * 由现成连接池构造：跳过自动建库（调用方自行保证目标库存在），只负责注入方言 SPI。
+     */
     public MysqlTemplate(HikariDataSource dataSource) {
         super(dataSource);
         initDefaults();
     }
 
+    /**
+     * MySQL 方言所有 SPI 的唯一装配点。
+     * <p>核心层 JdbcTemplate 只声明了一组可空的方言接口字段（dbMetaProvider、columnTypeDefHandler、
+     * beanToInsertHandler 等），自身不认识任何具体数据库；本方法把这些字段一次性填成 MySQL 实现。
+     * 之所以用 setter 注入而非在核心里 new 具体类：核心模块不依赖本 mysql 模块（依赖方向是单向的，
+     * 核心 &lt;- sql &lt;- sql.mysql），核心根本看不到 Mysql*Handler 这些类，也就无从硬编码；
+     * 换成 setter 后，使用方还能在构造完成后单独替换某一项（例如自定义异常翻译器）来覆盖默认装配。</p>
+     * <p>valueHandler 是唯一的例外，它不是 SPI 字段而是被下面四个 handler 共享的内部协作者：
+     * 值转换（JSON/BLOB/日期/枚举）逻辑各方言只有一份实现，用同一个实例可避免重复构造，
+     * 也保证 INSERT 写入端与 SELECT 读取端对同一列使用完全对称的转换规则。</p>
+     */
     private void initDefaults() {
         MysqlBeanValueHandler valueHandler = new MysqlBeanValueHandler();
         setDbMetaProvider(new MysqlDbMetaHandler());
+        // 无状态、纯函数的类型渲染/规格化器，用单例常量即可，无需每次 new
         setColumnTypeDefHandler(MysqlColumnTypeDefHandler.INSTANCE);
         setTableCreateHandler(new MysqlTableCreateHandler());
         setTableAlterHandler(new MysqlTableAlterHandler());

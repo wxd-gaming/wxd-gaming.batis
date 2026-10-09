@@ -23,10 +23,17 @@ public class MysqlBeanToUpdateHandler implements BeanToUpdateHandler {
 
     private final BeanValueHandler valueHandler;
 
+    /** 注入与读端共享的值转换协作者（见 {@code MysqlTemplate#initDefaults}） */
     public MysqlBeanToUpdateHandler(BeanValueHandler valueHandler) {
         this.valueHandler = valueHandler;
     }
 
+    /**
+     * 构建 UPDATE 语句：非主键列进 SET、主键列进 WHERE，形如
+     * {@code UPDATE `t` SET `a` = ?, `b` = ? WHERE `id` = ?}。
+     * <p>主键只作定位条件、不出现在 SET 里，天然避免"改到自己主键"；复合主键以 AND 串联全部主键列。
+     * 无主键实体无法安全定位目标行，直接抛异常拒绝，好过退化成全表更新。</p>
+     */
     @Override
     public String buildUpdateSql(Object bean) {
         TableInfo tableInfo = EntityParser.parse(bean.getClass());
@@ -54,6 +61,11 @@ public class MysqlBeanToUpdateHandler implements BeanToUpdateHandler {
         return sql;
     }
 
+    /**
+     * 提取 UPDATE 预编译参数：SET 段参数在前、WHERE 段主键参数在后。
+     * <p>这是与 {@link #buildUpdateSql} 配套的参数顺序不变式——SQL 文本里 SET 的 ? 先于 WHERE 的 ?，
+     * 参数数组必须同序拼接（先 setParams 再 addAll whereParams），错位会把主键值绑到业务列上。</p>
+     */
     @Override
     public Object[] buildUpdateParams(Object bean) {
         TableInfo tableInfo = EntityParser.parse(bean.getClass());

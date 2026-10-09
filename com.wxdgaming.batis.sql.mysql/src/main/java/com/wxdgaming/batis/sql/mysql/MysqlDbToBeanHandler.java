@@ -26,6 +26,10 @@ public class MysqlDbToBeanHandler implements SqlDbToBeanHandler {
 
     private final BeanValueHandler valueHandler;
 
+    /**
+     * 值转换协作者由外部注入（MysqlTemplate 中的共享单例），本类不自行 new，
+     * 保证读端与写端（Insert/Update）使用同一个转换实例。
+     */
     public MysqlDbToBeanHandler(BeanValueHandler valueHandler) {
         this.valueHandler = valueHandler;
     }
@@ -68,7 +72,11 @@ public class MysqlDbToBeanHandler implements SqlDbToBeanHandler {
 
     // ===== 行映射（DB -> Bean） =====
 
-    /** 将 ResultSet 当前行映射为实体，列标签与列名大小写不敏感匹配 */
+    /**
+     * 将 ResultSet 当前行映射为实体：逐列按标签找实体列元数据，值经 {@link BeanValueHandler} 方言转换后 setter 写入。
+     * <p>结果集比实体多出的列（如手写 SELECT 附加的表达式列）直接跳过，映射只对实体声明的字段负责；
+     * 库端 NULL 也跳过写入，让字段保持 Java 默认值（null/0），避免把 NULL 硬塞进基本类型 setter 报错。</p>
+     */
     @Override
     public <T> T toBean(ResultSet rs, Class<T> entityClass) throws SQLException {
         TableInfo tableInfo = EntityParser.parse(entityClass);

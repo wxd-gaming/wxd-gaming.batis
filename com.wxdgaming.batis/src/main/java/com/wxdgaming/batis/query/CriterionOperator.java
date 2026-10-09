@@ -14,6 +14,7 @@ public enum CriterionOperator {
     GE(">="),
     LT("<"),
     LE("<="),
+    // 三种 LIKE 的 SQL 关键字相同，模糊差异只体现在绑定值的通配符位置（由 CriteriaBuilder 拼接）
     LIKE("LIKE"),
     LEFT_LIKE("LIKE"),
     RIGHT_LIKE("LIKE"),
@@ -24,7 +25,7 @@ public enum CriterionOperator {
     IS_NOT_NULL("IS NOT NULL"),
     /** 列对列相等比较，右侧为另一个列名（非参数） */
     EQ_COL("="),
-    /** 原始 SQL 片段逃生舱（有注入风险，仅限受信输入） */
+    /** 原始 SQL 片段逃生舱（有注入风险，仅限受信输入）；无操作符 token，故 sql 为 null */
     RAW(null);
 
     private final String sql;

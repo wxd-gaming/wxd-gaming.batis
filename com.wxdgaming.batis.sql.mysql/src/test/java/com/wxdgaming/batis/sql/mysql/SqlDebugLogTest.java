@@ -25,7 +25,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * 执行过程 debug 日志测试：QueryRunner 五个执行入口 + BeanRunner 批量插入旁路
- * <p>日志开关 = logger 级别（不引入第二套框架开关）。</p>
+ * <p>日志开关 = logger 级别（不引入第二套框架开关）：实现里统一用 isDebugEnabled 短路，
+ * 级别不是 DEBUG 时既不拼字符串也不记录耗时，所以生产默认零开销。
+ * 本类用 logback 的 ListAppender 把日志截获到内存里，从"日志文本"这个外部可见的行为来断言，
+ * 而不是去测内部计时方法。</p>
+ * <p>断言的正反两面同样重要：该输出的必须输出（SQL、参数、结果规模、耗时），
+ * 不该输出的必须没有（批量不能逐条打印参数，否则一次 5 万条的批量会把日志刷爆，
+ * 也可能把敏感数据整批落到日志里）。</p>
+ * <p>BeanRunner 的批量插入走的是绕过 QueryRunner 的裸 JDBC 旁路，
+ * 若只给 QueryRunner 埋点，这条最常用的写入路径在 debug 下反而是静默的，故单独覆盖。</p>
  *
  * @author wxd-gaming(無心道, 15388152619)
  * @version 2026-10-09
@@ -55,6 +63,13 @@ class SqlDebugLogTest {
         template.checkTable(AccountEntity.class);
     }
 
+    /**
+     * 挂上内存 appender，并把两个被测 logger 临时调到 DEBUG。
+     * <p>三处必要的收尾动作都在 {@link #detachAppender()} 里：摘 appender、恢复原级别、停止 appender。
+     * 级别必须恢复是因为 logger 是 JVM 全局单例，留下 DEBUG 会让同进程后续测试类的日志全部炸出来。
+     * 末尾清空 appender 列表：建表和清表自身也会打 debug 日志，
+     * 不清掉就会污染"某条日志是否出现"这类断言。</p>
+     */
     @BeforeEach
     void attachAppender() {
         runnerLogger = (Logger) LoggerFactory.getLogger(QueryRunner.class);
@@ -90,6 +105,15 @@ class SqlDebugLogTest {
         return messages().stream().filter(m -> m.contains(needle)).findFirst().orElse(null);
     }
 
+    /**
+     * 用例①：query / execute / update / executeInsert 四个入口都要输出可调试的单行日志。
+     * <p>动作：依次执行四类语句（查计数、建表、插入一行、插入并取自增键）。
+     * 断言每条日志都带齐四要素：语句类型标签、原始 SQL、绑定参数、结果与耗时
+     * ——例如 update 那条必须能同时看到 {@code 参数: [42]} 和 {@code 结果: 1}，
+     * executeInsert 那条要看到回传的自增主键。
+     * 这四要素就是"复现一条 SQL 所需的全部信息"，缺任何一项调试时都得回去加日志再跑一遍。
+     * finally 里 DROP 探针表，避免污染持久化数据目录里的 test 库。</p>
+     */
     @Test
     void queryExecuteUpdateInsertLogsContainSqlParamsAndResult() {
         try (QueryRunner qr = new QueryRunner(template)) {
@@ -120,6 +144,14 @@ class SqlDebugLogTest {
         }
     }
 
+    /**
+     * 用例②：执行失败同样要留下日志（异常向上抛之前先记录）。
+     * <p>动作：查询一张不存在的表，异常被 catch 住只关心日志。
+     * 断言：出现一条"失败"日志，且里面带有出问题的表名。
+     * 意义：失败路径的日志价值高于成功路径——线上排查看的就是"哪条 SQL 在什么参数下炸了"。
+     * 如果实现只在成功分支打日志，抛异常时调用栈里的异常信息虽然带 SQL，
+     * 但没开 debug 的日志文件里就一条痕迹都没有，事后无法定位。</p>
+     */
     @Test
     void failureIsLoggedWithSqlContext() {
         try (QueryRunner qr = new QueryRunner(template)) {
@@ -134,6 +166,15 @@ class SqlDebugLogTest {
         }
     }
 
+    /**
+     * 用例③：批量日志只报"组数 + 耗时 + 影响行数"，绝不逐条打印参数。
+     * <p>动作：一次 3 组参数的 executeBatch。断言三件事：
+     * 开始前那条带"参数组数: 3"；结束后有一条"完成"并带耗时；
+     * 整份日志里检索不到任何一行的参数值（用第一组的 b1 作为探针）。
+     * 最后这条是这个用例的核心：批量的参数动辄成千上万条，
+     * 逐条打印会瞬间刷爆日志盘，并把本不该落盘的业务数据整批写进日志文件。
+     * 用"数量 + 耗时"表达批量执行信息，才是可运维的做法。</p>
+     */
     @Test
     void batchLogsShowSizeAndElapsedNotEveryRow() {
         try (QueryRunner qr = new QueryRunner(template)) {
@@ -152,6 +193,14 @@ class SqlDebugLogTest {
         }
     }
 
+    /**
+     * 用例④：BeanRunner 的批量插入旁路也有日志（埋点不能只覆盖 QueryRunner）。
+     * <p>背景：{@code insertBeanList} 为了性能直接用裸 JDBC 批处理，绕开了 QueryRunner 的五个入口，
+     * 因此它不会自动获得埋点。这条路径恰恰是写入量最大的路径，
+     * 如果 debug 下静默，就会出现"看得到查询 SQL、看不到实际写了什么"的错误印象。</p>
+     * <p>动作：插入 2 条实体。断言：有一条"参数组数: 2"的批量插入日志和一条"完成"日志，
+     * 并且同样不出现每条实体的具体值（用第一条的账号名 wb-1 作探针）。</p>
+     */
     @Test
     void beanRunnerBatchInsertBypassIsLogged() {
         try (BeanRunner br = new BeanRunner(template)) {

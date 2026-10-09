@@ -13,10 +13,12 @@ public final class Pageable {
     private final Sort sort;
 
     private Pageable(int page, int size, Sort sort) {
+        // 1-based 页码：面向业务的"第几页"语义，页 0 无意义故拒绝；size 同理必须 >= 1
         if (page < 1) throw new IllegalArgumentException("页码从 1 开始，page=" + page);
         if (size < 1) throw new IllegalArgumentException("每页大小必须 >= 1，size=" + size);
         this.page = page;
         this.size = size;
+        // 排序为空时退化为无排序的空 Sort，避免下游对 null 排序做特判
         this.sort = sort == null ? Sort.by() : sort;
     }
 

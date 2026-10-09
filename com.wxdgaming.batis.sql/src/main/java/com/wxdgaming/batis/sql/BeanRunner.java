@@ -20,6 +20,28 @@ import java.util.List;
 
 /**
  * Bean CRUD 操作器，封装实体级别的插入、查询、更新、删除操作
+ * <p>
+ * 本类是"实体 ↔ 表"这一层的编排器，它刻意只做编排，四件事全部外包：
+ * </p>
+ * <ul>
+ *   <li><b>连接与执行</b>：全部走内部 {@link QueryRunner}，因此实体操作自动继承事务绑定、
+ *       只读写保护、语句超时和 debug 日志，本类不重复实现任何 JDBC 细节；</li>
+ *   <li><b>SQL 长什么样</b>：交给 {@link BeanToInsertHandler} / {@link BeanToUpdateHandler} /
+ *       {@link BeanToDeleteHandler} / {@link BeanToSelectHandler} 四个方言 SPI，
+ *       所以同一份 BeanRunner 可以跑在 MySQL 或将来的 pgsql 上；未装配时
+ *       {@code requireXxxHandler()} 抛出可读的 UnsupportedOperationException，而不是让人猜 NPE 从哪来；</li>
+ *   <li><b>元数据</b>：由 {@code EntityParser.parse} 提供 TableInfo，本类只读不问；</li>
+ *   <li><b>性能统计</b>：每个公开写方法向 {@code DbStats} 记一次。</li>
+ * </ul>
+ * <p>
+ * 两种构造对应两种生命周期（见下方重载注释）：独立模式自己管连接，共享模式寄生在别人的
+ * QueryRunner 上。事务与 {@link CachedBeanRunner} 必须用共享模式，否则实体操作会和事务脱节。
+ * </p>
+ * <p>
+ * 批量方法（{@code *BeanList}）返回 {@link BatchResult} 而非抛异常：批量插入的真实诉求通常是
+ * "尽可能写进去，把失败的那几条交给我处理"，所以失败以条目粒度收集，调用方用
+ * {@link BatchResult#hasFailures()} 判断。与之相对，单条方法一律抛异常。
+ * </p>
  *
  * @author wxd-gaming(無心道, 15388152619)
  * @version 2026-07-31
@@ -29,15 +51,24 @@ import java.util.List;
 public class BeanRunner implements AutoCloseable {
 
     private final JdbcTemplate jdbcTemplate;
+    /** 实际执行载体：本类不直接持有连接 */
     private final QueryRunner queryRunner;
     /** 是否需要在 close 时关闭内部的 QueryRunner（外部注入的不关闭） */
     private final boolean closeQueryRunner;
-    /** 批量提交大小，从 JdbcTemplate 继承默认值，可随时修改；&lt;=0 表示不分组一次性提交 */
+    /**
+     * 批量提交大小，从 JdbcTemplate 继承默认值，可随时修改；&lt;=0 表示不分组一次性提交。
+     * <p>分组不只是为了控制驱动侧 addBatch 的内存占用，更关键的是缩小锁持有窗口：
+     * 一次 executeBatch 会把整批压成一次网络往返并一直持有到语句结束，
+     * 分组后每组独立提交，死锁/锁超时的影响面被限制在一组之内。
+     * 代价是"分组之间存在部分成功"，所以只有配合 BatchResult 的条目粒度报告才安全。</p>
+     */
     @Setter
     private int batchSize;
 
     /**
-     * 独立模式：自行创建 QueryRunner，close 时归还连接
+     * 独立模式：自行创建 QueryRunner，close 时归还连接。
+     * <p>适合一次性的实体操作。线程上若绑定了事务，内部 QueryRunner 会自动改用事务连接，
+     * close() 也就不会真的归还池连接（判定在 QueryRunner 的 source 里）。</p>
      */
     public BeanRunner(JdbcTemplate jdbcTemplate) {
         this.jdbcTemplate = jdbcTemplate;
@@ -47,7 +78,10 @@ public class BeanRunner implements AutoCloseable {
     }
 
     /**
-     * 共享模式：复用外部 QueryRunner（事务场景），close 时不关闭连接
+     * 共享模式：复用外部 QueryRunner（事务场景），close 时不关闭连接。
+     * <p>典型用法是 {@code TransactionTemplate} 回调内、以及 {@link CachedBeanRunner} 刷盘时
+     * 复用同一条连接——共享 QueryRunner 才能保证"同一个事务、同一条连接"，
+     * 否则批量插入会各借各的连接，事务语义直接失效。</p>
      */
     public BeanRunner(QueryRunner queryRunner) {
         this.jdbcTemplate = queryRunner.getJdbcTemplate();
@@ -56,6 +90,7 @@ public class BeanRunner implements AutoCloseable {
         this.batchSize = this.jdbcTemplate.getBatchSize();
     }
 
+    /** 独立模式才释放内部 Runner；共享模式只丢弃引用，连接归注入方 */
     @Override
     public void close() {
         if (closeQueryRunner) {
@@ -65,6 +100,11 @@ public class BeanRunner implements AutoCloseable {
 
     // ===== 实体插入/更新（委托给 BeanToInsertHandler / BeanToUpdateHandler） =====
 
+    /**
+     * 取插入方言实现，未注册时给出可定位的错误。
+     * <p>这类"装配缺失"发生在 {@code MysqlTemplate.initDefaults()} 之外（例如自建 JdbcTemplate 忘了注入），
+     * 抛带方法名的 UnsupportedOperationException 比让 NPE 在深处炸出来更容易排障。</p>
+     */
     private BeanToInsertHandler requireInsertHandler() {
         BeanToInsertHandler handler = jdbcTemplate.getBeanToInsertHandler();
         if (handler == null) {
@@ -74,6 +114,7 @@ public class BeanRunner implements AutoCloseable {
         return handler;
     }
 
+    /** 取更新方言实现，未注册时给出可定位的错误 */
     private BeanToUpdateHandler requireUpdateHandler() {
         BeanToUpdateHandler handler = jdbcTemplate.getBeanToUpdateHandler();
         if (handler == null) {
@@ -84,7 +125,15 @@ public class BeanRunner implements AutoCloseable {
     }
 
     /**
-     * 插入实体，自动构建 INSERT SQL 并执行，返回自增主键（无自增列返回 null）
+     * 插入单个实体：自动构建 INSERT SQL 并执行，回取自增主键并写回实体。
+     * <p>
+     * {@code writeGeneratedKey} 这一步让"插入后拿到 ID"成为框架保证的行为，
+     * 调用方不需要再查一次（sql.mysql 测试 BeanRunnerTest 的用例①专门盯这条回写）。
+     * 手工主键（如雪花 ID）实体没有自增列，genId 为 null，回写自然跳过。
+     * </p>
+     * <p>批量降级路径会逐条调用本方法，因此每条都会各记一次 stats；
+     * 外层 {@link #insertBeanList} 又按整批记一次，降级发生时统计存在重复计数（偏高但不丢），
+     * 这是为了保留"逐条各自的耗时"而接受的口径。</p>
      *
      * @param bean 实体对象
      * @return 自增主键，无自增列时返回 null
@@ -99,9 +148,11 @@ public class BeanRunner implements AutoCloseable {
     }
 
     /**
-     * 更新实体，自动构建 UPDATE SQL 并按主键定位执行，返回影响行数
+     * 更新单个实体：自动构建 UPDATE SQL 并按主键定位执行。
+     * <p>影响行数 0 表示"主键没匹配到行"，不是失败；测试用例④因此要求回读字段值，
+     * 光看 rows&gt;0 证明不了改的是对的那一行。</p>
      *
-     * @param bean 实体对象
+     * @param bean 实体对象（主键字段必须有值）
      * @return 影响的行数
      */
     public int updateBean(Object bean) {
@@ -115,8 +166,14 @@ public class BeanRunner implements AutoCloseable {
     /**
      * 安全批量插入：先尝试批量插入，失败后自动降级为逐条插入（无事务，每条 autocommit）。
      * <p>降级场景仅在数据异常时触发，虽慢但不常发生。</p>
+     * <p>
+     * 两级结构：{@code insertBeanList} 负责按 {@link #batchSize} 切片，
+     * {@code doInsertBatchSafe} 负责一组之内的"批量优先、失败降级"。
+     * 切片时把批次起点 {@code baseIndex} 一路传下去，失败条目才能报出在<em>原始列表</em>中的下标，
+     * 而不是组内下标（调用方拿下标回查原始数据，错位等于指错数据）。
+     * </p>
      *
-     * @param beans 实体列表
+     * @param beans 实体列表（同一类型；null 或空直接返回空结果）
      * @param <T>   实体类型
      * @return 批量结果；调用方通过 {@link BatchResult#hasFailures()} 判断是否有失败
      */
@@ -129,6 +186,7 @@ public class BeanRunner implements AutoCloseable {
         if (batchSize <= 0 || beans.size() <= batchSize) {
             doInsertBatchSafe(beans, 0, result);
         } else {
+            // baseIndex 按 batchSize 步进：subList 是视图，组内下标必须换算回全局下标
             int baseIndex = 0;
             for (int offset = 0; offset < beans.size(); offset += batchSize) {
                 int end = Math.min(offset + batchSize, beans.size());
@@ -145,6 +203,10 @@ public class BeanRunner implements AutoCloseable {
     /**
      * 单组安全插入：先批量尝试，失败则逐条降级
      * <p>瞬时故障（死锁、锁超时、连接断开等）直接上抛，不进入逐条重试，避免放大故障。</p>
+     * <p>"失败一条就放弃整批"被刻意排除在降级之外：批量执行只给出"这一批炸了"的信号，
+     * 逐条重跑才能把责任定位到具体实体，代价是慢——但它让 1 条脏数据不再能拖垮 10000 条好数据。</p>
+     *
+     * @param baseIndex 本组第一个元素在原始列表中的下标，用于失败条目的全局定位
      */
     private <T> void doInsertBatchSafe(List<T> beans, int baseIndex, BatchResult<T> result) {
         // Fast path: 批量插入
@@ -171,7 +233,22 @@ public class BeanRunner implements AutoCloseable {
     }
 
     /**
-     * 执行单批 INSERT，负责 PreparedStatement 创建、参数填充、批量执行和自增键回写
+     * 执行单批 INSERT：PreparedStatement 创建、参数填充、批量执行、自增键回写。
+     * <p>
+     * <b>为什么不走现成的 {@link QueryRunner#executeBatch}</b>：那条路径按普通 prepareStatement
+     * 建语句，拿不到生成键。插入必须带回写的 ID，所以这里旁路直连 JDBC，
+     * 代价是日志、事务双分支、autoCommit 恢复这些约定要在本方法里再实现一遍——
+     * {@code SqlDebugLogTest} 的用例④之所以单独覆盖"批量插入旁路"，就是这个原因。
+     * </p>
+     * <p>
+     * 事务双分支的理由与 executeBatch 完全一致（修复过的事故）：早期无条件
+     * setAutoCommit(false)+commit，在外部事务里调用会把外层工作静默提前提交。
+     * 现在事务内只 addBatch/executeBatch，提交与回滚都交回 {@code TransactionTemplate}。
+     * </p>
+     * <p>本方法不记 stats：耗时由 {@link #insertBeanList} 按整批记，降级逐条由 {@link #insertBean} 记，
+     * 避免同一段工作在两处重复入账（降级路径的重复计数见 insertBean 注释）。</p>
+     *
+     * @return 每条语句影响的行数数组
      */
     private <T> int[] doInsertBatch(List<T> beans) {
         BeanToInsertHandler handler = jdbcTemplate.getBeanToInsertHandler();
@@ -180,6 +257,7 @@ public class BeanRunner implements AutoCloseable {
                     "未注册 beanToInsertHandler，请调用 JdbcTemplate#setBeanToInsertHandler()");
         }
 
+        // 同批实体必须同类型：SQL 只由第一个实体推导一次，后续共用同一语句只换参数
         Object firstBean = beans.getFirst();
         String sql = handler.buildInsertSql(firstBean);
         ColumnInfo identityColumn = handler.getIdentityColumn(firstBean);
@@ -215,6 +293,7 @@ public class BeanRunner implements AutoCloseable {
                     return results;
                 }
             }
+            // 非事务：这段批量自身是一个小事务，finally 恢复 autoCommit 原值（池连接会被复用）
             boolean autoCommit = conn.getAutoCommit();
             try {
                 conn.setAutoCommit(false);
@@ -228,6 +307,7 @@ public class BeanRunner implements AutoCloseable {
                         stmt.addBatch();
                     }
                     int[] results = stmt.executeBatch();
+                    // 生成键必须在 commit 之前读（游标随语句关闭失效）
                     writeGeneratedKeys(stmt, beans, handler, identityColumn);
                     conn.commit();
                     if (dbg) log.debug("[批量插入] 完成，耗时 {} ms，影响 {} 条",
@@ -252,7 +332,13 @@ public class BeanRunner implements AutoCloseable {
     }
 
     /**
-     * 批量插入后回写自增主键（无自增列时跳过）
+     * 批量插入后回写自增主键（无自增列时跳过）。
+     * <p>
+     * 回写靠"顺序 zip"而不是按值匹配：驱动对 addBatch 的每条 INSERT 各回传一个生成键，
+     * 结果集顺序与插入顺序一致，所以第 i 行键写给第 i 个实体。
+     * {@code idx < beans.size()} 是防御性上界（驱动多回传时不多写）；
+     * 单行取不到数值键时跳过该实体，宁可让 ID 缺失也不要把 null 塞进基本类型字段。
+     * </p>
      */
     private <T> void writeGeneratedKeys(PreparedStatement stmt, List<T> beans,
                                         BeanToInsertHandler handler, ColumnInfo identityColumn) throws SQLException {
@@ -272,6 +358,8 @@ public class BeanRunner implements AutoCloseable {
 
     /**
      * 安全批量更新：先尝试批量更新，失败后自动降级为逐条更新（无事务，每条 autocommit）。
+     * <p>与 {@link #insertBeanList} 同构。差别在于 UPDATE 失败通常意味着"行不存在"或
+     * 唯一约束冲突，逐条重跑没有副作用风险（幂等性由主键定位保证），所以降级同样适用。</p>
      *
      * @param beans 实体列表
      * @param <T>   实体类型
@@ -328,7 +416,12 @@ public class BeanRunner implements AutoCloseable {
     }
 
     /**
-     * 构建批量 UPDATE 参数并执行（不记录 stats，内部使用）
+     * 构建批量 UPDATE 参数并执行（不记录 stats，内部使用）。
+     * <p>
+     * 这里只造一次 SQL、每组实体只换参数：UPDATE 语句形态由实体类型决定，与具体值无关，
+     * 所以取第一个实体的 SQL 复用。真正的批量执行与事务感知交给
+     * {@link QueryRunner#executeBatch}（UPDATE 不需要回生成键，走通用批量入口即可）。
+     * </p>
      */
     private int[] doUpdateBatchInternal(List<?> beans) {
         BeanToUpdateHandler handler = requireUpdateHandler();
@@ -345,6 +438,7 @@ public class BeanRunner implements AutoCloseable {
 
     // ===== SELECT 实体便捷方法（委托给 BeanToSelectHandler） =====
 
+    /** 取查询方言实现（列清单、引号风格、分页子句都由它决定），未注册时给出可定位的错误 */
     private BeanToSelectHandler requireSelectHandler() {
         BeanToSelectHandler handler = jdbcTemplate.getBeanToSelectHandler();
         if (handler == null) {
@@ -355,8 +449,13 @@ public class BeanRunner implements AutoCloseable {
     }
 
     /**
-     * 按主键查询单个实体（基于实体类）
-     * <p>单主键时 id 直接传值，复合主键时 id 传 Object[]。</p>
+     * 按主键查询单个实体（基于实体类）。
+     * <p>
+     * 单主键和复合主键在参数形态上不同：单主键直接传值，复合主键传 {@code Object[]}。
+     * 这里统计主键列数来做转换，是为了让调用方不用关心"我一个还是多个"——
+     * 但代价是复合主键传错成单个值时会立刻抛出 {@code ClassCastException}，
+     * 属于快速失败，比把整个实体对象当参数绑上去更清楚。
+     * </p>
      *
      * @param entityClass 实体类
      * @param id          主键值（单主键）或 Object[]（复合主键）
@@ -378,11 +477,12 @@ public class BeanRunner implements AutoCloseable {
     }
 
     /**
-     * 查询全部实体
+     * 查询全部实体（全表扫描，仅适合小表或测试场景）。
+     * <p>结果一次性全部物化进 List，大表请改用 {@link #select(Class)} 加分页。</p>
      *
      * @param entityClass 实体类
      * @param <T>         实体类型
-     * @return 实体列表，不存在时返回空 List
+     * @return 实体列表，不存在时返回空 List（永不返回 null，调用方无需判空）
      */
     public <T> List<T> queryAll(Class<T> entityClass) {
         TableInfo tableInfo = EntityParser.parse(entityClass);
@@ -392,7 +492,13 @@ public class BeanRunner implements AutoCloseable {
     }
 
     /**
-     * 创建查询 DSL 构建器（推荐的条件查询入口）
+     * 创建查询 DSL 构建器（推荐的条件查询入口）。
+     * <p>
+     * 关键点：返回的 SelectQuery 复用<em>本 Runner 自身</em>的 QueryRunner，
+     * 所以在事务里调用 {@code select(...)} 会自动落在事务连接上（读己未提交的写）。
+     * 若换成"从 JdbcTemplate 新借一条连接"，事务内查询就会看不到本事务尚未提交的插入，
+     * SelectQueryIT 的用例⑫正是用"事务内读回自己刚写的数据"来锁定这条行为。
+     * </p>
      * <pre>{@code
      * List<Order> list = runner.select(Order.class)
      *         .where(Criteria.where("status").eq("PAID"))
@@ -406,14 +512,15 @@ public class BeanRunner implements AutoCloseable {
     }
 
     /**
-     * 带条件查询单条实体
+     * 带条件查询单条实体（字符串拼 WHERE 的旧 API）。
      *
      * @param entityClass  实体类
      * @param whereSection WHERE 子句（不含 WHERE 关键字），例如 {@code "status = ? AND paid = ?"}
      * @param params       参数列表
      * @param <T>          实体类型
      * @return 实体对象，未找到时返回 null
-     * @deprecated 字符串拼接条件有注入风险且无法复用类型体系，请改用 {@link #select(Class)} 查询 DSL
+     * @deprecated 字符串拼接条件有注入风险且无法复用类型体系，请改用 {@link #select(Class)} 查询 DSL。
+     *             过渡期内 {@code whereSection} 会先过 {@link SqlFragments#guardWhereSection} 过滤危险片段。
      */
     @Deprecated(forRemoval = true)
     public <T> T queryOne(Class<T> entityClass, String whereSection, Object... params) {
@@ -422,9 +529,11 @@ public class BeanRunner implements AutoCloseable {
         String sql;
         Object[] args;
         if (whereSection == null || whereSection.trim().isEmpty()) {
+            // 空条件退化成全表查询，与 queryAll 保持一致语义（不生成 "WHERE " 空尾巴）
             sql = handler.buildSelectAllSql(tableInfo);
             args = null;
         } else {
+            // 拼接前过滤：分号/注释/UNION 等直接拒绝，属于纵深防御，不替代参数化
             sql = handler.buildSelectAllSql(tableInfo) + " WHERE " + SqlFragments.guardWhereSection(whereSection);
             args = params.length > 0 ? params : null;
         }
@@ -432,14 +541,15 @@ public class BeanRunner implements AutoCloseable {
     }
 
     /**
-     * 带条件查询实体列表
+     * 带条件查询实体列表（字符串拼 WHERE 的旧 API）。
      *
      * @param entityClass  实体类
      * @param whereSection WHERE 子句（不含 WHERE 关键字），例如 {@code "status = ?"}
      * @param params       参数列表
      * @param <T>          实体类型
      * @return 实体列表，不存在时返回空 List
-     * @deprecated 字符串拼接条件有注入风险且无法复用类型体系，请改用 {@link #select(Class)} 查询 DSL
+     * @deprecated 字符串拼接条件有注入风险且无法复用类型体系，请改用 {@link #select(Class)} 查询 DSL。
+     *             过渡期内 {@code whereSection} 会先过 {@link SqlFragments#guardWhereSection} 过滤危险片段。
      */
     @Deprecated(forRemoval = true)
     public <T> List<T> queryList(Class<T> entityClass, String whereSection, Object... params) {
@@ -460,7 +570,7 @@ public class BeanRunner implements AutoCloseable {
     // ===== DELETE =====
 
     /**
-     * 清空表中所有数据（基于实体类）
+     * 清空表中所有数据（基于实体类）：解析实体得到表元数据后委托给 TableInfo 重载。
      */
     public void deleteAll(Class<?> cls) {
         TableInfo tableInfo = EntityParser.parse(cls);
@@ -468,7 +578,9 @@ public class BeanRunner implements AutoCloseable {
     }
 
     /**
-     * 清空表中所有数据（基于 TableInfo）
+     * 清空表中所有数据（基于 TableInfo）。
+     * <p>走 DELETE 而不是 TRUNCATE：保留事务可回滚性，也不会重置自增值——
+     * 中间件不应该替业务做出"自增序列要不要归零"这种决定。</p>
      */
     public void deleteAll(TableInfo tableInfo) {
         if (jdbcTemplate.getBeanToDeleteHandler() == null) {
@@ -478,9 +590,9 @@ public class BeanRunner implements AutoCloseable {
     }
 
     /**
-     * 根据主键删除单个实体
+     * 根据主键删除单个实体。
      *
-     * @param bean 实体对象（需包含主键字段值）
+     * @param bean 实体对象（需包含主键字段值；主键为空会导致 WHERE 条件匹配不到行，返回 0）
      * @return 影响的行数
      */
     public int deleteBean(Object bean) {
@@ -497,12 +609,17 @@ public class BeanRunner implements AutoCloseable {
     }
 
     /**
-     * 批量删除实体列表，根据各实体的主键值构建 DELETE SQL 并批量执行
-     * <p>所有实体必须为同一类型。</p>
+     * 批量删除实体列表：按各实体主键构建 DELETE 并批量执行。
+     * <p>所有实体必须为同一类型（SQL 只由第一个实体推导）。</p>
      * <p>当数据量超过 {@link #batchSize} 时自动分组提交。</p>
+     * <p>
+     * 与插入/更新不同，删除<b>没有</b>逐条降级：删不到行不是错误，
+     * 结果数组里的 0 已经足够表达"这条没删到"，再套一层降级只会增加复杂度。
+     * 分组后用 {@link #flattenResults} 按批次顺序拼回，保证下标仍对应原始列表位置。
+     * </p>
      *
      * @param beans 实体列表
-     * @return 各条语句影响的行数数组
+     * @return 各条语句影响的行数数组（下标与入参 beans 一一对应）
      */
     public <T> int[] deleteListBean(List<T> beans) {
         if (beans == null || beans.isEmpty()) return new int[0];
@@ -544,8 +661,11 @@ public class BeanRunner implements AutoCloseable {
     /**
      * 批量失败时判断是否直接上抛（不降级逐条）：
      * <ul>
-     *   <li>瞬时故障（死锁、锁超时、连接断开）——重试逐条只会放大故障；</li>
-     *   <li>事务内——批量中途失败时前面语句已生效，逐条补插会产生重复写，必须上抛由整个事务回滚。</li>
+     *   <li>瞬时故障（死锁、锁超时、连接断开）——重试逐条只会放大故障；
+     *       死锁时全表都在竞争，逐条重跑等于把一次冲突变成 N 次；</li>
+     *   <li>事务内——批量中途失败时前面语句已生效，逐条补插会产生重复写，必须上抛由整个事务回滚。
+     *       这条判断依赖 {@link QueryRunner#isInTransaction()}，而它要求连接已被取过；
+     *       两条批量路径都在调用本方法前先执行了 getConnection，所以判定可靠。</li>
      * </ul>
      */
     private void rethrowWithoutFallback(Exception batchEx) {
@@ -557,10 +677,12 @@ public class BeanRunner implements AutoCloseable {
     }
 
     /**
-     * 将多个分批结果数组合并为一个结果数组
+     * 将多个分批结果数组合并为一个结果数组，保持批次先后顺序。
+     * <p>调用方用返回数组的下标反查原始实体列表，所以这里必须按批次顺序拼接，
+     * 乱序会让"第 i 条是否成功"错位到别的实体上。</p>
      *
      * @param resultsList 各批次的结果数组列表
-     * @param totalSize   原始数据总条数
+     * @param totalSize   原始数据总条数（数组长度，尾部不足则留默认 0）
      * @return 合并后的结果数组
      */
     private static int[] flattenResults(List<int[]> resultsList, int totalSize) {

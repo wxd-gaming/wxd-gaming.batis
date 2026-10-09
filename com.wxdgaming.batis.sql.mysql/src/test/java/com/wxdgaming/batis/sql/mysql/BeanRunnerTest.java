@@ -21,8 +21,13 @@ import static org.junit.jupiter.api.Assertions.*;
  * Bean CRUD 快捷操作集成测试
  * <p>测试 {@link BeanRunner#insertBean(Object)}、
  * {@link BeanRunner#updateBean(Object)} 以及
- * {@link ResultSetHandlers#bean(JdbcTemplate, Class)}} /
+ * {@link ResultSetHandlers#bean(JdbcTemplate, Class)} /
  * {@link ResultSetHandlers#beanList(JdbcTemplate, Class)} 查询。</p>
+ * <p>关注的不是"SQL 能不能跑"，而是实体这一层的三件事：
+ * 自增主键是否回写到 bean（不回写则后续 update/delete 拿不到 ID）、
+ * 类型化映射是否无损（重点看 BigDecimal 精度与 boolean，两者最容易在读回时变形）、
+ * 以及批量插入后 queryAll 的顺序与条数是否与写入一致。
+ * 每个用例前幂等确保表存在，每个用例后清空数据，用例之间互不依赖。</p>
  *
  * @author wxd-gaming(無心道, 15388152619)
  */
@@ -62,6 +67,12 @@ class BeanRunnerTest {
         }
     }
 
+    /**
+     * 用例①：插入返回自增主键，且主键同步回写到实体的 id 字段。
+     * <p>断言两点缺一不可：返回值 &gt; 0 只证明数据库生成了键；
+     * {@code order.getId()} 等于该值才证明框架把它写回了对象——
+     * 回写缺失时调用方手里是一条"没有 ID 的实体"，紧接着的 update/delete 会全部失效。</p>
+     */
     @Test
     @Order(1)
     void testInsertBean() {
@@ -88,6 +99,12 @@ class BeanRunnerTest {
         }
     }
 
+    /**
+     * 用例②：按主键回读实体，逐字段校验类型化映射无损。
+     * <p>断言覆盖字符串、int、boolean 与 BigDecimal。其中 BigDecimal 刻意用 compareTo 而非 equals
+     * ——JDBC 回读的 scale 可能与构造时不同（10.00 与 10.0 值相等但 equals 为假），
+     * 用 equals 会得到一个"看着像 bug"的假失败。</p>
+     */
     @Test
     @Order(2)
     void testQueryByBean() {
@@ -113,6 +130,15 @@ class BeanRunnerTest {
         }
     }
 
+    /**
+     * 用例③：批量插入后全表读回，条数与每条字段都一致。
+     * <p>动作：insertBeanList 一次写 3 条（三条数据故意做出差异：quantity/price/paid/金额都不同）。
+     * 断言：queryAll 返回 3 条且逐条与插入顺序对应。
+     * 意义：批量路径走的是 JDBC batch（与单条完全不同的代码分支），
+     * 这里同时守住两件事——批次没有漏写/重写，以及批量后自增 ID 仍被正确回写
+     * （断言里比对了 id，若批量分支忘记回填，id 会全是 0 而被抓住）。
+     * 依赖单表无并发写入，故顺序稳定。</p>
+     */
     @Test
     @Order(3)
     void testQueryBeanList() {
@@ -152,6 +178,13 @@ class BeanRunnerTest {
         }
     }
 
+    /**
+     * 用例④：按主键整行更新，回查确认新值生效。
+     * <p>动作：插入后改动 title/quantity/price/paid/totalAmount 再 updateBean。
+     * 断言影响行数 = 1（更新没有错命中 0 行或多行），并重新从库读回逐字段核对——
+     * 只看返回值不够，因为"更新到别的行"同样返回 1。
+     * 这里也隐含验证了 update 用的是主键作为条件、且不会去动 id 列本身。</p>
+     */
     @Test
     @Order(4)
     void testUpdateBean() {
@@ -184,6 +217,13 @@ class BeanRunnerTest {
         }
     }
 
+    /**
+     * 用例⑤：一条实体的完整生命周期 插入 → 查 → 改 → 查 → 删。
+     * <p>与前面四个用例的分工：①②③④各测一个动作，本用例把五个动作串在同一条数据上，
+     * 验证它们能连续复用同一个对象（尤其删除必须以更新后的实体为准）。
+     * 删除的断言刻意不靠"返回 1 行"了事，而是再用 COUNT 直接查库确认表为空
+     * ——COUNT 来自数据库，不受框架内存状态影响。</p>
+     */
     @Test
     @Order(5)
     void testBeanLifecycle() {

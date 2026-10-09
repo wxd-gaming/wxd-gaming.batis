@@ -11,12 +11,21 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Bean 值处理抽象基类，提供纯反射方法的通用实现
  * <p>方言只需实现 {@link #convertToDbValue} 和 {@link #convertFromDbValue}。</p>
+ * <p>之所以把反射部分抽成基类而不是 default 方法：这三段逻辑与数据库完全无关，
+ * 但错误信息、数值收窄、可访问性处理都很容易在各方言里写歪，收敛到一处才能保证
+ * "同一个字段在 MySQL 和 pgsql 里报错方式一致"。新增方言时继承本类，
+ * 不要再复制一遍反射代码。</p>
  *
  * @author wxd-gaming(無心道, 15388152619)
  * @version 2026-07-31
  */
 public abstract class AbstractBeanValueHandler implements BeanValueHandler {
 
+    /**
+     * 反射读字段（走 getter）。
+     * <p>缺 getter 时抛出的消息点名实体与字段：参数数组是按下标绑定的，
+     * 少读一个字段会表现为"整条语句错位"，靠堆栈根本查不到是哪个字段没 getter。</p>
+     */
     @Override
     public Object readFieldValue(Object bean, ColumnInfo col) {
         Method getter = col.getReadMethod();
@@ -31,6 +40,11 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
         }
     }
 
+    /**
+     * 反射写字段（走 setter）。
+     * <p>异常消息额外带上值的运行时类型：行映射失败九成是转换环节给错了载体
+     * （比如把 Blob 直接塞给 String 字段），带上类型才能一眼看出是转换问题还是实体问题。</p>
+     */
     @Override
     public void writeFieldValue(Object bean, ColumnInfo col, Object value) {
         Method setter = col.getWriteMethod();
@@ -46,6 +60,13 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
         }
     }
 
+    /**
+     * 生成键回写：按 setter 参数类型把 Number 收窄成实体字段能接受的形态。
+     * <p>驱动返回的生成键类型由数据库决定（多为 Long，部分驱动给 BigInteger），
+     * 而实体字段常声明为 int/long 甚至原子类型；直接 {@code invoke} 会因参数类型不匹配失败。
+     * 收窄在这里统一做，方言只负责交出 Number。</p>
+     * <p>遇到未覆盖的参数类型时原样交出，让反射自然报错，而不是悄悄丢掉主键值。</p>
+     */
     @Override
     public void writeGeneratedKey(Object bean, ColumnInfo col, Number genId) {
         if (genId == null) return;

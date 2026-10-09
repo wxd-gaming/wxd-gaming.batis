@@ -29,6 +29,15 @@ import java.util.Objects;
 @Slf4j
 public class MysqlTableAlterHandler implements TableAlterHandler {
 
+    /**
+     * 结构 diff 主流程：实体侧 TableInfo 对比库端缓存 TableInfo，把差异汇总成一条 ALTER TABLE 执行。
+     * <p>库端结构来自 {@code template.getTableCache()}（由 MysqlDbMetaHandler 从 information_schema 回读）；
+     * 缓存为 null 说明尚未加载，为 null 的表名说明库里还没有该表（应由 create 分支处理），两种情况本方法都直接返回。</p>
+     * <p>所有变更合并进单条 ALTER 的多子句（逗号分隔）一次执行，减少一次表重建/加锁往返。
+     * 关键约束：比对是否"改列"完全依赖 {@code typeDef.renderNormalized(实体列) == typeDef.normalize(库端类型)}
+     * 这一等式（见 {@link #hasColumnChanged}），一旦 normalize/render 不同义，启动时就会对全表刷虚假 MODIFY
+     * （回归护栏见 SchemaDriftIT）。</p>
+     */
     @Override
     public void doAction(JdbcTemplate jdbcTemplate, TableInfo entityTable) {
         Map<String, TableInfo> cache = jdbcTemplate.getTableCache();
@@ -38,6 +47,7 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
         TableInfo dbTable = cache.get(tableName);
         if (dbTable == null) return;
 
+        // 优先用注入的方言渲染器，未注入时回退 MySQL 默认，保证纯 MySQL 场景仍可比对
         ColumnTypeDefHandler typeDef = jdbcTemplate.getColumnTypeDefHandler() != null
                 ? jdbcTemplate.getColumnTypeDefHandler() : MysqlColumnTypeDefHandler.INSTANCE;
 
@@ -79,6 +89,7 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
                     alterClauses.add("DROP INDEX `" + dbIdx.getName() + "`");
                     alterClauses.add("ADD " + indexType(entityIdx) + "INDEX `" + entityIdx.getName() + "` (" + buildIndexColumns(entityIdx) + ")");
                 }
+                // 命中实体即从库端索引表移除；循环结束后剩下的就是"库里有、实体已不要"的索引
                 dbIndexMap.remove(idxName);
             }
 
@@ -101,7 +112,11 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
         }
     }
 
-    /** 构建列定义片段（用于 ADD COLUMN / MODIFY COLUMN） */
+    /**
+     * 构建列定义片段（用于 ADD COLUMN / MODIFY COLUMN）。
+     * <p>必须与 {@code MysqlTableCreateHandler} 的同名片段逐字符一致：否则首次建表写成 A、下次同步
+     * 又认为实体是 B，会对同一列反复 MODIFY，破坏幂等。</p>
+     */
     private String buildColumnDef(ColumnInfo col, ColumnTypeDefHandler typeDef) {
         StringBuilder sb = new StringBuilder(64);
         sb.append("`").append(col.getColumnName().toLowerCase()).append("` ").append(typeDef.renderType(col));
@@ -139,7 +154,11 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
         return index.isUnique() ? "UNIQUE " : "";
     }
 
-    /** 判断列是否发生了变化 */
+    /**
+     * 判断列是否发生变化：逐项比较规格化类型、可空性、默认值、注释。
+     * <p>类型比较走 normalize 后的字符串而非原始字面量——实体侧渲染大写 {@code INT}、库端回读小写带宽度
+     * {@code int(11)}，只有归一到同一形式才不会误判漂移；其余三项只要有一项不等即判定需 MODIFY。</p>
+     */
     private boolean hasColumnChanged(ColumnInfo entityCol, ColumnInfo dbCol, ColumnTypeDefHandler typeDef) {
         if (!typeDef.renderNormalized(entityCol).equals(typeDef.normalize(dbCol.getType()))) return true;
         if (entityCol.isNullable() != dbCol.isNullable()) return true;
@@ -148,7 +167,10 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
         return false;
     }
 
-    /** 判断索引是否发生了变化 */
+    /**
+     * 判断索引是否变化：唯一性、列数量、逐位列名（忽略大小写）任一不同即视为变化。
+     * <p>复合索引按位比较，因为 (a,b) 与 (b,a) 是两个服务能力不同的索引，顺序变了必须重建而非放过。</p>
+     */
     private boolean hasIndexChanged(IndexInfo entityIdx, IndexInfo dbIdx) {
         if (entityIdx.isUnique() != dbIdx.isUnique()) return true;
         if (entityIdx.getColumns() == null || dbIdx.getColumns() == null) return true;

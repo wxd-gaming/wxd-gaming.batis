@@ -38,17 +38,41 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
- * 实体注解解析器
+ * 实体注解解析器：把静态的 Java 类型 + 注解，一次性翻译成运行时的表元数据 {@link TableInfo}。
  * <p>
- * 解析 {@link Table}、{@link Id}、{@link Column}、{@link Index}、{@link GeneratedValue} 等注解，
- * 生成运行时元数据 {@link TableInfo}。
- * <p>
- * 线程安全。解析结果会被缓存，同一个 Class 只会解析一次。
+ * 这是整个框架的元数据入口——缓存 Key、DDL 建表/结构比对、SQL 参数绑定、结果集映射
+ * 全部依赖这里产出的 {@link TableInfo} / {@link ColumnInfo}，所以它只负责"描述列"，
+ * 不负责"生成 SQL"，保持与方言层解耦。
+ *
+ * <h3>解析管线（{@link #doParse}）</h3>
+ * <ol>
+ *   <li>{@link #resolveTableAnnotation}：读表级注解确定表名与注释（缺表名时类名驼峰转下划线）。</li>
+ *   <li>{@link #resolveColumns}：沿继承链自底向上收集字段，逐字段 {@link #buildColumnInfo}
+ *       确定列名、存储模式、逻辑类型、主键、生成策略与自定义转换器。</li>
+ *   <li>{@link #resolveIndexes}：合并字段级索引、表级复合索引、唯一列自动派生的唯一索引，
+ *       去重后按名字典序排序（稳定顺序，避免每次解析产出不同列表扰乱结构比对）。</li>
+ * </ol>
+ *
+ * <h3>逻辑类型与物理类型的解耦（P1-4）</h3>
+ * <p>本类只产出<b>逻辑类型</b> {@link SqlType} 加长度/精度，绝不产出方言字面量。
+ * "这一列具体写成 VARCHAR(64) 还是 TINYINT(1)" 已下沉到 sql 层的 ColumnTypeDefHandler SPI，
+ * 由各方言（MySQL / pgsql）各自渲染。因此这里 {@link #inferSqlType} 的任何"类型推断"都止步于逻辑档；
+ * {@link ColumnInfo#getType()} 对自动推断的列保持 null，只有显式书面的物理类型注解才写它。</p>
+ * <p><b>回归风险</b>：结构比对（checkTable）会把"实体侧渲染再规格化"与"库端元数据规格化"做 diff，
+ * 只要逻辑档位、或 UUID=36 / BigDecimal=DECIMAL(20,6) / char=CHAR(1) 这类宽度约定与历史字面量不一致，
+ * 就会对已有表判成漂移并反复刷出虚假 MODIFY（大表上等同线上锁表事故）。
+ * 下方 {@link #applyInferredType} 里逐条修正 length/scale 的动作正是为守住"渲染结果与原字面量逐字节一致"这条不变式。</p>
+ *
+ * <h3>线程安全与缓存</h3>
+ * <p>解析结果放在 {@link #CACHE}（Class → TableInfo），用 {@code computeIfAbsent} 保证同一 Class 只解析一次，
+ * 并发首次访问也只有一个线程真正执行 doParse。TableInfo 建好后视为只读共享。
+ * 需要重新解析（如热更实体定义）时调 {@link #clearCache} / {@link #clearAll}。</p>
  *
  * @author wxd-gaming
  */
 public class EntityParser {
 
+    /** 元数据缓存：同一实体 Class 只解析一次，解析后的 TableInfo 全局共享、视为只读 */
     private static final Map<Class<?>, TableInfo> CACHE = new ConcurrentHashMap<>();
 
     private EntityParser() {
@@ -73,6 +97,11 @@ public class EntityParser {
 
     // ============== 内部解析逻辑 ==============
 
+    /**
+     * 解析单实体：表级注解 → 列集合 → 索引集合，组装成不可变使用的 {@link TableInfo}。
+     * <p>仅在 {@link #CACHE} 首次未命中时执行，故同一 Class 的字段/列声明顺序被"冻结"为首次解析结果，
+     * 这保证了建表 DDL 的列顺序稳定（列顺序抖动同样会触发结构比对差异）。</p>
+     */
     private static TableInfo doParse(Class<?> entityClass) {
         TableInfo tableInfo = new TableInfo();
         tableInfo.setEntityClass(entityClass);
@@ -86,7 +115,11 @@ public class EntityParser {
         return tableInfo;
     }
 
-    /** 解析 {@link Table} 或 {@link com.wxdgaming.batis.annotation.Entity} 注解 */
+    /**
+     * 解析表级来源注解，确定表名与注释。
+     * <p>优先表注解，其次实体注解；两者皆无时按类名驼峰转下划线兜底生成表名，
+     * 让"不打注解也能用"的最小约定成立。</p>
+     */
     private static void resolveTableAnnotation(Class<?> entityClass, TableInfo tableInfo) {
         Table table = entityClass.getAnnotation(Table.class);
         if (table != null) {
@@ -114,12 +147,18 @@ public class EntityParser {
         tableInfo.setTableName(camelToUnderscore(entityClass.getSimpleName()));
     }
 
-    /** 解析所有字段上的 {@link Column}、{@link Id}、{@link GeneratedValue} 注解 */
+    /**
+     * 解析所有字段并构建列映射。
+     * <p>用 {@link LinkedHashMap} 按"子类字段在前、父类字段在后"的声明顺序累积，
+     * 顺序即建表时的物理列序，必须稳定（见 {@link #doParse} 的顺序冻结说明）。
+     * {@code fieldNames} 去重保证子类同名覆盖字段只登记一次，避免父子同名字段映射到同一列产生重复列定义。</p>
+     */
     private static LinkedHashMap<String, ColumnInfo> resolveColumns(Class<?> entityClass) {
         LinkedHashMap<String, ColumnInfo> columnMap = new LinkedHashMap<>();
         java.util.Set<String> fieldNames = new java.util.HashSet<>();
 
         Class<?> currentClass = entityClass;
+        // 沿继承链向上收集，遇到 Object 停止；跳过 static 字段（不属于持久化列）
         while (currentClass != null && currentClass != Object.class) {
             for (Field field : currentClass.getDeclaredFields()) {
                 if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
@@ -133,6 +172,11 @@ public class EntityParser {
         return columnMap;
     }
 
+    /**
+     * 单字段 → 列元数据：先记 Java 侧事实（字段/类型/getter/setter），再叠加注解语义。
+     * <p>getter/setter 用 {@code entityClass}（而非声明字段的父类）查找，保证拿到运行时实际方法。
+     * 注意：这里只写逻辑类型（{@code sqlType}）或显式物理类型（{@code type}），二者互斥。</p>
+     */
     private static ColumnInfo buildColumnInfo(Class<?> entityClass, Field field) {
         ColumnInfo columnInfo = new ColumnInfo();
         columnInfo.setFieldName(field.getName());
@@ -164,6 +208,7 @@ public class EntityParser {
                 applyInferredType(columnInfo, field.getType(), columnAnn.length(), storageMode);
             }
         } else {
+            // 无列注解时的零配置约定：列名取字段驼峰转下划线，字符串宽度默认 255，可空
             columnInfo.setColumnName(camelToUnderscore(field.getName()));
             StorageMode storageMode = resolveStorageMode(StorageMode.AUTO, field.getType());
             columnInfo.setStorageMode(storageMode);
@@ -173,6 +218,7 @@ public class EntityParser {
         }
 
         // 3. 解析自定义 TypeConverter
+        //    仅在显式指定（非 NoneTypeConverter 占位）时实例化并缓存，要求无参构造且线程安全
         if (columnAnn != null && columnAnn.converter() != NoneTypeConverter.class) {
             try {
                 TypeConverter<?, ?> converterInstance = columnAnn.converter()
@@ -185,11 +231,13 @@ public class EntityParser {
             }
         }
 
+        // 主键列强制非空：主键注解的存在本身就是 NOT NULL 语义，覆盖注解里的 nullable
         if (field.getAnnotation(Id.class) != null) {
             columnInfo.setPrimaryKey(true);
             columnInfo.setNullable(false);
         }
 
+        // 主键生成策略（IDENTITY / 手动等）：供上层决定插入时是否回写自增主键
         GeneratedValue gvAnn = field.getAnnotation(GeneratedValue.class);
         if (gvAnn != null) {
             columnInfo.setGenerationType(gvAnn.strategy());
@@ -336,16 +384,21 @@ public class EntityParser {
         }
 
         return indexes.stream()
+                // IndexInfo 按"名字"判等：同名字段索引与自动派生的唯一索引合并，避免重复建索引
                 .distinct()
+                // 按名字典序稳定排序，保证解析结果与建表 DDL 的索引顺序可复现
                 .sorted(Comparator.comparing(IndexInfo::getName))
                 .collect(Collectors.toList());
     }
 
-    // ============== 类型推断 ==============
+    // ============== 类型推断（仅逻辑类型） ==============
 
     /**
      * 推断逻辑类型并落库到 ColumnInfo。
      * 个别 Java 类型有固定宽度约定（UUID=36），在推断时一并修正 length，保证渲染结果与原字面量一致。
+     * <p>这些"宽度补丁"是结构比对零虚假 ALTER 的关键：它们复刻了解耦前 EntityParser 直出字面量时的
+     * 隐含宽度，改动任何一条都可能让存量表的对应列被判成漂移。因此只允许产出 {@link SqlType} + 长度/精度，
+     * 绝不在此拼方言物理类型字符串。</p>
      */
     private static void applyInferredType(ColumnInfo columnInfo, Class<?> javaType, int length, StorageMode storageMode) {
         SqlType sqlType = inferSqlType(javaType, length, storageMode);
@@ -374,6 +427,7 @@ public class EntityParser {
      * @param storageMode 存储模式
      */
     private static SqlType inferSqlType(Class<?> javaType, int length, StorageMode storageMode) {
+        // 显式存储模式直接锁定逻辑档（不再看 Java 类型）；AUTO / default 落到下方 Java 类型推断
         switch (storageMode) {
             case JSON:
                 return SqlType.JSON;
@@ -421,6 +475,7 @@ public class EntityParser {
 
         // AUTO 模式：按 Java 类型推断
         if (javaType == String.class) {
+            // 变长字符串按声明长度落档：越过 MySQL 各 TEXT 上限即升级为更大文本档，避免建出的列装不下数据
             if (length > 16777215) return SqlType.LONGTEXT;
             if (length > 65535) return SqlType.MEDIUMTEXT;
             if (length > 16383) return SqlType.TEXT;
@@ -445,6 +500,7 @@ public class EntityParser {
                 || javaType == ZonedDateTime.class || javaType == java.sql.Timestamp.class) return SqlType.DATETIME;
         if (javaType == java.sql.Date.class) return SqlType.DATE;
         if (javaType == java.sql.Time.class) return SqlType.TIME;
+        // 兜底：未知/自定义但未走 JSON 的类型一律按字符串列处理
         return SqlType.VARCHAR;
     }
 

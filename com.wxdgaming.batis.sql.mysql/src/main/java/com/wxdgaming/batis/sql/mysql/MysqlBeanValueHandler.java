@@ -30,6 +30,11 @@ import java.time.ZonedDateTime;
 
 /**
  * MySQL 方言的 Bean ↔ DB 双向值转换实现
+ * <p>继承 {@link com.wxdgaming.batis.sql.AbstractBeanValueHandler} 复用纯反射的字段读写与主键回写，
+ * 本类只实现两个方言差异点：{@code convertToDbValue}/{@code convertFromDbValue} 的类型映射
+ * （JSON 走 fastjson 带类名、BLOB 走 Protostuff、日期统一转 Timestamp、枚举存 name 等）。</p>
+ * <p>由 {@code MysqlTemplate#initDefaults} 造出单一实例并共享给 Insert/Update/Delete/DbToBean 四个 handler，
+ * 保证写端与读端使用同一套对称的转换规则。</p>
  *
  * @author wxd-gaming(無心道, 15388152619)
  * @version 2026-07-31
@@ -40,6 +45,17 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
     /** JSON/Protostuff 序列化最大重试次数，应对多线程并发修改集合的并发问题 */
     private static final int MAX_SERIALIZE_RETRIES = 3;
 
+    /**
+     * Java 值 → JDBC 参数。
+     * <p>转换优先级：自定义 {@link TypeConverter}（完全接管）&gt; 列的 StorageMode（JSON/BLOB 序列化）&gt;
+     * 基础类型归一。JSON 存成带类名的字符串（WriteClassName），配合读取端 SupportAutoType 才能还原多态/泛型结构；
+     * BLOB 非 byte[] 时用 Protostuff 二进制编码。序列化失败按 {@link #MAX_SERIALIZE_RETRIES} 重试并
+     * {@code Thread.yield}——针对集合被多线程并发修改导致的偶发序列化异常，让出 CPU 后重试通常即可成功，
+     * 重试耗尽才升级为 {@code TypeMismatchDataAccessException}。</p>
+     * <p>基础类型 switch 里的方言取舍：日期族统一转 {@code java.sql.Timestamp}（MySQL DATETIME 的 JDBC 形态）；
+     * 枚举存 {@code name()}（稳定、可读、不随 ordinal 重排而损坏）；{@code UUID}/{@code Character} 转 String；
+     * {@code BigInteger} 转 long 是精度收窄的既有行为。</p>
+     */
     @Override
     public Object convertToDbValue(Object value, ColumnInfo col) {
         if (value == null) return null;
@@ -105,6 +121,14 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
         };
     }
 
+    /**
+     * JDBC/ResultSet 读出的值 → Java 对象，是 {@link #convertToDbValue} 的逆过程。
+     * <p>转换优先级与写入端对称：自定义 TypeConverter &gt; StorageMode（JSON 用 SupportAutoType 反解、
+     * BLOB 用 Protostuff 解码；byte[] 列直接返回原始字节不解码）&gt; 基础类型转换。</p>
+     * <p>基础类型转换（{@link #convertBasicValue}）重点处理易变形档位：枚举按 name 反查、数值在 Number
+     * 间按目标 javaType 精确收窄/放宽、布尔与数值互转、时间族经 {@link #convertTemporal} 归一到 Timestamp 再派发。
+     * 精度问题（如 BigDecimal scale）在此不做四舍五入，交由测试端用 compareTo 规避。</p>
+     */
     @Override
     public Object convertFromDbValue(Object value, ColumnInfo col) {
         // 优先使用自定义 TypeConverter（完全接管该字段的转换）
@@ -148,6 +172,7 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
 
     // ===== 私有 helper =====
 
+    /** 把 BLOB 列读出的值取成字节数组：已是 byte[] 直接用，java.sql.Blob 需 getBytes 物化，其余类型不支持 */
     private byte[] toBytes(Object value, ColumnInfo col) {
         if (value instanceof byte[]) {
             return (byte[]) value;
@@ -162,6 +187,11 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
         throw new TypeMismatchDataAccessException("字段 " + col.getFieldName() + " 不支持的二进制类型: " + value.getClass());
     }
 
+    /**
+     * 非 JSON/BLOB 的基础列值转换：目标类型与值已匹配则直接返回，否则按目标 javaType 逐档适配。
+     * <p>顺序体现优先级：同类型短路 → 枚举按名反查 → Number 数值族收窄/放宽 → 布尔 → 时间族
+     * （{@link #convertTemporal}）→ UUID/Character/String 兜底。无法识别时原样返回，把最终类型检查交给 setter。</p>
+     */
     @SuppressWarnings({"unchecked", "rawtypes"})
     private Object convertBasicValue(Object value, ColumnInfo col) {
         Class<?> javaType = col.getJavaType();
@@ -205,6 +235,13 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
         return value;
     }
 
+    /**
+     * 时间族互转：先把各种来源统一收敛为 Timestamp 再按目标 javaType 派发。
+     * <p>Time 单独短路（TIME 列只关心时分秒，不能被当成日期）；其余先归一到 Timestamp，
+     * 再转 Timestamp/java.util.Date/java.sql.Date/LocalDateTime/LocalDate/Instant/ZonedDateTime/OffsetDateTime。
+     * 跨时区档位（Zoned/Offset）依赖系统时区或 UTC，是与 JDBC 驱动时区配置相关的既有约定。
+     * 无法归一时返回 null，交回调用方走后续兜底分支。</p>
+     */
     private Object convertTemporal(Object value, Class<?> javaType) {
         Timestamp ts = null;
         if (value instanceof Timestamp) {
