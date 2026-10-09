@@ -4,12 +4,14 @@ import com.wxdgaming.batis.exception.IllegalTransactionStateException;
 import com.wxdgaming.batis.sql.tx.ConnectionHolder;
 import com.wxdgaming.batis.sql.tx.TxContext;
 import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.sql.SQLException;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -19,6 +21,7 @@ import java.util.List;
  * @version 2026-07-24 17:33
  **/
 @Getter
+@Slf4j
 public class QueryRunner implements AutoCloseable {
 
     /** 连接来源：外部注入（不归还）/ 事务绑定（不归还，由 TransactionTemplate 管理）/ 池借出（close 时归还） */
@@ -122,22 +125,20 @@ public class QueryRunner implements AutoCloseable {
      * @return 处理结果
      */
     public <R> R query(String sql, Object[] args, ResultSetHandler<R> handler) {
-        try {
-            Connection conn = getConnection();
-            try (PreparedStatement stmt = conn.prepareStatement(sql)) {
-                applyQueryTimeout(stmt);
-                if (args != null) {
-                    for (int i = 0; i < args.length; i++) {
-                        stmt.setObject(i + 1, args[i]);
+        return timed("查询", sql, args, () -> {
+            try {
+                Connection conn = getConnection();
+                try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                    applyQueryTimeout(stmt);
+                    bind(stmt, args);
+                    try (ResultSet rs = stmt.executeQuery()) {
+                        return handler.handle(rs);
                     }
                 }
-                try (ResultSet rs = stmt.executeQuery()) {
-                    return handler.handle(rs);
-                }
+            } catch (SQLException e) {
+                throw jdbcTemplate.translateException(e, sql, args);
             }
-        } catch (SQLException e) {
-            throw jdbcTemplate.translateException(e, sql, args);
-        }
+        });
     }
 
     /**
@@ -157,20 +158,18 @@ public class QueryRunner implements AutoCloseable {
      */
     public boolean execute(String sql, Object[] args) {
         checkWritable();
-        try {
-            Connection conn = getConnection();
-            try (PreparedStatement stmt = conn.prepareStatement(sql)) {
-                applyQueryTimeout(stmt);
-                if (args != null) {
-                    for (int i = 0; i < args.length; i++) {
-                        stmt.setObject(i + 1, args[i]);
-                    }
+        return timed("执行", sql, args, () -> {
+            try {
+                Connection conn = getConnection();
+                try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                    applyQueryTimeout(stmt);
+                    bind(stmt, args);
+                    return stmt.execute();
                 }
-                return stmt.execute();
+            } catch (SQLException e) {
+                throw jdbcTemplate.translateException(e, sql, args);
             }
-        } catch (SQLException e) {
-            throw jdbcTemplate.translateException(e, sql, args);
-        }
+        });
     }
 
     /**
@@ -190,20 +189,18 @@ public class QueryRunner implements AutoCloseable {
      */
     public int update(String sql, Object[] args) {
         checkWritable();
-        try {
-            Connection conn = getConnection();
-            try (PreparedStatement stmt = conn.prepareStatement(sql)) {
-                applyQueryTimeout(stmt);
-                if (args != null) {
-                    for (int i = 0; i < args.length; i++) {
-                        stmt.setObject(i + 1, args[i]);
-                    }
+        return timed("更新", sql, args, () -> {
+            try {
+                Connection conn = getConnection();
+                try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                    applyQueryTimeout(stmt);
+                    bind(stmt, args);
+                    return stmt.executeUpdate();
                 }
-                return stmt.executeUpdate();
+            } catch (SQLException e) {
+                throw jdbcTemplate.translateException(e, sql, args);
             }
-        } catch (SQLException e) {
-            throw jdbcTemplate.translateException(e, sql, args);
-        }
+        });
     }
 
     /**
@@ -215,27 +212,25 @@ public class QueryRunner implements AutoCloseable {
      */
     public Number executeInsert(String sql, Object[] args) {
         checkWritable();
-        try {
-            Connection conn = getConnection();
-            try (PreparedStatement stmt = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
-                applyQueryTimeout(stmt);
-                if (args != null) {
-                    for (int i = 0; i < args.length; i++) {
-                        stmt.setObject(i + 1, args[i]);
+        return timed("插入", sql, args, () -> {
+            try {
+                Connection conn = getConnection();
+                try (PreparedStatement stmt = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+                    applyQueryTimeout(stmt);
+                    bind(stmt, args);
+                    stmt.executeUpdate();
+                    try (ResultSet rs = stmt.getGeneratedKeys()) {
+                        if (rs.next()) {
+                            Object val = rs.getObject(1);
+                            return val instanceof Number ? (Number) val : null;
+                        }
                     }
                 }
-                stmt.executeUpdate();
-                try (ResultSet rs = stmt.getGeneratedKeys()) {
-                    if (rs.next()) {
-                        Object val = rs.getObject(1);
-                        return val instanceof Number ? (Number) val : null;
-                    }
-                }
+            } catch (SQLException e) {
+                throw jdbcTemplate.translateException(e, sql, args);
             }
-        } catch (SQLException e) {
-            throw jdbcTemplate.translateException(e, sql, args);
-        }
-        return null;
+            return null;
+        });
     }
 
     /**
@@ -247,6 +242,9 @@ public class QueryRunner implements AutoCloseable {
      */
     public int[] executeBatch(String sql, List<Object[]> batchArgs) {
         checkWritable();
+        final boolean dbg = log.isDebugEnabled();
+        final long t0 = dbg ? System.nanoTime() : 0L;
+        if (dbg) log.debug("[批量] {} -- 参数组数: {}", oneLine(sql), batchArgs.size());
         try {
             Connection conn = getConnection();
             if (isInTransaction()) {
@@ -255,14 +253,13 @@ public class QueryRunner implements AutoCloseable {
                 try (PreparedStatement stmt = conn.prepareStatement(sql)) {
                     applyQueryTimeout(stmt);
                     for (Object[] args : batchArgs) {
-                        if (args != null) {
-                            for (int i = 0; i < args.length; i++) {
-                                stmt.setObject(i + 1, args[i]);
-                            }
-                        }
+                        bind(stmt, args);
                         stmt.addBatch();
                     }
-                    return stmt.executeBatch();
+                    int[] result = stmt.executeBatch();
+                    if (dbg) log.debug("[批量] 完成，耗时 {} ms，影响 {} 行",
+                            (System.nanoTime() - t0) / 1_000_000, sumRows(result));
+                    return result;
                 }
             }
             boolean autoCommit = conn.getAutoCommit();
@@ -270,15 +267,13 @@ public class QueryRunner implements AutoCloseable {
                 conn.setAutoCommit(false);
                 try (PreparedStatement stmt = conn.prepareStatement(sql)) {
                     for (Object[] args : batchArgs) {
-                        if (args != null) {
-                            for (int i = 0; i < args.length; i++) {
-                                stmt.setObject(i + 1, args[i]);
-                            }
-                        }
+                        bind(stmt, args);
                         stmt.addBatch();
                     }
                     int[] result = stmt.executeBatch();
                     conn.commit();
+                    if (dbg) log.debug("[批量] 完成，耗时 {} ms，影响 {} 行",
+                            (System.nanoTime() - t0) / 1_000_000, sumRows(result));
                     return result;
                 }
             } catch (SQLException e) {
@@ -296,6 +291,61 @@ public class QueryRunner implements AutoCloseable {
         } catch (SQLException e) {
             throw jdbcTemplate.translateException(e, sql, null);
         }
+    }
+
+    // ============== 执行过程 debug 日志 ==============
+
+    /** 绑定参数（null 安全） */
+    private static void bind(PreparedStatement stmt, Object[] args) throws SQLException {
+        if (args == null) return;
+        for (int i = 0; i < args.length; i++) {
+            stmt.setObject(i + 1, args[i]);
+        }
+    }
+
+    /** 统一执行埋点：debug 关闭时零额外开销（不取时间、不格式化） */
+    private static <R> R timed(String kind, String sql, Object[] args, SupplierWithException<R> body) {
+        if (!log.isDebugEnabled()) {
+            return body.get();
+        }
+        long t0 = System.nanoTime();
+        String params = args == null ? "[]" : Arrays.toString(args);
+        try {
+            R result = body.get();
+            log.debug("[{}] {} -- 参数: {} -- 结果: {} -- 耗时 {} ms",
+                    kind, oneLine(sql), params, describe(result),
+                    (System.nanoTime() - t0) / 1_000_000);
+            return result;
+        } catch (RuntimeException | Error e) {
+            log.debug("[{}] 失败 {} -- 参数: {} -- 耗时 {} ms -- {}",
+                    kind, oneLine(sql), params,
+                    (System.nanoTime() - t0) / 1_000_000, e.getMessage());
+            throw e;
+        }
+    }
+
+    @FunctionalInterface
+    private interface SupplierWithException<R> {
+        R get();
+    }
+
+    /** 结果摘要：数值直接展示（影响行数/生成键），集合展示条数，其余省略 */
+    private static String describe(Object result) {
+        if (result instanceof Number || result instanceof Boolean) return String.valueOf(result);
+        if (result instanceof List<?> list) return list.size() + " 条";
+        if (result instanceof int[] arr) return arr.length + " 条";
+        return result == null ? "null" : result.getClass().getSimpleName();
+    }
+
+    private static long sumRows(int[] rows) {
+        long total = 0;
+        for (int r : rows) total += Math.max(r, 0);
+        return total;
+    }
+
+    /** SQL 压成单行，便于日志检索 */
+    private static String oneLine(String sql) {
+        return sql == null ? "" : sql.replaceAll("\\s+", " ").trim();
     }
 
 }

@@ -8,6 +8,7 @@ import com.wxdgaming.batis.sql.query.SelectQuery;
 import com.wxdgaming.batis.sql.query.SqlFragments;
 import lombok.Getter;
 import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -24,6 +25,7 @@ import java.util.List;
  * @version 2026-07-31
  **/
 @Getter
+@Slf4j
 public class BeanRunner implements AutoCloseable {
 
     private final JdbcTemplate jdbcTemplate;
@@ -188,6 +190,10 @@ public class BeanRunner implements AutoCloseable {
         }
 
         queryRunner.checkWritable();
+        final boolean dbg = log.isDebugEnabled();
+        final long t0 = dbg ? System.nanoTime() : 0L;
+        if (dbg) log.debug("[批量插入] {} -- 参数组数: {}",
+                sql.replaceAll("\\s+", " ").trim(), batchArgs.size());
         try {
             Connection conn = queryRunner.getConnection();
             if (queryRunner.isInTransaction()) {
@@ -204,6 +210,8 @@ public class BeanRunner implements AutoCloseable {
                     }
                     int[] results = stmt.executeBatch();
                     writeGeneratedKeys(stmt, beans, handler, identityColumn);
+                    if (dbg) log.debug("[批量插入] 完成（事务内），耗时 {} ms，影响 {} 条",
+                            (System.nanoTime() - t0) / 1_000_000, results.length);
                     return results;
                 }
             }
@@ -222,6 +230,8 @@ public class BeanRunner implements AutoCloseable {
                     int[] results = stmt.executeBatch();
                     writeGeneratedKeys(stmt, beans, handler, identityColumn);
                     conn.commit();
+                    if (dbg) log.debug("[批量插入] 完成，耗时 {} ms，影响 {} 条",
+                            (System.nanoTime() - t0) / 1_000_000, results.length);
                     return results;
                 }
             } catch (SQLException e) {
