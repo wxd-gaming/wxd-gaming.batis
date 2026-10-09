@@ -33,4 +33,20 @@
         </dependency>
     </dependencies>
 
+    <build>
+        <plugins>
+            <!-- 集成测试类以 *IT 命名，需要显式纳入 surefire 默认范围 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <includes>
+                        <include>**/*Test.java</include>
+                        <include>**/*IT.java</include>
+                    </includes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
 </project>

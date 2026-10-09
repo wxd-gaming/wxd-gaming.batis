@@ -22,8 +22,14 @@ public class ColumnInfo {
 
     /** 列名 */
     private String columnName;
-    /** 数据库列类型 */
+    /**
+     * 物理列类型字符串（方言字面量，如 VARCHAR(255)）。
+     * 仅两处来源：{@code @Column(type=...)} 显式指定、数据库元数据回填。
+     * 由 Java 类型自动推断的列为 null，逻辑类型见 {@link #sqlType}。
+     */
     private String type;
+    /** 逻辑列类型，实体解析自动推断时写入；显式 @Column(type=...) 时为 null */
+    private SqlType sqlType;
     /** 列长度 */
     private int length;
     /** 小数精度 */
@@ -62,6 +68,7 @@ public class ColumnInfo {
         return "ColumnInfo{" +
                 "columnName='" + columnName + '\'' +
                 ", type='" + type + '\'' +
+                ", sqlType=" + sqlType +
                 ", length=" + length +
                 ", comment='" + comment + '\'' +
                 ", primaryKey=" + primaryKey +

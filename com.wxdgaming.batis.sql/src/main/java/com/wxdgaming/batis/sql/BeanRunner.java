@@ -1,11 +1,13 @@
 package com.wxdgaming.batis.sql;
 
+import com.wxdgaming.batis.exception.DataAccessException;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.TableInfo;
 import com.wxdgaming.batis.parser.EntityParser;
+import com.wxdgaming.batis.sql.query.SelectQuery;
+import com.wxdgaming.batis.sql.query.SqlFragments;
 import lombok.Getter;
 import lombok.Setter;
-import org.apache.commons.lang3.exception.ExceptionUtils;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -140,6 +142,7 @@ public class BeanRunner implements AutoCloseable {
 
     /**
      * 单组安全插入：先批量尝试，失败则逐条降级
+     * <p>瞬时故障（死锁、锁超时、连接断开等）直接上抛，不进入逐条重试，避免放大故障。</p>
      */
     private <T> void doInsertBatchSafe(List<T> beans, int baseIndex, BatchResult<T> result) {
         // Fast path: 批量插入
@@ -150,7 +153,8 @@ public class BeanRunner implements AutoCloseable {
             }
             return;
         } catch (Exception batchEx) {
-            // 批量失败，降级到逐条
+            rethrowWithoutFallback(batchEx);
+            // 批量失败（数据类异常），降级到逐条
         }
 
         // Slow path: 逐条插入（无事务，每条 autocommit）
@@ -183,8 +187,26 @@ public class BeanRunner implements AutoCloseable {
             batchArgs.add(handler.buildInsertParams(bean));
         }
 
+        queryRunner.checkWritable();
         try {
             Connection conn = queryRunner.getConnection();
+            if (queryRunner.isInTransaction()) {
+                // 事务内：不 commit 不 rollback、不动 autoCommit，由外层事务统一管理
+                try (PreparedStatement stmt = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+                    queryRunner.applyQueryTimeout(stmt);
+                    for (Object[] args : batchArgs) {
+                        if (args != null) {
+                            for (int i = 0; i < args.length; i++) {
+                                stmt.setObject(i + 1, args[i]);
+                            }
+                        }
+                        stmt.addBatch();
+                    }
+                    int[] results = stmt.executeBatch();
+                    writeGeneratedKeys(stmt, beans, handler, identityColumn);
+                    return results;
+                }
+            }
             boolean autoCommit = conn.getAutoCommit();
             try {
                 conn.setAutoCommit(false);
@@ -198,20 +220,7 @@ public class BeanRunner implements AutoCloseable {
                         stmt.addBatch();
                     }
                     int[] results = stmt.executeBatch();
-
-                    if (identityColumn != null) {
-                        try (ResultSet rs = stmt.getGeneratedKeys()) {
-                            int idx = 0;
-                            while (rs.next() && idx < beans.size()) {
-                                Object val = rs.getObject(1);
-                                Number genId = val instanceof Number ? (Number) val : null;
-                                if (genId != null) {
-                                    handler.writeGeneratedKey(beans.get(idx), genId);
-                                }
-                                idx++;
-                            }
-                        }
-                    }
+                    writeGeneratedKeys(stmt, beans, handler, identityColumn);
                     conn.commit();
                     return results;
                 }
@@ -220,7 +229,7 @@ public class BeanRunner implements AutoCloseable {
                     conn.rollback();
                 } catch (SQLException ignored) {
                 }
-                throw ExceptionUtils.asRuntimeException(e);
+                throw jdbcTemplate.translateException(e, sql, null);
             } finally {
                 try {
                     conn.setAutoCommit(autoCommit);
@@ -228,7 +237,26 @@ public class BeanRunner implements AutoCloseable {
                 }
             }
         } catch (SQLException e) {
-            throw ExceptionUtils.asRuntimeException(e);
+            throw jdbcTemplate.translateException(e, sql, null);
+        }
+    }
+
+    /**
+     * 批量插入后回写自增主键（无自增列时跳过）
+     */
+    private <T> void writeGeneratedKeys(PreparedStatement stmt, List<T> beans,
+                                        BeanToInsertHandler handler, ColumnInfo identityColumn) throws SQLException {
+        if (identityColumn == null) return;
+        try (ResultSet rs = stmt.getGeneratedKeys()) {
+            int idx = 0;
+            while (rs.next() && idx < beans.size()) {
+                Object val = rs.getObject(1);
+                Number genId = val instanceof Number ? (Number) val : null;
+                if (genId != null) {
+                    handler.writeGeneratedKey(beans.get(idx), genId);
+                }
+                idx++;
+            }
         }
     }
 
@@ -263,6 +291,7 @@ public class BeanRunner implements AutoCloseable {
 
     /**
      * 单组安全更新：先批量尝试，失败则逐条降级
+     * <p>瞬时故障（死锁、锁超时、连接断开等）直接上抛，不进入逐条重试，避免放大故障。</p>
      */
     private <T> void doUpdateBatchSafe(List<T> beans, int baseIndex, BatchResult<T> result) {
         // Fast path: 批量更新
@@ -273,7 +302,8 @@ public class BeanRunner implements AutoCloseable {
             }
             return;
         } catch (Exception batchEx) {
-            // 批量失败，降级到逐条
+            rethrowWithoutFallback(batchEx);
+            // 批量失败（数据类异常），降级到逐条
         }
 
         // Slow path: 逐条更新（无事务，每条 autocommit）
@@ -352,15 +382,30 @@ public class BeanRunner implements AutoCloseable {
     }
 
     /**
+     * 创建查询 DSL 构建器（推荐的条件查询入口）
+     * <pre>{@code
+     * List<Order> list = runner.select(Order.class)
+     *         .where(Criteria.where("status").eq("PAID"))
+     *         .orderBy(Sort.desc("createTime"))
+     *         .page(Pageable.of(1, 20))
+     *         .list();
+     * }</pre>
+     */
+    public <T> SelectQuery<T> select(Class<T> entityClass) {
+        return new SelectQuery<>(jdbcTemplate, entityClass);
+    }
+
+    /**
      * 带条件查询单条实体
-     * <p>{@code whereSection} 为 {@code null} 或空字符串时等价于 {@link #queryAll} 并返回第一条。</p>
      *
      * @param entityClass  实体类
      * @param whereSection WHERE 子句（不含 WHERE 关键字），例如 {@code "status = ? AND paid = ?"}
      * @param params       参数列表
      * @param <T>          实体类型
      * @return 实体对象，未找到时返回 null
+     * @deprecated 字符串拼接条件有注入风险且无法复用类型体系，请改用 {@link #select(Class)} 查询 DSL
      */
+    @Deprecated(forRemoval = true)
     public <T> T queryOne(Class<T> entityClass, String whereSection, Object... params) {
         TableInfo tableInfo = EntityParser.parse(entityClass);
         BeanToSelectHandler handler = requireSelectHandler();
@@ -370,7 +415,7 @@ public class BeanRunner implements AutoCloseable {
             sql = handler.buildSelectAllSql(tableInfo);
             args = null;
         } else {
-            sql = handler.buildSelectAllSql(tableInfo) + " WHERE " + whereSection;
+            sql = handler.buildSelectAllSql(tableInfo) + " WHERE " + SqlFragments.guardWhereSection(whereSection);
             args = params.length > 0 ? params : null;
         }
         return queryRunner.query(sql, args, ResultSetHandlers.bean(jdbcTemplate, entityClass));
@@ -378,14 +423,15 @@ public class BeanRunner implements AutoCloseable {
 
     /**
      * 带条件查询实体列表
-     * <p>{@code whereSection} 为 {@code null} 或空字符串时等价于 {@link #queryAll}。</p>
      *
      * @param entityClass  实体类
      * @param whereSection WHERE 子句（不含 WHERE 关键字），例如 {@code "status = ?"}
      * @param params       参数列表
      * @param <T>          实体类型
      * @return 实体列表，不存在时返回空 List
+     * @deprecated 字符串拼接条件有注入风险且无法复用类型体系，请改用 {@link #select(Class)} 查询 DSL
      */
+    @Deprecated(forRemoval = true)
     public <T> List<T> queryList(Class<T> entityClass, String whereSection, Object... params) {
         TableInfo tableInfo = EntityParser.parse(entityClass);
         BeanToSelectHandler handler = requireSelectHandler();
@@ -395,7 +441,7 @@ public class BeanRunner implements AutoCloseable {
             sql = handler.buildSelectAllSql(tableInfo);
             args = null;
         } else {
-            sql = handler.buildSelectAllSql(tableInfo) + " WHERE " + whereSection;
+            sql = handler.buildSelectAllSql(tableInfo) + " WHERE " + SqlFragments.guardWhereSection(whereSection);
             args = params.length > 0 ? params : null;
         }
         return queryRunner.query(sql, args, ResultSetHandlers.beanList(jdbcTemplate, entityClass));
@@ -484,6 +530,21 @@ public class BeanRunner implements AutoCloseable {
     }
 
     // ===== 内部工具方法 =====
+
+    /**
+     * 批量失败时判断是否直接上抛（不降级逐条）：
+     * <ul>
+     *   <li>瞬时故障（死锁、锁超时、连接断开）——重试逐条只会放大故障；</li>
+     *   <li>事务内——批量中途失败时前面语句已生效，逐条补插会产生重复写，必须上抛由整个事务回滚。</li>
+     * </ul>
+     */
+    private void rethrowWithoutFallback(Exception batchEx) {
+        boolean retryable = batchEx instanceof DataAccessException dae && dae.isRetryable();
+        if (retryable || queryRunner.isInTransaction()) {
+            if (batchEx instanceof RuntimeException re) throw re;
+            throw new IllegalStateException(batchEx);
+        }
+    }
 
     /**
      * 将多个分批结果数组合并为一个结果数组

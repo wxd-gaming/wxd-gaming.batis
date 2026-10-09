@@ -10,6 +10,7 @@ import com.wxdgaming.batis.converter.NoneTypeConverter;
 import com.wxdgaming.batis.converter.TypeConverter;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.IndexInfo;
+import com.wxdgaming.batis.model.SqlType;
 import com.wxdgaming.batis.model.StorageMode;
 import com.wxdgaming.batis.model.TableInfo;
 
@@ -156,18 +157,18 @@ public class EntityParser {
             StorageMode storageMode = resolveStorageMode(columnAnn.storageMode(), field.getType());
             columnInfo.setStorageMode(storageMode);
 
-            // 2. 推断 DB 列类型
+            // 2. 确定列类型：显式物理类型优先，否则推断逻辑类型（物理渲染交给方言 ColumnTypeDefHandler）
             if (!columnAnn.type().isEmpty()) {
                 columnInfo.setType(columnAnn.type());
             } else {
-                columnInfo.setType(inferType(field.getType(), columnAnn.length(), storageMode));
+                applyInferredType(columnInfo, field.getType(), columnAnn.length(), storageMode);
             }
         } else {
             columnInfo.setColumnName(camelToUnderscore(field.getName()));
             StorageMode storageMode = resolveStorageMode(StorageMode.AUTO, field.getType());
             columnInfo.setStorageMode(storageMode);
-            columnInfo.setType(inferType(field.getType(), 255, storageMode));
             columnInfo.setLength(255);
+            applyInferredType(columnInfo, field.getType(), 255, storageMode);
             columnInfo.setNullable(true);
         }
 
@@ -343,93 +344,108 @@ public class EntityParser {
     // ============== 类型推断 ==============
 
     /**
-     * 根据 Java 类型和存储模式推断数据库列类型
+     * 推断逻辑类型并落库到 ColumnInfo。
+     * 个别 Java 类型有固定宽度约定（UUID=36），在推断时一并修正 length，保证渲染结果与原字面量一致。
+     */
+    private static void applyInferredType(ColumnInfo columnInfo, Class<?> javaType, int length, StorageMode storageMode) {
+        SqlType sqlType = inferSqlType(javaType, length, storageMode);
+        columnInfo.setSqlType(sqlType);
+        // UUID 固定 36 位字符串宽度（与原字面量推断 VARCHAR(36) 保持一致）
+        if (javaType == UUID.class && sqlType == SqlType.VARCHAR) {
+            columnInfo.setLength(36);
+        }
+        // BigDecimal 自动档固定 DECIMAL(20,6) 精度契约（与原字面量推断一致，避免注解默认 length=255 污染精度）
+        if (storageMode == StorageMode.AUTO && sqlType == SqlType.DECIMAL) {
+            columnInfo.setLength(20);
+            columnInfo.setScale(6);
+        }
+        // char/Character 固定 1 字符宽度（与原字面量推断 CHAR(1) 一致）
+        if (sqlType == SqlType.CHAR && (javaType == char.class || javaType == Character.class)) {
+            columnInfo.setLength(1);
+        }
+    }
+
+    /**
+     * 根据 Java 类型和存储模式推断逻辑列类型（不产生任何方言字面量，
+     * 物理类型渲染由 sql 层 ColumnTypeDefHandler SPI 完成）
      *
      * @param javaType    Java 字段类型
-     * @param length      列长度（主要用于 VARCHAR）
+     * @param length      列长度（主要用于 VARCHAR / TEXT 档位选择）
      * @param storageMode 存储模式
      */
-    private static String inferType(Class<?> javaType, int length, StorageMode storageMode) {
+    private static SqlType inferSqlType(Class<?> javaType, int length, StorageMode storageMode) {
         switch (storageMode) {
             case JSON:
-                return "LONGTEXT";
+                return SqlType.JSON;
             case BOOL:
-                return "TINYINT(1)";
+                return SqlType.BOOLEAN;
             case BYTE:
-                return "TINYINT";
+                return SqlType.BYTE;
             case SHORT:
-                return "SMALLINT";
+                return SqlType.SHORT;
             case INT:
-                return "INT";
+                return SqlType.INT;
             case LONG:
-                return "BIGINT";
+                return SqlType.BIGINT;
             case FLOAT:
-                return "FLOAT";
+                return SqlType.FLOAT;
             case DOUBLE:
-                return "DOUBLE";
+                return SqlType.DOUBLE;
             case DECIMAL:
-                return "DECIMAL(20,6)";
+                return SqlType.DECIMAL;
             case VARCHAR:
-                return "VARCHAR(" + Math.max(length, 1) + ")";
+                return SqlType.VARCHAR;
             case TEXT:
-                return "TEXT";
+                return SqlType.TEXT;
             case MEDIUMTEXT:
-                return "MEDIUMTEXT";
+                return SqlType.MEDIUMTEXT;
             case LONGTEXT:
-                return "LONGTEXT";
+                return SqlType.LONGTEXT;
             case BLOB:
-                return "BLOB";
+                return SqlType.BLOB;
             case MEDIUMBLOB:
-                return "MEDIUMBLOB";
+                return SqlType.MEDIUMBLOB;
             case LONGBLOB:
-                return "LONGBLOB";
+                return SqlType.LONGBLOB;
             case DATE:
-                return "DATE";
+                return SqlType.DATE;
             case DATETIME:
-                return "DATETIME";
+                return SqlType.DATETIME;
             case TIME:
-                return "TIME";
+                return SqlType.TIME;
             // AUTO 模式：按 Java 类型推断
             case AUTO:
             default:
                 // fall through to Java type inference
         }
 
-        // AUTO 模式：原有推断逻辑
+        // AUTO 模式：按 Java 类型推断
         if (javaType == String.class) {
-            if (length > 16777215) return "LONGTEXT";
-            if (length > 65535) return "MEDIUMTEXT";
-            if (length > 16383) return "TEXT";
-            return "VARCHAR(" + length + ")";
+            if (length > 16777215) return SqlType.LONGTEXT;
+            if (length > 65535) return SqlType.MEDIUMTEXT;
+            if (length > 16383) return SqlType.TEXT;
+            return SqlType.VARCHAR;
         }
-        if (javaType == boolean.class || javaType == Boolean.class) return "TINYINT(1)";
-        if (javaType == byte.class || javaType == Byte.class) return "TINYINT";
-        if (javaType == short.class || javaType == Short.class) return "SMALLINT";
-        if (javaType == int.class || javaType == Integer.class) return "INT";
-        if (javaType == long.class || javaType == Long.class) return "BIGINT";
-        if (javaType == float.class || javaType == Float.class) return "FLOAT";
-        if (javaType == double.class || javaType == Double.class) return "DOUBLE";
-        if (javaType == BigDecimal.class) return "DECIMAL(20,6)";
-        if (javaType == Date.class || javaType == LocalDateTime.class) return "DATETIME";
-        if (javaType == LocalDate.class) return "DATE";
-        if (javaType == LocalTime.class) return "TIME";
-        if (javaType == byte[].class) return "BLOB";
-        if (javaType == char.class || javaType == Character.class) return "CHAR(1)";
-        if (javaType == BigInteger.class) return "BIGINT";
-        if (javaType == UUID.class) return "VARCHAR(36)";
+        if (javaType == boolean.class || javaType == Boolean.class) return SqlType.BOOLEAN;
+        if (javaType == byte.class || javaType == Byte.class) return SqlType.BYTE;
+        if (javaType == short.class || javaType == Short.class) return SqlType.SHORT;
+        if (javaType == int.class || javaType == Integer.class) return SqlType.INT;
+        if (javaType == long.class || javaType == Long.class) return SqlType.BIGINT;
+        if (javaType == float.class || javaType == Float.class) return SqlType.FLOAT;
+        if (javaType == double.class || javaType == Double.class) return SqlType.DOUBLE;
+        if (javaType == BigDecimal.class) return SqlType.DECIMAL;
+        if (javaType == Date.class || javaType == LocalDateTime.class) return SqlType.DATETIME;
+        if (javaType == LocalDate.class) return SqlType.DATE;
+        if (javaType == LocalTime.class) return SqlType.TIME;
+        if (javaType == byte[].class) return SqlType.BLOB;
+        if (javaType == char.class || javaType == Character.class) return SqlType.CHAR;
+        if (javaType == BigInteger.class) return SqlType.BIGINT;
+        if (javaType == UUID.class) return SqlType.VARCHAR;
         if (javaType == Instant.class || javaType == OffsetDateTime.class
-                || javaType == ZonedDateTime.class || javaType == java.sql.Timestamp.class) return "DATETIME";
-        if (javaType == java.sql.Date.class) return "DATE";
-        if (javaType == java.sql.Time.class) return "TIME";
-        return "VARCHAR(" + length + ")";
-    }
-
-    /**
-     * @deprecated 请使用 {@link #inferType(Class, int, StorageMode)}
-     */
-    @Deprecated
-    private static String inferType(Class<?> javaType, int length) {
-        return inferType(javaType, length, StorageMode.AUTO);
+                || javaType == ZonedDateTime.class || javaType == java.sql.Timestamp.class) return SqlType.DATETIME;
+        if (javaType == java.sql.Date.class) return SqlType.DATE;
+        if (javaType == java.sql.Time.class) return SqlType.TIME;
+        return SqlType.VARCHAR;
     }
 
     // ============== 工具方法 ==============

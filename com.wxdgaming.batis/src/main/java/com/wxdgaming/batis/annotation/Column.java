@@ -26,8 +26,9 @@ public @interface Column {
     String name() default "";
 
     /**
-     * 数据库列类型，如 VARCHAR, BIGINT, INT, TEXT 等。
-     * 不填则由 {@code EntityParser} 按 Java 类型自动推断。
+     * 数据库物理列类型字面量（方言相关，如 MySQL 的 VARCHAR(64)、pgsql 的 varchar(64)）。
+     * 一般不需要填写：不填时框架按 Java 类型推断逻辑类型（SqlType），再由当前方言渲染物理类型；
+     * 填写后则跳过推断，原样用于 DDL。
      */
     String type() default "";
 

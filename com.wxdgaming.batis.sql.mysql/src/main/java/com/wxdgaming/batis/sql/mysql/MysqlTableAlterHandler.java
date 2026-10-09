@@ -4,6 +4,7 @@ import com.wxdgaming.batis.annotation.GenerationType;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.IndexInfo;
 import com.wxdgaming.batis.model.TableInfo;
+import com.wxdgaming.batis.sql.ColumnTypeDefHandler;
 import com.wxdgaming.batis.sql.JdbcTemplate;
 import com.wxdgaming.batis.sql.QueryRunner;
 import com.wxdgaming.batis.sql.TableAlterHandler;
@@ -37,6 +38,9 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
         TableInfo dbTable = cache.get(tableName);
         if (dbTable == null) return;
 
+        ColumnTypeDefHandler typeDef = jdbcTemplate.getColumnTypeDefHandler() != null
+                ? jdbcTemplate.getColumnTypeDefHandler() : MysqlColumnTypeDefHandler.INSTANCE;
+
         List<String> alterClauses = new ArrayList<>();
 
         // ===== 1. 列对比 =====
@@ -45,10 +49,10 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
             ColumnInfo dbCol = dbTable.getColumn(colName);
             if (dbCol == null) {
                 // 新增列
-                alterClauses.add("ADD COLUMN " + buildColumnDef(entityCol));
-            } else if (hasColumnChanged(entityCol, dbCol)) {
+                alterClauses.add("ADD COLUMN " + buildColumnDef(entityCol, typeDef));
+            } else if (hasColumnChanged(entityCol, dbCol, typeDef)) {
                 // 修改列
-                alterClauses.add("MODIFY COLUMN " + buildColumnDef(entityCol));
+                alterClauses.add("MODIFY COLUMN " + buildColumnDef(entityCol, typeDef));
             }
         }
 
@@ -98,9 +102,9 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
     }
 
     /** 构建列定义片段（用于 ADD COLUMN / MODIFY COLUMN） */
-    private String buildColumnDef(ColumnInfo col) {
+    private String buildColumnDef(ColumnInfo col, ColumnTypeDefHandler typeDef) {
         StringBuilder sb = new StringBuilder(64);
-        sb.append("`").append(col.getColumnName().toLowerCase()).append("` ").append(col.getType());
+        sb.append("`").append(col.getColumnName().toLowerCase()).append("` ").append(typeDef.renderType(col));
 
         if (!col.isNullable()) {
             sb.append(" NOT NULL");
@@ -136,8 +140,8 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
     }
 
     /** 判断列是否发生了变化 */
-    private boolean hasColumnChanged(ColumnInfo entityCol, ColumnInfo dbCol) {
-        if (!normalizeType(entityCol.getType()).equals(normalizeType(dbCol.getType()))) return true;
+    private boolean hasColumnChanged(ColumnInfo entityCol, ColumnInfo dbCol, ColumnTypeDefHandler typeDef) {
+        if (!typeDef.renderNormalized(entityCol).equals(typeDef.normalize(dbCol.getType()))) return true;
         if (entityCol.isNullable() != dbCol.isNullable()) return true;
         if (!defaultValueEquals(entityCol.getDefaultValue(), dbCol.getDefaultValue())) return true;
         if (!Objects.equals(entityCol.getComment(), dbCol.getComment())) return true;
@@ -153,23 +157,6 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
             if (!entityIdx.getColumns().get(i).equalsIgnoreCase(dbIdx.getColumns().get(i))) return true;
         }
         return false;
-    }
-
-    /**
-     * 标准化列类型以便比较
-     * <ul>
-     *   <li>转小写</li>
-     *   <li>去掉整数类型的显示宽度（int(11) → int）</li>
-     * </ul>
-     */
-    private String normalizeType(String type) {
-        if (type == null) return "";
-        String t = type.toLowerCase().trim();
-        // int(11) → int, bigint(20) → bigint 等
-        if (t.matches("^(tinyint|smallint|mediumint|int|bigint)(\\(\\d+\\))?.*$")) {
-            t = t.replaceAll("\\(\\d+\\)", "");
-        }
-        return t;
     }
 
     /**

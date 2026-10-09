@@ -2,18 +2,31 @@ package com.wxdgaming.batis.sql;
 
 import com.wxdgaming.batis.DbTemplate;
 import com.wxdgaming.batis.cache.EntityCache;
+import com.wxdgaming.batis.exception.DataAccessException;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.IndexInfo;
 import com.wxdgaming.batis.model.TableInfo;
 import com.wxdgaming.batis.parser.EntityParser;
+import com.wxdgaming.batis.query.Criteria;
+import com.wxdgaming.batis.query.Page;
+import com.wxdgaming.batis.query.Pageable;
+import com.wxdgaming.batis.sql.query.SelectQuery;
+import com.wxdgaming.batis.sql.tx.ConnectionHolder;
+import com.wxdgaming.batis.sql.tx.Propagation;
+import com.wxdgaming.batis.sql.tx.TransactionStatus;
+import com.wxdgaming.batis.sql.tx.TransactionTemplate;
+import com.wxdgaming.batis.sql.tx.TxContext;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import lombok.Getter;
 import lombok.Setter;
 
+import java.sql.Connection;
+import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.function.Function;
 
 /**
  * jdbc 操作
@@ -35,6 +48,8 @@ public class JdbcTemplate extends DbTemplate {
     private TableCreateHandler tableCreateHandler;
     /** 修改表的处理器 */
     private TableAlterHandler tableAlterHandler;
+    /** 列类型定义处理器（逻辑类型 → 物理类型渲染与规格化，由方言模块注入） */
+    private ColumnTypeDefHandler columnTypeDefHandler;
     /** 删除表的处理器 */
     private TableDropHandler tableDropHandler;
     /** 截断表的处理器 */
@@ -49,6 +64,8 @@ public class JdbcTemplate extends DbTemplate {
     private BeanToDeleteHandler beanToDeleteHandler;
     /** SELECT 实体处理器（由各数据库方言模块注入） */
     private BeanToSelectHandler beanToSelectHandler;
+    /** SQL 异常翻译器（方言注入，未设置时使用 DefaultSqlExceptionHandler 兜底） */
+    private SqlExceptionHandler sqlExceptionHandler;
 
     public JdbcTemplate(HikariConfig config) {
         this(new HikariDataSource(config));
@@ -108,6 +125,78 @@ public class JdbcTemplate extends DbTemplate {
 
     public QueryRunner queryRunner() {
         return new QueryRunner(this);
+    }
+
+    /**
+     * 借出连接的唯一入口：当前线程绑定了本模板的事务时返回事务连接，否则从连接池借出
+     */
+    public Connection getConnection() throws SQLException {
+        ConnectionHolder holder = TxContext.get(this);
+        if (holder != null && holder.isTransactional()) {
+            return holder.getConnection();
+        }
+        return dataSource.getConnection();
+    }
+
+    /** 当前线程是否处于本模板的事务中 */
+    public boolean transactionActive() {
+        return TxContext.isActive(this);
+    }
+
+    /** 创建绑定本模板的事务模板 */
+    public TransactionTemplate transactionTemplate() {
+        return new TransactionTemplate(this);
+    }
+
+    /** 以 REQUIRED 传播执行一段事务逻辑 */
+    public <T> T inTransaction(Function<TransactionStatus, T> work) {
+        return transactionTemplate().execute(status -> work.apply(status));
+    }
+
+    /** 按指定传播行为执行一段事务逻辑 */
+    public <T> T inTransaction(Propagation propagation, Function<TransactionStatus, T> work) {
+        return transactionTemplate().execute(propagation, status -> work.apply(status));
+    }
+
+    // ===== 查询 DSL 便捷入口 =====
+
+    /** 创建实体查询 DSL 构建器 */
+    public <T> SelectQuery<T> select(Class<T> entityClass) {
+        return new SelectQuery<>(this, entityClass);
+    }
+
+    /** 条件查询列表 */
+    public <T> List<T> queryList(Class<T> entityClass, Criteria where) {
+        return select(entityClass).where(where).list();
+    }
+
+    /** 条件查询唯一记录（多于 1 条抛 TooManyResultsException） */
+    public <T> T queryOne(Class<T> entityClass, Criteria where) {
+        return select(entityClass).where(where).one();
+    }
+
+    /** 条件计数 */
+    public <T> long count(Class<T> entityClass, Criteria where) {
+        return select(entityClass).where(where).count();
+    }
+
+    /** 分页查询 */
+    public <T> Page<T> queryPage(Class<T> entityClass, Criteria where, Pageable pageable) {
+        return select(entityClass).where(where).pageResult(pageable);
+    }
+
+    /**
+     * 把 SQLException 翻译成统一的 DataAccessException
+     * <p>优先使用方言注册的 {@link SqlExceptionHandler}，未注册时按 SQLState/关键字兜底。</p>
+     *
+     * @param ex     原始 SQL 异常
+     * @param sql    触发异常的 SQL（可为 null）
+     * @param params 绑定参数（可为 null）
+     */
+    public DataAccessException translateException(SQLException ex, String sql, Object[] params) {
+        SqlExceptionHandler handler = sqlExceptionHandler != null
+                ? sqlExceptionHandler : DefaultSqlExceptionHandler.INSTANCE;
+        return handler.translate(ex, sql, params);
     }
 
     public BeanRunner beanRunner() {

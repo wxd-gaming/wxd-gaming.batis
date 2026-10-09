@@ -4,6 +4,7 @@ import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.serializer.SerializerFeature;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.IndexInfo;
+import com.wxdgaming.batis.model.SqlType;
 import com.wxdgaming.batis.model.TableInfo;
 import com.wxdgaming.batis.parser.EntityParser;
 import org.junit.jupiter.api.Test;
@@ -58,6 +59,7 @@ class EntityParserTest {
                 .findFirst().orElse(null);
         assertNotNull(pk);
         assertEquals("id", pk.getColumnName());
+        // id 显式 @Column(type = "BIGINT")：物理字面量原样保留
         assertEquals("BIGINT", pk.getType());
     }
 
@@ -68,7 +70,10 @@ class EntityParserTest {
                 .findFirst().orElse(null);
         assertNotNull(col);
         assertEquals("player_name", col.getColumnName());
-        assertEquals("VARCHAR(64)", col.getType());
+        // 未显式指定 type：core 不再产出方言字面量，只有逻辑类型 + 长度
+        assertNull(col.getType());
+        assertEquals(SqlType.VARCHAR, col.getSqlType());
+        assertEquals(64, col.getLength());
         assertEquals("昵称", col.getComment());
         assertEquals("''", col.getDefaultValue());
         assertFalse(col.isNullable());
@@ -78,25 +83,36 @@ class EntityParserTest {
     void testTypeInference() {
         TableInfo info = EntityParser.parse(SimpleEntity.class);
 
-        // 无注解的字段应自动推断类型
+        // 无注解的字段应自动推断逻辑类型（不含方言字面量）
         assertEquals("simple_entity", info.getTableName());
         assertEquals("id", info.getColumn("id").getColumnName());
-        assertEquals("BIGINT", info.getColumn("id").getType());
+        assertEquals(SqlType.BIGINT, info.getColumn("id").getSqlType());
+        assertNull(info.getColumn("id").getType());
 
         ColumnInfo nameCol = info.getColumns().values().stream()
                 .filter(c -> c.getFieldName().equals("name")).findFirst().orElse(null);
         assertNotNull(nameCol);
-        assertEquals("VARCHAR(255)", nameCol.getType()); // 默认长度 255
+        assertEquals(SqlType.VARCHAR, nameCol.getSqlType()); // 默认长度 255
+        assertEquals(255, nameCol.getLength());
 
         ColumnInfo ageCol = info.getColumns().values().stream()
                 .filter(c -> c.getFieldName().equals("age")).findFirst().orElse(null);
         assertNotNull(ageCol);
-        assertEquals("INT", ageCol.getType());
+        assertEquals(SqlType.INT, ageCol.getSqlType());
 
         ColumnInfo activeCol = info.getColumns().values().stream()
                 .filter(c -> c.getFieldName().equals("active")).findFirst().orElse(null);
         assertNotNull(activeCol);
-        assertEquals("TINYINT(1)", activeCol.getType());
+        assertEquals(SqlType.BOOLEAN, activeCol.getSqlType());
+    }
+
+    @Test
+    void testStorageModeToSqlType() {
+        TableInfo info = EntityParser.parse(StorageModeEntity.class);
+        assertEquals(SqlType.JSON, info.getColumn("payload").getSqlType());      // JSON 存储模式 -> 逻辑 JSON（MySQL 渲染为 LONGTEXT）
+        assertEquals(SqlType.BIGINT, info.getColumn("counter").getSqlType());     // 显式 LONG
+        assertEquals(SqlType.VARCHAR, info.getColumn("code").getSqlType());       // 显式 VARCHAR
+        assertEquals(64, info.getColumn("code").getLength());
     }
 
     // ==================== 索引 ====================

@@ -21,7 +21,7 @@ public class MysqlTableCreateHandler implements TableCreateHandler {
 
     @Override
     public void doAction(JdbcTemplate jdbcTemplate, TableInfo tableInfo) {
-        String buildSql = buildSql(tableInfo);
+        String buildSql = buildSql(tableInfo, typeDef(jdbcTemplate));
         log.debug("创建表sql:\n{}", buildSql);
         try (QueryRunner queryRunner = new QueryRunner(jdbcTemplate)) {
             queryRunner.update(buildSql);
@@ -30,6 +30,16 @@ public class MysqlTableCreateHandler implements TableCreateHandler {
 
     @Override
     public String buildSql(TableInfo tableInfo) {
+        return buildSql(tableInfo, MysqlColumnTypeDefHandler.INSTANCE);
+    }
+
+    /** 优先使用 template 注入的方言实现，未注入时回退 MySQL 默认实现 */
+    private static ColumnTypeDefHandler typeDef(JdbcTemplate jdbcTemplate) {
+        ColumnTypeDefHandler handler = jdbcTemplate.getColumnTypeDefHandler();
+        return handler != null ? handler : MysqlColumnTypeDefHandler.INSTANCE;
+    }
+
+    private String buildSql(TableInfo tableInfo, ColumnTypeDefHandler typeDef) {
         StringBuilder sb = new StringBuilder(512);
         sb.append("CREATE TABLE IF NOT EXISTS `").append(tableInfo.getTableName().toLowerCase()).append("` (\n");
 
@@ -37,7 +47,7 @@ public class MysqlTableCreateHandler implements TableCreateHandler {
 
         // 1. 列定义
         for (ColumnInfo col : tableInfo.getColumns().values()) {
-            columnDefs.add(buildColumnDef(col));
+            columnDefs.add(buildColumnDef(col, typeDef));
         }
 
         // 2. 主键
@@ -75,9 +85,9 @@ public class MysqlTableCreateHandler implements TableCreateHandler {
     }
 
     /** 构建单列定义 */
-    private String buildColumnDef(ColumnInfo col) {
+    private String buildColumnDef(ColumnInfo col, ColumnTypeDefHandler typeDef) {
         StringBuilder sb = new StringBuilder(64);
-        sb.append("  `").append(col.getColumnName().toLowerCase()).append("` ").append(col.getType());
+        sb.append("  `").append(col.getColumnName().toLowerCase()).append("` ").append(typeDef.renderType(col));
 
         if (!col.isNullable()) {
             sb.append(" NOT NULL");

@@ -43,6 +43,27 @@ public final class CacheKeyBuilder {
         return ti.getTableName().toLowerCase() + ":";
     }
 
+    /**
+     * 从实体 bean 中提取主键值（供上层判断主键是否已生成）。
+     *
+     * @return 主键值；单主键直接返回，复合主键返回 {@code Object[]}；实体未定义主键时返回 null
+     */
+    public static Object extractPkValue(Object bean) {
+        TableInfo ti = EntityParser.parse(bean.getClass());
+        List<Object> values = new ArrayList<>();
+        for (ColumnInfo col : ti.getColumns().values()) {
+            if (col.isPrimaryKey() && col.getReadMethod() != null) {
+                try {
+                    values.add(col.getReadMethod().invoke(bean));
+                } catch (IllegalAccessException | InvocationTargetException e) {
+                    throw new RuntimeException("提取主键失败: " + col.getFieldName(), e);
+                }
+            }
+        }
+        if (values.isEmpty()) return null;
+        return values.size() == 1 ? values.getFirst() : values.toArray();
+    }
+
     /** 从实体 bean 中提取所有主键字段的值 */
     private static Object extractPk(TableInfo ti, Object bean) {
         List<Object> values = new ArrayList<>();

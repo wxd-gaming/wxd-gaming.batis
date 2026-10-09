@@ -4,6 +4,7 @@ import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.parser.Feature;
 import com.alibaba.fastjson.serializer.SerializerFeature;
 import com.wxdgaming.batis.converter.TypeConverter;
+import com.wxdgaming.batis.exception.TypeMismatchDataAccessException;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.StorageMode;
 import com.wxdgaming.batis.sql.AbstractBeanValueHandler;
@@ -52,7 +53,7 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
                 Object object = converter.convertToDatabaseColumn(value);
                 return object;
             } catch (Exception e) {
-                throw new RuntimeException(
+                throw new TypeMismatchDataAccessException(
                         "自定义转换器 " + converter.getClass().getSimpleName()
                                 + " convertToDatabaseColumn 失败，字段: " + col.getFieldName(), e);
             }
@@ -65,7 +66,7 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
                     return JSON.toJSONString(value, SerializerFeature.WriteClassName);
                 } catch (Exception e) {
                     if (i >= MAX_SERIALIZE_RETRIES - 1) {
-                        throw new RuntimeException("JSON序列化字段" + col.getFieldName() + "失败，已重试" + MAX_SERIALIZE_RETRIES + "次", e);
+                        throw new TypeMismatchDataAccessException("JSON序列化字段" + col.getFieldName() + "失败，已重试" + MAX_SERIALIZE_RETRIES + "次", e);
                     }
                     log.error("JSON序列化字段{}失败，第{}次重试", col.getFieldName(), i + 1, e);
                     Thread.yield();
@@ -79,7 +80,7 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
                     return ProtostuffUtil.encode(value);
                 } catch (Exception e) {
                     if (i >= MAX_SERIALIZE_RETRIES - 1) {
-                        throw new RuntimeException("Protostuff序列化字段" + col.getFieldName() + "失败，已重试" + MAX_SERIALIZE_RETRIES + "次", e);
+                        throw new TypeMismatchDataAccessException("Protostuff序列化字段" + col.getFieldName() + "失败，已重试" + MAX_SERIALIZE_RETRIES + "次", e);
                     }
                     log.error("Protostuff序列化字段{}失败，第{}次重试", col.getFieldName(), i + 1, e);
                     Thread.yield();
@@ -115,7 +116,7 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
                 Object object = converter.convertToEntityAttribute(value);
                 return object;
             } catch (Exception e) {
-                throw new RuntimeException(
+                throw new TypeMismatchDataAccessException(
                         "自定义转换器 " + converter.getClass().getSimpleName()
                                 + " convertToEntityAttribute 失败，字段: " + col.getFieldName(), e);
             }
@@ -128,7 +129,7 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
             try {
                 return JSON.parseObject(jsonStr, genericType != null ? genericType : col.getJavaType(), Feature.SupportAutoType);
             } catch (Exception e) {
-                throw new RuntimeException("JSON 反序列化字段 " + col.getFieldName() + " 失败，value=" + jsonStr, e);
+                throw new TypeMismatchDataAccessException("JSON 反序列化字段 " + col.getFieldName() + " 失败，value=" + jsonStr, e);
             }
         }
         if (mode == StorageMode.BLOB || mode == StorageMode.MEDIUMBLOB || mode == StorageMode.LONGBLOB) {
@@ -139,7 +140,7 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
             try {
                 return ProtostuffUtil.decode(bytes, col.getJavaType());
             } catch (Exception e) {
-                throw new RuntimeException("Protostuff 解码字段 " + col.getFieldName() + " 失败，bytes length=" + bytes.length, e);
+                throw new TypeMismatchDataAccessException("Protostuff 解码字段 " + col.getFieldName() + " 失败，bytes length=" + bytes.length, e);
             }
         }
         return convertBasicValue(value, col);
@@ -155,10 +156,10 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
             try {
                 return blob.getBytes(1, (int) blob.length());
             } catch (SQLException e) {
-                throw new RuntimeException("读取 Blob 字段 " + col.getFieldName() + " 失败", e);
+                throw new TypeMismatchDataAccessException("读取 Blob 字段 " + col.getFieldName() + " 失败", e);
             }
         }
-        throw new RuntimeException("字段 " + col.getFieldName() + " 不支持的二进制类型: " + value.getClass());
+        throw new TypeMismatchDataAccessException("字段 " + col.getFieldName() + " 不支持的二进制类型: " + value.getClass());
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})

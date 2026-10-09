@@ -40,6 +40,7 @@ public class MysqlTemplate extends JdbcTemplate {
     private void initDefaults() {
         MysqlBeanValueHandler valueHandler = new MysqlBeanValueHandler();
         setDbMetaProvider(new MysqlDbMetaHandler());
+        setColumnTypeDefHandler(MysqlColumnTypeDefHandler.INSTANCE);
         setTableCreateHandler(new MysqlTableCreateHandler());
         setTableAlterHandler(new MysqlTableAlterHandler());
         setTableDropHandler(new MysqlTableDropHandler());
@@ -49,6 +50,7 @@ public class MysqlTemplate extends JdbcTemplate {
         setBeanToUpdateHandler(new MysqlBeanToUpdateHandler(valueHandler));
         setBeanToDeleteHandler(new MysqlBeanToDeleteHandler(valueHandler));
         setBeanToSelectHandler(new MysqlBeanToSelectHandler());
+        setSqlExceptionHandler(new MysqlSqlExceptionHandler());
     }
 
     /**
