@@ -163,8 +163,18 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
         if (!typeDef.renderNormalized(entityCol).equals(typeDef.normalize(dbCol.getType()))) return true;
         if (entityCol.isNullable() != dbCol.isNullable()) return true;
         if (!defaultValueEquals(entityCol.getDefaultValue(), dbCol.getDefaultValue())) return true;
-        if (!Objects.equals(entityCol.getComment(), dbCol.getComment())) return true;
+        if (!Objects.equals(normalizeComment(entityCol.getComment()), normalizeComment(dbCol.getComment()))) return true;
         return false;
+    }
+
+    /**
+     * 注释比对前的归一：null 与空串视为等价。
+     * <p>实体侧零配置列（无 @Column 注解）comment 为 null，库端回读时 {@code MysqlDbMetaHandler}
+     * 会把 COLUMN_COMMENT 为 null 归一成空串，两者若不归一就会 {@code Objects.equals(null, "")} 恒为 false，
+     * 每次 checkTable 都对所有零配置列发虚假 MODIFY COLUMN（存量大表反复重建锁表）。</p>
+     */
+    private static String normalizeComment(String comment) {
+        return comment == null ? "" : comment;
     }
 
     /**

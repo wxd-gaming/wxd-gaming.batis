@@ -38,9 +38,19 @@ public final class Pageable {
         return size;
     }
 
-    /** 起始偏移量 */
+    /**
+     * 起始偏移量。
+     * <p>page/size 都是 int，(page-1)*size 用 long 计算：两个 int 相乘可能溢出成负数，
+     * 溢出后 OFFSET 子句会拿到负值直接报错或返回错误页。超出 int 范围时快速失败抛异常，
+     * 而不是静默溢出。</p>
+     */
     public int getOffset() {
-        return (page - 1) * size;
+        long offset = (long) (page - 1) * size;
+        if (offset > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(
+                    "偏移量超出 int 范围: page=" + page + ", size=" + size + ", offset=" + offset);
+        }
+        return (int) offset;
     }
 
     public Sort getSort() {

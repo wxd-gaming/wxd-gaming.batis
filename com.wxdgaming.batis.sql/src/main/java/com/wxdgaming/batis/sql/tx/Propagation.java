@@ -2,7 +2,7 @@ package com.wxdgaming.batis.sql.tx;
 
 /**
  * 事务传播行为
- * <p>P0 支持 REQUIRED / REQUIRES_NEW / SUPPORTS / NOT_SUPPORTED / MANDATORY；
+ * <p>支持 REQUIRED / REQUIRES_NEW / SUPPORTS / NOT_SUPPORTED / MANDATORY / NEVER；
  * NESTED（savepoint）暂未提供。</p>
  * <p>
  * 没实现 NESTED 是有意为之：savepoint 需要每条语句后判断是否回滚到点名，
@@ -37,6 +37,13 @@ public enum Propagation {
      */
     NOT_SUPPORTED,
     /** 必须存在事务，否则抛 IllegalTransactionStateException */
-    MANDATORY
+    MANDATORY,
+    /**
+     * 必须以非事务方式执行，存在事务则抛 IllegalTransactionStateException
+     * <p>与 {@link #NOT_SUPPORTED} 的区别：NOT_SUPPORTED 遇到外层事务会挂起后静默非事务执行，
+     * NEVER 则直接拒绝——用于"这段逻辑绝不允许在事务里跑"的硬约束场景，
+     * 防止被外层事务悄悄卷入而改变 autocommit 语义。</p>
+     */
+    NEVER
 
 }

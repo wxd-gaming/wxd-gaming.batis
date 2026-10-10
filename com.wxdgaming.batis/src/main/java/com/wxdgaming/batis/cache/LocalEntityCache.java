@@ -14,9 +14,9 @@ import java.util.function.Function;
 /**
  * 基于 Caffeine 的高性能本地缓存实现
  * <ul>
- *   <li><b>滑动过期</b>：{@code expireAfterAccess} —— 只要持续访问就不会过期，无人访问才淘汰</li>
+ *   <li><b>固定过期</b>：{@code expireAfterWrite} —— 写入后经过指定时间即过期，无论期间是否被访问；
+ *       保证热 key 也会定期回源刷新，跨进程/跨节点的陈旧数据有界</li>
  *   <li><b>防击穿</b>：{@link #getOrLoad} 单飞加载，Caffeine 保证同一 Key 仅一个线程执行 loader</li>
- *   <li><b>防雪崩</b>：{@code refreshAfterWrite} 在过期前异步刷新，热数据不集体过期</li>
  *   <li><b>防穿透</b>：配合 {@link com.wxdgaming.batis.sql.CachedBeanRunner} 的 Tombstone 机制</li>
  *   <li><b>淘汰兜底</b>：通过 {@link #onEvict} 注册回调，缓存过期时通知上层刷脏数据</li>
  * </ul>
@@ -32,26 +32,23 @@ public class LocalEntityCache<K, V> implements EntityCache<K, V> {
     private volatile Consumer<Map.Entry<K, V>> evictionListener;
 
     /**
-     * 默认配置：最大 100000 条，30 分钟无人访问后过期，写入 25 分钟后访问触发异步刷新
+     * 默认配置：最大 100000 条，写入 30 分钟后过期
      */
     public LocalEntityCache() {
-        this(100_000, 30, 25, TimeUnit.MINUTES);
+        this(100_000, 30, TimeUnit.MINUTES);
     }
 
     /**
-     * @param maxSize            最大缓存条目数
-     * @param expireAfterAccess  访问后过期时间（滑动过期：一直访问则不过期，无人访问后才过期）
-     * @param refreshAfterWrite  写入后刷新时间（返回旧值 + 异步加载新值）
-     * @param timeUnit           时间单位
+     * @param maxSize          最大缓存条目数
+     * @param expireAfterWrite 写入后过期时间（固定过期：热 key 也会到期回源刷新，陈旧数据有界）
+     * @param timeUnit         时间单位
      */
     public LocalEntityCache(long maxSize,
-                            long expireAfterAccess,
-                            long refreshAfterWrite,
+                            long expireAfterWrite,
                             TimeUnit timeUnit) {
         this.cache = Caffeine.newBuilder()
                 .maximumSize(maxSize)
-                .expireAfterAccess(expireAfterAccess, timeUnit)
-                .refreshAfterWrite(refreshAfterWrite, timeUnit)
+                .expireAfterWrite(expireAfterWrite, timeUnit)
                 .recordStats()
                 .removalListener((K key, V value, RemovalCause cause) -> {
                     // 只在"被动淘汰"（过期/容量溢出）时回调兜底刷盘；显式 remove/invalidate 属主动移除，
@@ -79,16 +76,13 @@ public class LocalEntityCache<K, V> implements EntityCache<K, V> {
 
     /**
      * 防击穿的单飞加载：同一 Key 并发下 Caffeine 只放行一个线程执行 loader，其余等待复用结果。
-     * <p>loader 抛异常时降级返回 null（不缓存失败），避免瞬时 DB 抖动污染缓存。</p>
+     * <p>loader 抛出的异常<b>原样上抛</b>，不降级为 null：DB 故障与"记录不存在"是两回事，
+     * 把前者吞成 null 会让调用方把数据库宕机误判成"查无此数据"，进而按"不存在"走错误分支。
+     * null 只由"记录确实不存在"的 loader 正常返回产生。</p>
      */
     @Override
     public V getOrLoad(K key, Function<K, V> loader) {
-        try {
-            return cache.get(key, loader::apply);
-        } catch (Exception e) {
-            log.warn("缓存加载失败 key={}", key, e);
-            return null;
-        }
+        return cache.get(key, loader::apply);
     }
 
     @Override

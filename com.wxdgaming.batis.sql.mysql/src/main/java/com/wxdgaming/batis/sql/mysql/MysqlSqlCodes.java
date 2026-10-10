@@ -48,14 +48,8 @@ public final class MysqlSqlCodes {
     public static final int ER_LOCK_WAIT_TIMEOUT = 1205;
     /** 死锁 Deadlock found */
     public static final int ER_LOCK_DEADLOCK = 1213;
-    /** 查询被中断 */
-    public static final int ER_QUERY_INTERRUPTED = 1317;
     /** 查询超时 MAX_EXECUTION_TIME */
     public static final int ER_QUERY_TIMEOUT = 3024;
-    /** 只读对象上执行写操作 */
-    public static final int ER_OPTION_PREVENTS_STATEMENT = 1290;
-    /** 事务过大/回滚段不足 */
-    public static final int ER_TOO_BIG_TRANSACTION = 1073;
 
     /** 纯常量表，禁止实例化 */
     private MysqlSqlCodes() {

@@ -152,19 +152,31 @@ public class EntityParser {
      * <p>用 {@link LinkedHashMap} 按"子类字段在前、父类字段在后"的声明顺序累积，
      * 顺序即建表时的物理列序，必须稳定（见 {@link #doParse} 的顺序冻结说明）。
      * {@code fieldNames} 去重保证子类同名覆盖字段只登记一次，避免父子同名字段映射到同一列产生重复列定义。</p>
+     * <p>static / transient / synthetic 字段跳过：它们不承载持久化语义，被当成列只会污染建表与映射。
+     * 不同字段名映射到同一列名时抛异常而非静默覆盖，防止某个字段被悄悄丢掉后写入错列。</p>
      */
     private static LinkedHashMap<String, ColumnInfo> resolveColumns(Class<?> entityClass) {
         LinkedHashMap<String, ColumnInfo> columnMap = new LinkedHashMap<>();
         java.util.Set<String> fieldNames = new java.util.HashSet<>();
 
         Class<?> currentClass = entityClass;
-        // 沿继承链向上收集，遇到 Object 停止；跳过 static 字段（不属于持久化列）
+        // 沿继承链向上收集，遇到 Object 停止；跳过 static / transient / synthetic 字段（都不属于持久化列）
         while (currentClass != null && currentClass != Object.class) {
             for (Field field : currentClass.getDeclaredFields()) {
                 if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
+                // transient 是"不参与持久化"的 Java 语义，synthetic 是编译器生成的隐藏字段（内部类 this$0、枚举 $VALUES 等）
+                if (java.lang.reflect.Modifier.isTransient(field.getModifiers())) continue;
+                if (field.isSynthetic()) continue;
                 if (!fieldNames.add(field.getName())) continue;
                 ColumnInfo col = buildColumnInfo(entityClass, field);
-                columnMap.put(col.getColumnName(), col);
+                // 两个不同字段名可能映射到同一列名（如 userId 与 user_id 都驼峰转成 user_id），
+                // 静默 put 覆盖会把先声明的字段悄悄丢掉，这里快速失败逼调用方用 @Column(name=...) 区分
+                ColumnInfo prev = columnMap.putIfAbsent(col.getColumnName(), col);
+                if (prev != null) {
+                    throw new IllegalStateException(
+                            "字段 " + prev.getFieldName() + " 与 " + col.getFieldName()
+                                    + " 映射到同一列名 " + col.getColumnName() + "，请用 @Column(name=...) 区分");
+                }
             }
             currentClass = currentClass.getSuperclass();
         }
@@ -407,10 +419,16 @@ public class EntityParser {
         if (javaType == UUID.class && sqlType == SqlType.VARCHAR) {
             columnInfo.setLength(36);
         }
-        // BigDecimal 自动档固定 DECIMAL(20,6) 精度契约（与原字面量推断一致，避免注解默认 length=255 污染精度）
+        // 定点数自动档固定精度契约（避免注解默认 length=255 污染精度）：
+        // BigDecimal 走 DECIMAL(20,6)；BigInteger 是任意精度整数，走 DECIMAL(65,0)（MySQL DECIMAL 精度上限 65 位）
         if (storageMode == StorageMode.AUTO && sqlType == SqlType.DECIMAL) {
-            columnInfo.setLength(20);
-            columnInfo.setScale(6);
+            if (javaType == BigInteger.class) {
+                columnInfo.setLength(65);
+                columnInfo.setScale(0);
+            } else {
+                columnInfo.setLength(20);
+                columnInfo.setScale(6);
+            }
         }
         // char/Character 固定 1 字符宽度（与原字面量推断 CHAR(1) 一致）
         if (sqlType == SqlType.CHAR && (javaType == char.class || javaType == Character.class)) {
@@ -494,7 +512,9 @@ public class EntityParser {
         if (javaType == LocalTime.class) return SqlType.TIME;
         if (javaType == byte[].class) return SqlType.BLOB;
         if (javaType == char.class || javaType == Character.class) return SqlType.CHAR;
-        if (javaType == BigInteger.class) return SqlType.BIGINT;
+        // BigInteger 是任意精度整数，映射到 64 位 BIGINT 会在超过 long 范围时静默溢出，
+        // 改用定点数 DECIMAL 承载（长度见 applyInferredType 里对 BigInteger 的精度契约）
+        if (javaType == BigInteger.class) return SqlType.DECIMAL;
         if (javaType == UUID.class) return SqlType.VARCHAR;
         if (javaType == Instant.class || javaType == OffsetDateTime.class
                 || javaType == ZonedDateTime.class || javaType == java.sql.Timestamp.class) return SqlType.DATETIME;
@@ -513,7 +533,13 @@ public class EntityParser {
         for (int i = 0; i < str.length(); i++) {
             char ch = str.charAt(i);
             if (Character.isUpperCase(ch)) {
-                if (sb.length() > 0 && sb.charAt(sb.length() - 1) != '_') {
+                char prev = i > 0 ? str.charAt(i - 1) : '\0';
+                char next = i + 1 < str.length() ? str.charAt(i + 1) : '\0';
+                // 只在"小写→大写"或"连续大写块结束(下一字符小写)"处断词，
+                // 否则 ABTest 会被拆成 a_b_test 而不是 ab_test（连续大写是一个缩写词）
+                boolean breakWord = Character.isLowerCase(prev)
+                        || (Character.isUpperCase(prev) && Character.isLowerCase(next));
+                if (sb.length() > 0 && breakWord) {
                     sb.append('_');
                 }
                 sb.append(Character.toLowerCase(ch));

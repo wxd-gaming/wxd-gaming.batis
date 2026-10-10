@@ -72,7 +72,7 @@ public class JdbcTemplate extends DbTemplate {
      * 统一小写作 key 才能让"缓存命中"跨平台一致。置为 null 表示"未加载"，
      * 与空表区别开：null 会触发重新读库，空 map 表示"这个库里确实没有表"。</p>
      */
-    private HashMap<String, TableInfo> tableCache;
+    private volatile HashMap<String, TableInfo> tableCache;
     /** 数据库元数据处理器（方言差异在此注入）：提供表/列/索引三段查询 SQL 与行映射 */
     private DbMetaHandler dbMetaProvider;
     /** 创建表的处理器 */

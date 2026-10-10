@@ -7,8 +7,8 @@ import lombok.extern.slf4j.Slf4j;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListSet;
 
 /**
  * 分区缓存
@@ -31,7 +31,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * 有人在库端手工增删过分区，就必须 {@link #refresh} 才能发现——
  * 否则框架会把已删的分区当成还在（该重建的被跳过），或把已存在的当成没有（重复 ADD 报错）。</p>
  *
- * <p>线程安全：使用 {@link ConcurrentHashMap} + {@link TreeSet}（大小写不敏感）。</p>
+ * <p>线程安全：使用 {@link ConcurrentHashMap} + {@link ConcurrentSkipListSet}（大小写不敏感）。</p>
  *
  * <h3>典型场景</h3>
  * <pre>{@code
@@ -85,7 +85,7 @@ public class PartitionCache {
         String key = tableName.toLowerCase();
         return cache.computeIfAbsent(key, tn -> {
             // 大小写不敏感比较：分区名在不同库/不同书写方式下大小写不一致，按名字比对不能区分大小写
-            Set<String> names = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+            Set<String> names = new ConcurrentSkipListSet<>(String.CASE_INSENSITIVE_ORDER);
             try {
                 List<String> fromDb = metaReader.getPartitionNames(jdbcTemplate, tn);
                 names.addAll(fromDb);
@@ -112,8 +112,9 @@ public class PartitionCache {
      * 后续去重会跳过本该重建的分区。</p>
      */
     public void add(String tableName, String partitionName) {
-        // 直接改 getPartitions 返回的可变集合：同一表的并发写没有加锁，
-        // 多线程同时维护同一张表的分区时不应依赖这里的原子性（当前用法是单线程定时作业）
+        // 集合本身是 ConcurrentSkipListSet，单次 add/remove 线程安全；
+        // 但"先 contains 再 add"的 check-then-act 序列仍不是原子的，
+        // 跨线程的重复 ADD 去重由调用方（PartitionBuilder）按单线程定时作业的约定保证
         getPartitions(tableName).add(partitionName);
         log.debug("缓存新增: {}.{}", tableName, partitionName);
     }

@@ -49,11 +49,10 @@ public class MysqlPartitionMetaReader implements PartitionMetaReader {
 
     /**
      * 读取指定表的分区名列表。
-     * <p>失败时<b>不抛异常</b>而是返回空列表（含连接不上、无权限、库名取不到等），
-     * 让 DDL 主流程继续走。代价是 {@link com.wxdgaming.batis.sql.partition.PartitionCache}
-     * 会把"读失败"当成"这表没分区"并缓存空集合，从而静默失去去重能力，
-     * 表现为反复 ADD 同一分区然后在库端报错。
-     * 这里的日志是 debug 级，生产默认级别看不到——排查时记得调级。</p>
+     * <p>读失败（连接不上、无权限等）<b>向上抛异常</b>而不是吞掉：本类离数据库最近，
+     * 吞掉会把"读失败"伪装成"这表没有分区"。异常一路传到
+     * {@link com.wxdgaming.batis.sql.partition.PartitionCache#getPartitions}，
+     * 由它统一降级为 warn 日志 + 空集合（去重能力随之静默失效，但至少 warn 可见）。</p>
      */
     @Override
     public List<String> getPartitionNames(JdbcTemplate jdbcTemplate, String tableName) {
@@ -79,9 +78,6 @@ public class MysqlPartitionMetaReader implements PartitionMetaReader {
                 }
                 return null;
             });
-        } catch (Exception e) {
-            log.debug("查询表 {} 的分区信息失败: {} (cause: {})",
-                    tableName, e.getMessage(), e.getClass().getSimpleName());
         }
         return names;
     }

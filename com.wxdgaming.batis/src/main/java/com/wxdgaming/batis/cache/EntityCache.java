@@ -31,10 +31,12 @@ public interface EntityCache<K, V> {
     /**
      * 获取或加载缓存（防击穿）
      * <p>实现应保证同一 Key 同一时刻只有一个线程执行 loader。</p>
+     * <p>loader 抛出的异常应原样上抛，不要吞成 null：null 只表示"记录不存在"，
+     * 吞异常会把 DB 故障伪装成查无数据，调用方将按"不存在"走错误分支。</p>
      *
      * @param key    缓存键
      * @param loader 加载函数（查 DB 逻辑）
-     * @return 缓存值，加载失败返回 null
+     * @return 缓存值，记录不存在时返回 null
      */
     V getOrLoad(K key, Function<K, V> loader);
 

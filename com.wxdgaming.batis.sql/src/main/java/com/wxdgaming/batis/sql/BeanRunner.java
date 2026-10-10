@@ -664,13 +664,15 @@ public class BeanRunner implements AutoCloseable {
      *   <li>瞬时故障（死锁、锁超时、连接断开）——重试逐条只会放大故障；
      *       死锁时全表都在竞争，逐条重跑等于把一次冲突变成 N 次；</li>
      *   <li>事务内——批量中途失败时前面语句已生效，逐条补插会产生重复写，必须上抛由整个事务回滚。
-     *       这条判断依赖 {@link QueryRunner#isInTransaction()}，而它要求连接已被取过；
-     *       两条批量路径都在调用本方法前先执行了 getConnection，所以判定可靠。</li>
+     *       这条判断用 {@link JdbcTemplate#transactionActive()} 读线程事务状态，而不是
+     *       {@link QueryRunner#isInTransaction()}：后者要等连接被惰性取过才准确，
+     *       若异常发生在取连接之前（如 buildInsertParams 失败），事务内的批量会被误判为
+     *       "非事务"而静默降级成逐条，破坏回滚语义。</li>
      * </ul>
      */
     private void rethrowWithoutFallback(Exception batchEx) {
         boolean retryable = batchEx instanceof DataAccessException dae && dae.isRetryable();
-        if (retryable || queryRunner.isInTransaction()) {
+        if (retryable || jdbcTemplate.transactionActive()) {
             if (batchEx instanceof RuntimeException re) throw re;
             throw new IllegalStateException(batchEx);
         }

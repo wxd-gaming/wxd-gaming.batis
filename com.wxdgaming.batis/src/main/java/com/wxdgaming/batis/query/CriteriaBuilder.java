@@ -49,17 +49,25 @@ public final class CriteriaBuilder {
 
     /** 全模糊 LIKE %pattern% */
     public Criteria like(String pattern) {
-        return leaf(CriterionOperator.LIKE, "%" + pattern + "%");
+        // 不拦 null 会把 "null" 拼成字面量 %null% 去匹配，语义完全走样；与 in() 一样快速失败
+        return leaf(CriterionOperator.LIKE, "%" + requirePattern(pattern) + "%");
     }
 
     /** 左模糊 LIKE %pattern */
     public Criteria leftLike(String pattern) {
-        return leaf(CriterionOperator.LEFT_LIKE, "%" + pattern);
+        return leaf(CriterionOperator.LEFT_LIKE, "%" + requirePattern(pattern));
     }
 
     /** 右模糊 LIKE pattern% */
     public Criteria rightLike(String pattern) {
-        return leaf(CriterionOperator.RIGHT_LIKE, pattern + "%");
+        return leaf(CriterionOperator.RIGHT_LIKE, requirePattern(pattern) + "%");
+    }
+
+    private static String requirePattern(String pattern) {
+        if (pattern == null) {
+            throw new IllegalArgumentException("LIKE 模式不能为 null");
+        }
+        return pattern;
     }
 
     public Criteria in(Collection<?> values) {

@@ -83,14 +83,21 @@ public final class CacheKeyBuilder {
         return values.size() == 1 ? values.getFirst() : values.toArray();
     }
 
-    /** 主键值转字符串，复合主键用 _ 拼接 */
+    /**
+     * 主键值转字符串。
+     * <p>复合主键逐分量"长度:值"前缀拼接：单纯用 {@code _} 连接会因分量本身含下划线、
+     * 或分量数量不同而歧义（如 {@code [1,23]} 与 {@code [1,2,3]}、{@code ["1_2",3]} 都拼成 {@code 1_23}）。
+     * 长度前缀让分量边界无歧义；单主键仍为 {@code id.toString()} 原样，与复合形态不互通。</p>
+     * <p>主键为 null 时直接抛异常：null 无法定位缓存行，静默映射成字符串 "null"
+     * 会与真实主键值 "null" 撞车，还把"主键未生成"的错误藏成一次缓存命中。</p>
+     */
     private static String idToString(Object id) {
-        if (id == null) return "null";
+        if (id == null) throw new IllegalArgumentException("主键值不能为 null，无法构建缓存 Key");
         if (id instanceof Object[] arr) {
             StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < arr.length; i++) {
-                if (i > 0) sb.append('_');
-                sb.append(arr[i]);
+            for (Object component : arr) {
+                String s = String.valueOf(component);
+                sb.append(s.length()).append(':').append(s);
             }
             return sb.toString();
         }

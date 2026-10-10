@@ -171,6 +171,8 @@ public class QueryRunner implements AutoCloseable {
         // source == TRANSACTION / EXTERNAL：绝不 close，归还由事务模板或调用方负责
         connection = null;
         txHolder = null;
+        // 复位来源，避免关闭后 isInTransaction() 仍按旧 source 返回 true（残留的事务状态）
+        source = Source.POOLED;
     }
 
     /**
@@ -424,7 +426,8 @@ public class QueryRunner implements AutoCloseable {
      * 否则线上只有一句堆栈、拿不到当时究竟执行了什么。{@code body} 内部已把
      * {@code SQLException} 翻译成 {@code DataAccessException}，所以这里只捕获运行时异常。
      * </p>
-     * <p>参数直接 {@code Arrays.toString}：只用于人眼排查，不做脱敏也不截断，
+     * <p>参数经 {@link #formatParams} 只做 char[] 脱敏（char[] 是密码等敏感数据的惯用载体，
+     * 逐字符打印等于明文外泄），其余直接 toString：只用于人眼排查，不做截断，
      * 因此这条日志属于"排障时临时打开"的级别，不建议生产常开 DEBUG。</p>
      */
     private static <R> R timed(String kind, String sql, Object[] args, SupplierWithException<R> body) {
@@ -432,7 +435,7 @@ public class QueryRunner implements AutoCloseable {
             return body.get();
         }
         long t0 = System.nanoTime();
-        String params = args == null ? "[]" : Arrays.toString(args);
+        String params = formatParams(args);
         try {
             R result = body.get();
             log.debug("[{}] {} -- 参数: {} -- 结果: {} -- 耗时 {} ms",
@@ -452,6 +455,28 @@ public class QueryRunner implements AutoCloseable {
     @FunctionalInterface
     private interface SupplierWithException<R> {
         R get();
+    }
+
+    /**
+     * 参数数组转日志字符串：char[] 打占位符，其余照原样。
+     * <p>只脱敏 char[] 是因为它在 Java 生态里是"敏感数据"的约定载体（如 JDBC 密码），
+     * 没有一套字段级敏感标注机制前，对普通 String 逐值猜测关键字反而会漏报或误报。</p>
+     */
+    private static String formatParams(Object[] args) {
+        if (args == null) return "[]";
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < args.length; i++) {
+            if (i > 0) sb.append(", ");
+            Object a = args[i];
+            if (a instanceof char[]) {
+                sb.append("[***]");
+            } else if (a instanceof byte[]) {
+                sb.append(Arrays.toString((byte[]) a));
+            } else {
+                sb.append(a);
+            }
+        }
+        return sb.append(']').toString();
     }
 
     /**

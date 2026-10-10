@@ -25,6 +25,10 @@ public class ProtostuffUtil {
      */
     @SuppressWarnings("unchecked")
     public static <T> byte[] encode(T object) {
+        if (object == null) {
+            // 不判空会在这里 NPE，报错信息只有空指针、定位不到是哪个字段写了 null 对象
+            throw new IllegalArgumentException("Protostuff 不能编码 null 对象");
+        }
         Class<T> aClass = (Class<T>) object.getClass();
         return encode(object, aClass);
     }
@@ -33,6 +37,9 @@ public class ProtostuffUtil {
      * 编码：显式指定 schema 类型，LinkedBuffer 用完即弃（单次写入不做池化以保线程安全）
      */
     public static <T> byte[] encode(T object, Class<T> clazz) {
+        if (object == null || clazz == null) {
+            throw new IllegalArgumentException("Protostuff 不能编码 null 对象或 null 类型");
+        }
         Schema<T> schema = RuntimeSchema.getSchema(clazz);
         LinkedBuffer buffer = LinkedBuffer.allocate();
         return ProtostuffIOUtil.toByteArray(object, schema, buffer);

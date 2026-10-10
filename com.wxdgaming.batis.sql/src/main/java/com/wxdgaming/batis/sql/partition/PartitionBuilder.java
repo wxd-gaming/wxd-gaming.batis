@@ -383,11 +383,14 @@ public class PartitionBuilder {
      * 按日生成 RANGE 分区，每 N 天一个分区
      * <p>用于日志量小、不想让分区数量爆炸的表（分区数本身在库端有元数据开销）。
      * 命名仍取区间起点，如步长 7 时得到 {@code p20260801 VALUES LESS THAN (20260808)}。
-     * 注意 {@code daysPerPart} 传 0 或负数会让 {@code next} 不前进从而死循环，
-     * 调用方必须保证步长为正。</p>
+     * 注意 {@code daysPerPart} 必须为正，0 或负数会让 {@code next} 不前进从而死循环，
+     * 这里在入口直接拒绝而不是让循环卡死。</p>
      */
     public PartitionBuilder rangeByDaily(String column, LocalDate start,
                                           LocalDate end, int daysPerPart) {
+        if (daysPerPart <= 0) {
+            throw new IllegalArgumentException("daysPerPart 必须为正数: " + daysPerPart);
+        }
         requireExpr();
         rangeBy(expr.byDay(column));
 

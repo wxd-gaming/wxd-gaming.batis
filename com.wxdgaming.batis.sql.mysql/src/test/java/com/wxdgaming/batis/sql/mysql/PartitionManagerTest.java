@@ -589,6 +589,49 @@ class PartitionManagerTest {
     }
 
     // ====================================================================
+    // 14. 按日分区间隔步长校验
+    // ====================================================================
+
+    /**
+     * 用例⑭：按日分区的步长（daysPerPart）必须是正数。
+     * <p>背景：{@code rangeByDaily(col, start, end, daysPerPart)} 用 {@code cursor.plusDays(daysPerPart)}
+     * 推进游标，步长为 0 或负数时游标不前进，循环永不退出（死循环挂死定时补分区作业）。
+     * 修复后在入口直接拒绝，而不是等它卡死。这里只断言抛异常 + 正数步长能正常生成 SQL，
+     * 不连库——纯入口校验，不需要真实分区表。</p>
+     */
+    @Test
+    @Order(14)
+    void testDaysPerPartRejectsNonPositive() {
+        log.info("=== 测试：按日分区步长校验 ===");
+
+        PartitionBuilder builder = PartitionBuilder.of(MysqlPartitionManager.INSTANCE);
+        LocalDate start = LocalDate.of(2026, 8, 1);
+        LocalDate end = LocalDate.of(2026, 8, 5);
+
+        assertThrows(IllegalArgumentException.class, () ->
+                        builder.table("t_daily_log")
+                                .withExpr(MysqlPartitionExpr.INSTANCE)
+                                .rangeByDaily("log_time", start, end, 0),
+                "步长 0 应抛异常而不是死循环");
+
+        assertThrows(IllegalArgumentException.class, () ->
+                        builder.table("t_daily_log")
+                                .withExpr(MysqlPartitionExpr.INSTANCE)
+                                .rangeByDaily("log_time", start, end, -3),
+                "负数步长应抛异常而不是死循环");
+
+        // 正数步长正常生成分区（build-only，不执行）
+        String sql = builder.table("t_daily_log")
+                .withExpr(MysqlPartitionExpr.INSTANCE)
+                .rangeByDaily("log_time", start, end, 2)
+                .buildPartition();
+        assertNotNull(sql, "正数步长应能生成 SQL");
+        assertTrue(sql.contains("p20260801"), "应包含区间起点分区");
+
+        log.info("按日分区步长校验通过");
+    }
+
+    // ====================================================================
     // 辅助方法
     // ====================================================================
 

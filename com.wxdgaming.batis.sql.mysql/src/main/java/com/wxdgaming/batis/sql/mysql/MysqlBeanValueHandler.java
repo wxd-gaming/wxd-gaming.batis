@@ -1,8 +1,6 @@
 package com.wxdgaming.batis.sql.mysql;
 
 import com.alibaba.fastjson.JSON;
-import com.alibaba.fastjson.parser.Feature;
-import com.alibaba.fastjson.serializer.SerializerFeature;
 import com.wxdgaming.batis.converter.TypeConverter;
 import com.wxdgaming.batis.exception.TypeMismatchDataAccessException;
 import com.wxdgaming.batis.model.ColumnInfo;
@@ -32,7 +30,7 @@ import java.time.ZonedDateTime;
  * MySQL 方言的 Bean ↔ DB 双向值转换实现
  * <p>继承 {@link com.wxdgaming.batis.sql.AbstractBeanValueHandler} 复用纯反射的字段读写与主键回写，
  * 本类只实现两个方言差异点：{@code convertToDbValue}/{@code convertFromDbValue} 的类型映射
- * （JSON 走 fastjson 带类名、BLOB 走 Protostuff、日期统一转 Timestamp、枚举存 name 等）。</p>
+ * （JSON 走 fastjson 按字段声明类型反解、BLOB 走 Protostuff、日期统一转 Timestamp、枚举存 name 等）。</p>
  * <p>由 {@code MysqlTemplate#initDefaults} 造出单一实例并共享给 Insert/Update/Delete/DbToBean 四个 handler，
  * 保证写端与读端使用同一套对称的转换规则。</p>
  *
@@ -48,10 +46,10 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
     /**
      * Java 值 → JDBC 参数。
      * <p>转换优先级：自定义 {@link TypeConverter}（完全接管）&gt; 列的 StorageMode（JSON/BLOB 序列化）&gt;
-     * 基础类型归一。JSON 存成带类名的字符串（WriteClassName），配合读取端 SupportAutoType 才能还原多态/泛型结构；
-     * BLOB 非 byte[] 时用 Protostuff 二进制编码。序列化失败按 {@link #MAX_SERIALIZE_RETRIES} 重试并
-     * {@code Thread.yield}——针对集合被多线程并发修改导致的偶发序列化异常，让出 CPU 后重试通常即可成功，
-     * 重试耗尽才升级为 {@code TypeMismatchDataAccessException}。</p>
+     * 基础类型归一。JSON 存成普通字符串、读端按字段声明的 genericType/javaType 反解（不开 autoType，见
+     * {@link #convertFromDbValue}）；BLOB 非 byte[] 时用 Protostuff 二进制编码。序列化失败按
+     * {@link #MAX_SERIALIZE_RETRIES} 重试并 {@code Thread.yield}——针对集合被多线程并发修改导致的偶发序列化异常，
+     * 让出 CPU 后重试通常即可成功，重试耗尽才升级为 {@code TypeMismatchDataAccessException}。</p>
      * <p>基础类型 switch 里的方言取舍：日期族统一转 {@code java.sql.Timestamp}（MySQL DATETIME 的 JDBC 形态）；
      * 枚举存 {@code name()}（稳定、可读、不随 ordinal 重排而损坏）；{@code UUID}/{@code Character} 转 String；
      * {@code BigInteger} 转 long 是精度收窄的既有行为。</p>
@@ -79,7 +77,7 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
         if (mode == StorageMode.JSON) {
             for (int i = 0; ; i++) {
                 try {
-                    return JSON.toJSONString(value, SerializerFeature.WriteClassName);
+                    return JSON.toJSONString(value);
                 } catch (Exception e) {
                     if (i >= MAX_SERIALIZE_RETRIES - 1) {
                         throw new TypeMismatchDataAccessException("JSON序列化字段" + col.getFieldName() + "失败，已重试" + MAX_SERIALIZE_RETRIES + "次", e);
@@ -111,7 +109,7 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
             case OffsetDateTime offsetDateTime -> Timestamp.from(offsetDateTime.toInstant());
             case ZonedDateTime zonedDateTime -> Timestamp.from(zonedDateTime.toInstant());
             case Instant instant -> Timestamp.from(instant);
-            case BigInteger bigInt -> bigInt.longValue();
+            case BigInteger bigInt -> new BigDecimal(bigInt);
             case AtomicInteger ai -> ai.get();
             case AtomicLong al -> al.get();
             case Character c -> c.toString();
@@ -123,7 +121,7 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
 
     /**
      * JDBC/ResultSet 读出的值 → Java 对象，是 {@link #convertToDbValue} 的逆过程。
-     * <p>转换优先级与写入端对称：自定义 TypeConverter &gt; StorageMode（JSON 用 SupportAutoType 反解、
+     * <p>转换优先级与写入端对称：自定义 TypeConverter &gt; StorageMode（JSON 按字段声明类型反解、
      * BLOB 用 Protostuff 解码；byte[] 列直接返回原始字节不解码）&gt; 基础类型转换。</p>
      * <p>基础类型转换（{@link #convertBasicValue}）重点处理易变形档位：枚举按 name 反查、数值在 Number
      * 间按目标 javaType 精确收窄/放宽、布尔与数值互转、时间族经 {@link #convertTemporal} 归一到 Timestamp 再派发。
@@ -151,7 +149,10 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
             Type genericType = col.getGenericType();
             String jsonStr = value.toString();
             try {
-                return JSON.parseObject(jsonStr, genericType != null ? genericType : col.getJavaType(), Feature.SupportAutoType);
+                // 刻意不开 Feature.SupportAutoType：fastjson 1.x 的 autoType 会按 JSON 里的 @type 实例化任意类，
+                // 凡能写该 JSON 列者即可借黑名单绕过发起反序列化攻击。关闭后按字段声明的 genericType/javaType 反解，
+                // 普通 POJO 与集合均不受影响，只有"接口/抽象类字段存具体子类"的多态场景需要显式迁移到带白名单的方案。
+                return JSON.parseObject(jsonStr, genericType != null ? genericType : col.getJavaType());
             } catch (Exception e) {
                 throw new TypeMismatchDataAccessException("JSON 反序列化字段 " + col.getFieldName() + " 失败，value=" + jsonStr, e);
             }
@@ -210,7 +211,7 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
             if (javaType == float.class || javaType == Float.class) return num.floatValue();
             if (javaType == BigDecimal.class) return new BigDecimal(num.toString());
             if (javaType == boolean.class || javaType == Boolean.class) return num.intValue() != 0;
-            if (javaType == BigInteger.class) return BigInteger.valueOf(num.longValue());
+            if (javaType == BigInteger.class) return num instanceof BigDecimal bd ? bd.toBigInteger() : BigInteger.valueOf(num.longValue());
             if (javaType == AtomicInteger.class) return new AtomicInteger(num.intValue());
             if (javaType == AtomicLong.class) return new AtomicLong(num.longValue());
             if (javaType == Character.class || javaType == char.class) return (char) num.intValue();

@@ -146,6 +146,12 @@ public class TransactionTemplate {
                     if (suspended != null) TxContext.bind(jdbcTemplate, suspended);
                 }
             }
+            case NEVER:
+                // 直接拒绝而非像 NOT_SUPPORTED 那样挂起后静默执行：这段逻辑绝不允许被外层事务卷入
+                if (active) {
+                    throw new IllegalTransactionStateException("NEVER 传播行为要求当前线程不存在事务");
+                }
+                return callback.doInTransaction(new Status(null, false, false, false));
             default:
                 // NESTED 等未实现的档位落到这里：明确报错优于静默按 REQUIRED 执行
                 throw new IllegalTransactionStateException("不支持的传播行为: " + propagation);
@@ -258,15 +264,29 @@ public class TransactionTemplate {
             for (TransactionSynchronization sync : holder.getSynchronizations()) {
                 sync.beforeCommit();
             }
+        } catch (RuntimeException e) {
+            // beforeCommit 失败：JDBC commit 尚未发生，数据确定未落库，按回滚处理
+            log.warn("beforeCommit 回调失败，执行回滚: {}", e.getMessage());
+            try {
+                holder.getConnection().rollback();
+            } catch (SQLException rollbackEx) {
+                holder.markRollbackFailed();
+            }
+            triggerAfterCompletion(holder, TransactionSynchronization.STATUS_ROLLED_BACK);
+            throw e;
+        }
+        try {
             holder.getConnection().commit();
-        } catch (SQLException | RuntimeException e) {
+        } catch (SQLException e) {
             log.warn("事务提交失败，执行回滚: {}", e.getMessage());
             try {
                 holder.getConnection().rollback();
-            } catch (SQLException ignored) {
+            } catch (SQLException rollbackEx) {
+                holder.markRollbackFailed();
             }
+            // commit 调用本身失败时上报 STATUS_UNKNOWN 而不是 ROLLED_BACK：网络/超时类失败下
+            // 数据库可能其实已经提交了，当成"肯定没提交"会让补偿逻辑写出重复数据。
             triggerAfterCompletion(holder, TransactionSynchronization.STATUS_UNKNOWN);
-            if (e instanceof RuntimeException re) throw re;
             throw new TransactionStartedException("事务提交失败: " + e.getMessage(), e);
         }
         // 提交成功后才跑：此刻数据已不可撤回，回调只该做"通知类"工作
@@ -284,22 +304,29 @@ public class TransactionTemplate {
     /**
      * 回滚
      * <p>回滚失败只 warn 不上抛：能走到这里说明业务异常已经在路上了，
-     * 把次要的连接清理异常顶掉主异常反而更糟。但要注意后果——回滚失败的连接状态不可信，
-     * 随后 {@link #release} 仍会把它归还，所以这类异常必须靠日志暴露出来排查。</p>
+     * 把次要的连接清理异常顶掉主异常反而更糟。但回滚失败的连接状态不可信，
+     * 会标记 {@code rollbackFailed} 让 {@link #release} 跳过 autoCommit 恢复直接关闭，
+     * 否则 setAutoCommit(true) 会把本该回滚的数据隐式提交进库。</p>
      */
     private void rollback(ConnectionHolder holder) {
         try {
             holder.getConnection().rollback();
         } catch (SQLException e) {
             log.warn("事务回滚失败: {}", e.getMessage());
+            holder.markRollbackFailed();
         }
         // Write-Behind 的"精确失效缓存"挂在这里：库没写成，缓存里那条也必须作废
         triggerAfterCompletion(holder, TransactionSynchronization.STATUS_ROLLED_BACK);
         log.debug("事务回滚");
     }
 
-    /** 触发 afterCompletion：单个回调异常吞掉，避免一个收尾失败连带跳过其余收尾 */
+    /**
+     * 触发 afterCompletion：恰好一次（幂等），单个回调异常吞掉，避免一个收尾失败连带跳过其余收尾。
+     * <p>幂等靠 {@link ConnectionHolder#markCompletionNotified} 的原子抢占：commit 失败路径先触发
+     * STATUS_UNKNOWN 再抛异常，外层 catch 的 rollback 又试图触发 ROLLED_BACK，第二次被这里拦下。</p>
+     */
     private void triggerAfterCompletion(ConnectionHolder holder, int status) {
+        if (!holder.markCompletionNotified()) return;
         for (TransactionSynchronization sync : holder.getSynchronizations()) {
             try {
                 sync.afterCompletion(status);
@@ -323,7 +350,11 @@ public class TransactionTemplate {
         Connection conn = holder.getConnection();
         try {
             if (holder.isReadOnly()) conn.setReadOnly(false);
-            conn.setAutoCommit(holder.getPreviousAutoCommit());
+            // 回滚失败的连接状态不可信：setAutoCommit(true) 会隐式提交本该回滚的数据，
+            // 只能跳过恢复直接 close，让池丢弃/重置这条连接
+            if (!holder.isRollbackFailed()) {
+                conn.setAutoCommit(holder.getPreviousAutoCommit());
+            }
         } catch (SQLException e) {
             log.warn("归还事务连接前恢复状态失败: {}", e.getMessage());
         } finally {

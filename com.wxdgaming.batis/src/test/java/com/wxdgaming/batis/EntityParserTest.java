@@ -222,5 +222,7 @@ class EntityParserTest {
         assertEquals("user_name", EntityParser.camelToUnderscore("user_name"));
         assertEquals("simple_entity", EntityParser.camelToUnderscore("SimpleEntity"));
         assertEquals("t_player", EntityParser.camelToUnderscore("t_player"));
+        assertEquals("ab_test", EntityParser.camelToUnderscore("ABTest"));
+        assertEquals("url_value", EntityParser.camelToUnderscore("URLValue"));
     }
 }

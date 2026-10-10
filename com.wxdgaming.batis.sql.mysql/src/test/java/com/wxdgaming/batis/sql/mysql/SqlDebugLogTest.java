@@ -21,6 +21,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -218,6 +219,29 @@ class SqlDebugLogTest {
             assertEquals(0, messages().stream().filter(m -> m.contains("wb-1")).count(),
                     "不应打印每条实体参数");
         }
+    }
+
+    /**
+     * 用例⑤：char[] 参数在 debug 日志里必须脱敏为 {@code [***]}。
+     * <p>背景：char[] 是密码等敏感数据的惯用载体（JDBC 的 DataSource 密码就是 char[]），
+     * 逐字符打印等于把明文写进日志文件。实现里 {@code formatParams} 对 char[] 打占位符。
+     * 本用例把真实密码字符当作探针，断言整份日志里检索不到它、且能检索到脱敏占位。
+     * char[] 不是 JDBC {@code setObject} 支持的类型，驱动可能直接报错——本用例只关心日志文本，
+     * 所以把执行异常吞掉，成功/失败两条路径都要满足同样的脱敏断言。</p>
+     */
+    @Test
+    void charArrayParamIsMaskedInLog() {
+        char[] secret = "s3cret-pw".toCharArray();
+        try (QueryRunner qr = new QueryRunner(template)) {
+            try {
+                qr.query("SELECT * FROM `t_account` WHERE `account_name` = ?",
+                        new Object[]{secret}, ResultSetHandlers.firstCell());
+            } catch (RuntimeException expected) {
+                // char[] 非 JDBC 标准参数类型，驱动可能拒绝；本用例只关心日志脱敏
+            }
+        }
+        assertNull(firstMatching("s3cret-pw"), "日志中不应出现明文密码字符");
+        assertNotNull(firstMatching("[***]"), "日志参数中应出现脱敏占位 [***]");
     }
 
 }

@@ -10,10 +10,14 @@
     <packaging>pom</packaging>
     <modules>
         <module>com.wxdgaming.batis</module>
-        <module>com.wxdgaming.batis.mongodb</module>
         <module>com.wxdgaming.batis.sql</module>
         <module>com.wxdgaming.batis.sql.mysql</module>
+        <!--
+          以下两个模块为未实现的占位（pgsql 零源码、mongodb 仅一个空类），已从构建列表摘除，
+          避免打出空 jar 让使用方误引入。落地实现后再加回：
+        <module>com.wxdgaming.batis.mongodb</module>
         <module>com.wxdgaming.batis.sql.pgsql</module>
+        -->
     </modules>
 
     <properties>

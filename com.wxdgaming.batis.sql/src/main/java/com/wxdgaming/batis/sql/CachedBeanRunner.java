@@ -21,9 +21,9 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.stream.Collectors;
 
 /**
  * 带缓存的 BeanRunner，支持 Write-Behind（延迟批刷）模式。
@@ -32,7 +32,7 @@ import java.util.stream.Collectors;
  * <table>
  *   <tr><th>问题</th><th>方案</th></tr>
  *   <tr><td>缓存击穿（单 Key 并发）</td><td>getOrLoad 单飞加载，Caffeine 保证同一 Key 仅一个线程查 DB</td></tr>
- *   <tr><td>缓存雪崩（批量过期）</td><td>refreshAfterWrite 访问时检测 → 返回旧值 + 后台异步刷新</td></tr>
+ *   <tr><td>缓存雪崩（批量过期）</td><td>expireAfterWrite 固定过期，热 key 也会到期回源刷新，陈旧数据有界</td></tr>
  *   <tr><td>缓存穿透（删除后重查）</td><td>Tombstone 哨兵标记已删除但未刷盘的 Key</td></tr>
  * </table>
  *
@@ -461,68 +461,80 @@ public class CachedBeanRunner {
         Map<String, Object> insertSnap = takeByPrefix(dirtyInserts, keyPrefix);
         Map<String, Object> updateSnap = takeByPrefix(dirtyUpdates, keyPrefix);
         Map<String, Object> deleteSnap = takeByPrefix(dirtyDeletes, keyPrefix);
-        List<Object> inserts = new ArrayList<>(insertSnap.values());
-        List<Object> updates = new ArrayList<>(updateSnap.values());
-        List<Object> deletes = new ArrayList<>(deleteSnap.values());
 
         // 事务内刷盘 = JOIN 当前事务（全有或全无）：注册回滚补偿，把移除的快照放回脏表
         registerTxFlushCompensation(insertSnap, updateSnap, deleteSnap);
 
-        // 按实体类型分组（避免 User 和 Order 混在一起执行）
-        Map<Class<?>, List<Object>> insertGroups = groupByClass(inserts);
-        Map<Class<?>, List<Object>> updateGroups = groupByClass(updates);
-        Map<Class<?>, List<Object>> deleteGroups = groupByClass(deletes);
+        // 按实体类型分组（避免 User 和 Order 混在一起执行）；分组保留 key→bean 映射，失败时才能按原 key 精确放回
+        Map<Class<?>, Map<String, Object>> insertGroups = groupByClass(insertSnap);
+        Map<Class<?>, Map<String, Object>> updateGroups = groupByClass(updateSnap);
+        Map<Class<?>, Map<String, Object>> deleteGroups = groupByClass(deleteSnap);
 
         int insertAffected = 0, updateAffected = 0, deleteAffected = 0;
 
         // 按分组批量 INSERT
-        for (List<Object> group : insertGroups.values()) {
+        for (Map<String, Object> group : insertGroups.values()) {
             if (group.isEmpty()) continue;
+            List<Object> beans = new ArrayList<>(group.values());
             try (BeanRunner runner = jdbcTemplate.beanRunner()) {
                 runner.setBatchSize(this.batchSize);
-                BatchResult<Object> objectBatchResult = runner.insertBeanList(group);
+                BatchResult<Object> objectBatchResult = runner.insertBeanList(beans);
                 int sum = objectBatchResult.getSuccessCount();
                 insertAffected += sum;
-                releasePendingKeys(insertSnap.values());
+                releasePendingKeys(beans);
+                // 非事务下失败条目必须放回脏表，否则永久丢失（事务内由补偿兜底）
+                requeueFailed(dirtyInserts, group, failedBeans(objectBatchResult));
                 log.info("批量刷盘 INSERT {}: {} 条, 影响 {} 行",
-                        group.getFirst().getClass().getSimpleName(), group.size(), sum);
+                        beans.getFirst().getClass().getSimpleName(), beans.size(), sum);
+            } catch (Exception e) {
+                log.warn("批量刷盘 INSERT 失败，放回脏表: {}", e.getMessage());
+                requeueFailed(dirtyInserts, group, beans);
             }
         }
 
         // 按分组批量 UPDATE
-        for (List<Object> group : updateGroups.values()) {
+        for (Map<String, Object> group : updateGroups.values()) {
             if (group.isEmpty()) continue;
+            List<Object> beans = new ArrayList<>(group.values());
             try (BeanRunner runner = jdbcTemplate.beanRunner()) {
                 runner.setBatchSize(this.batchSize);
-                BatchResult<Object> objectBatchResult = runner.updateBeanList(group);
+                BatchResult<Object> objectBatchResult = runner.updateBeanList(beans);
                 updateAffected += objectBatchResult.getSuccessCount();
-                releasePendingKeys(updateSnap.values());
+                releasePendingKeys(beans);
+                requeueFailed(dirtyUpdates, group, failedBeans(objectBatchResult));
                 log.info("批量刷盘 UPDATE {}: {} 条, 影响 {} 行",
-                        group.getFirst().getClass().getSimpleName(), group.size(), objectBatchResult.getSuccessCount());
+                        beans.getFirst().getClass().getSimpleName(), beans.size(), objectBatchResult.getSuccessCount());
+            } catch (Exception e) {
+                log.warn("批量刷盘 UPDATE 失败，放回脏表: {}", e.getMessage());
+                requeueFailed(dirtyUpdates, group, beans);
             }
         }
 
         // 按分组批量 DELETE
-        for (List<Object> group : deleteGroups.values()) {
+        for (Map<String, Object> group : deleteGroups.values()) {
             if (group.isEmpty()) continue;
+            List<Object> beans = new ArrayList<>(group.values());
             try (BeanRunner runner = jdbcTemplate.beanRunner()) {
                 runner.setBatchSize(this.batchSize);
-                int[] results = runner.deleteListBean(group);
-                int sum = results == null ? group.size() : sum(results);
+                int[] results = runner.deleteListBean(beans);
+                int sum = results == null ? beans.size() : sum(results);
                 deleteAffected += sum;
                 // 从缓存中移除已删除的 key（删除不回填主键，按实例解析正式/临时 Key）
-                for (Object bean : group) {
+                for (Object bean : beans) {
                     String k = keyOf(bean);
                     cache.remove(k);
                     pendingKeys.remove(bean);
                 }
                 log.info("批量刷盘 DELETE {}: {} 条, 影响 {} 行",
-                        group.getFirst().getClass().getSimpleName(), group.size(), sum);
+                        beans.getFirst().getClass().getSimpleName(), beans.size(), sum);
+            } catch (Exception e) {
+                log.warn("批量刷盘 DELETE 失败，放回脏表: {}", e.getMessage());
+                requeueDeleted(dirtyDeletes, group, beans);
             }
         }
 
         return new FlushResult(
-                inserts.size(), updates.size(), deletes.size(),
+                insertSnap.size(), updateSnap.size(), deleteSnap.size(),
                 insertAffected, updateAffected, deleteAffected
         );
     }
@@ -878,14 +890,64 @@ public class CachedBeanRunner {
 
     /**
      * 按实体类型分组（批量 INSERT/UPDATE 要求同类型）。
-     * <p>用 LinkedHashMap 收集器保持类型出现顺序，使多类型混合刷盘的日志与执行顺序可预期。</p>
+     * <p>分组保留 key→bean 映射：刷盘失败时要把未落库的条目按<em>原 key</em>放回脏表，
+     * 若只保留 List 则只能用 {@code keyOf} 重算——主键为 null 的临时 key 会漂移，放不回原位。</p>
      */
-    private Map<Class<?>, List<Object>> groupByClass(List<Object> beans) {
-        return beans.stream().collect(Collectors.groupingBy(
-                Object::getClass,
-                LinkedHashMap::new,
-                Collectors.toList()
-        ));
+    private Map<Class<?>, Map<String, Object>> groupByClass(Map<String, Object> snapshot) {
+        Map<Class<?>, Map<String, Object>> groups = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : snapshot.entrySet()) {
+            groups.computeIfAbsent(entry.getValue().getClass(), k -> new LinkedHashMap<>())
+                    .put(entry.getKey(), entry.getValue());
+        }
+        return groups;
+    }
+
+    /** 提取批量结果里的失败实体列表（无失败返回空列表，避免调用方判 null） */
+    private static List<Object> failedBeans(BatchResult<?> result) {
+        if (!result.hasFailures()) return List.of();
+        List<Object> failed = new ArrayList<>(result.getFailures().size());
+        for (BatchResult.FailureDetail failure : result.getFailures()) {
+            failed.add(failure.getBean());
+        }
+        return failed;
+    }
+
+    /**
+     * 非事务刷盘失败时，把未落库的插入/更新实体放回脏表（按分组快照的原始 key，不重算）。
+     * <p>事务内直接返回：那种情况由 {@link #registerTxFlushCompensation} 在 afterCompletion 兜底，
+     * 这里再放回会与补偿重复、且放回时机早于回滚判定，语义矛盾。</p>
+     * <p>{@code restoreInto} 内部用 putIfAbsent，不覆盖刷盘期间其他线程写入的更新版本；
+     * 缓存里没有该条目时一并回填，保持"读仍见未落库改动"。</p>
+     */
+    private void requeueFailed(ConcurrentHashMap<String, Object> dirtyMap,
+                               Map<String, Object> group, Collection<Object> failedBeans) {
+        if (txActive()) return;
+        Set<Object> failed = Collections.newSetFromMap(new IdentityHashMap<>());
+        failed.addAll(failedBeans);
+        for (Map.Entry<String, Object> entry : group.entrySet()) {
+            if (failed.contains(entry.getValue())) {
+                restoreInto(dirtyMap, singleSnapshot(entry.getKey(), entry.getValue()));
+            }
+        }
+    }
+
+    /**
+     * 非事务刷盘失败时，把未落库的删除实体放回脏表，并补回 Tombstone。
+     * <p>与 {@link #requeueFailed} 的差别只在缓存回填物：删除失败要补 Tombstone 而不是实体本身，
+     * 否则下一次 {@link #queryById} 会回源 DB 把刚删掉的行读回来（缓存穿透）。</p>
+     */
+    private void requeueDeleted(ConcurrentHashMap<String, Object> dirtyMap,
+                                Map<String, Object> group, Collection<Object> failedBeans) {
+        if (txActive()) return;
+        Set<Object> failed = Collections.newSetFromMap(new IdentityHashMap<>());
+        failed.addAll(failedBeans);
+        for (Map.Entry<String, Object> entry : group.entrySet()) {
+            if (!failed.contains(entry.getValue())) continue;
+            if (dirtyMap.putIfAbsent(entry.getKey(), entry.getValue()) == null
+                    && cache.getIfPresent(entry.getKey()) == null) {
+                cache.put(entry.getKey(), TOMBSTONE);
+            }
+        }
     }
 
     /** 数组求和（用于把逐行影响行数汇总成刷盘报告的 affected 总数） */

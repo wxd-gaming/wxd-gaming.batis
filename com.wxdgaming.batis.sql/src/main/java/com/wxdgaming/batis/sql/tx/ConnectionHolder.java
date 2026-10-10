@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 事务连接持有者
@@ -49,6 +50,14 @@ public class ConnectionHolder {
     private volatile boolean rollbackOnly;
     /** 是否开启了真实事务（SUPPORTS 非事务执行时为 false） */
     private final boolean transactional;
+    /**
+     * afterCompletion 是否已通知过（原子抢占）。
+     * <p>commit 失败路径会先触发 afterCompletion(STATUS_UNKNOWN) 再抛异常，外层 catch 又调用 rollback，
+     * 若不拦一道，同步器会被回调两次（先 UNKNOWN 后 ROLLED_BACK），Write-Behind 的补偿逻辑重复执行。</p>
+     */
+    private final AtomicBoolean completionNotified = new AtomicBoolean(false);
+    /** 回滚是否失败过：连接状态不可信，归还前不能再 setAutoCommit(true)（会隐式提交本该回滚的数据） */
+    private volatile boolean rollbackFailed;
 
     public ConnectionHolder(Connection connection, boolean previousAutoCommit,
                             boolean readOnly, boolean transactional) {
@@ -111,6 +120,21 @@ public class ConnectionHolder {
      */
     public void setRollbackOnly() {
         this.rollbackOnly = true;
+    }
+
+    /** 原子抢占"afterCompletion 已通知"标记，仅第一次调用返回 true（保证回调恰好触发一次） */
+    public boolean markCompletionNotified() {
+        return completionNotified.compareAndSet(false, true);
+    }
+
+    /** 记录回滚失败（连接状态不可信，归还前禁止恢复 autoCommit） */
+    public void markRollbackFailed() {
+        this.rollbackFailed = true;
+    }
+
+    /** 回滚是否失败过 */
+    public boolean isRollbackFailed() {
+        return rollbackFailed;
     }
 
 }

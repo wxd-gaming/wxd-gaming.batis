@@ -650,11 +650,10 @@ class CachedBeanRunnerTest {
     @Order(18)
     @Timeout(value = 120, unit = java.util.concurrent.TimeUnit.SECONDS)
     void testLongRunningSimulation() throws InterruptedException {
-        // 短 TTL 缓存：3 秒无人访问即过期，2 秒后触发异步刷新
+        // 短 TTL 缓存：3 秒后（写入起算）过期
         LocalEntityCache<String, Object> shortCache = new LocalEntityCache<>(
                 100_000,
-                3,   // expireAfterAccess
-                2,   // refreshAfterWrite
+                3,   // expireAfterWrite
                 TimeUnit.SECONDS
         );
         CachedBeanRunner runner = template.cachedBeanRunner(shortCache);
@@ -806,7 +805,7 @@ class CachedBeanRunnerTest {
                     log.info("等待 4 秒触发缓存过期 (当前 cache={}, dirty={})...",
                             preSleepCache, preSleepDirty);
 
-                    // 超过 expireAfterAccess (3s)，Caffeine 淘汰过期条目
+                    // 超过 expireAfterWrite (3s)，Caffeine 淘汰过期条目
                     Thread.sleep(4000);
 
                     // 再次访问以触发 Caffeine 维护周期

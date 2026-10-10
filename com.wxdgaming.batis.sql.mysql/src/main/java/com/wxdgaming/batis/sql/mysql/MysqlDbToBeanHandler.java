@@ -12,7 +12,10 @@ import lombok.extern.slf4j.Slf4j;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 从 mysql 读取数据并映射为实体类（SELECT），与 {@code BeanToInsertHandler}/{@code BeanToUpdateHandler} 对应的反向操作
@@ -34,14 +37,36 @@ public class MysqlDbToBeanHandler implements SqlDbToBeanHandler {
         this.valueHandler = valueHandler;
     }
 
-    /** 按主键查询单条记录，未定义主键时抛异常，未查询到返回 null */
+    /**
+     * 按主键查询单条记录，未定义主键时抛异常，未查询到返回 null。
+     * <p>复合主键以 AND 串联全部主键列（与 {@code MysqlBeanToSelectHandler#buildSelectByIdSql} 一致），
+     * 参数形态为：单主键传单个值、复合主键传 {@code Object[]}。主键列数与提供的值数不符时
+     * 快速失败抛异常，避免静默只绑第一个主键列、查回错误行。</p>
+     */
     @Override
     public <T> T queryById(JdbcTemplate mysqlTemplate, Class<T> entityClass, Object idValue) {
         TableInfo tableInfo = EntityParser.parse(entityClass);
-        ColumnInfo pk = findPrimaryKey(tableInfo, entityClass);
-        String sql = "SELECT * FROM `" + tableInfo.getTableName().toLowerCase()
-                + "` WHERE `" + pk.getColumnName().toLowerCase() + "` = ?";
-        return query(mysqlTemplate, entityClass, sql, idValue);
+        List<ColumnInfo> pks = new ArrayList<>();
+        for (ColumnInfo col : tableInfo.getColumns().values()) {
+            if (col.isPrimaryKey()) pks.add(col);
+        }
+        if (pks.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "实体 " + entityClass.getSimpleName() + " 未定义主键，无法执行 queryById");
+        }
+        Object[] args = pks.size() == 1 ? new Object[]{idValue} : (Object[]) idValue;
+        if (args.length != pks.size()) {
+            throw new IllegalArgumentException(
+                    "实体 " + entityClass.getSimpleName() + " 有 " + pks.size()
+                            + " 个主键列，但只提供了 " + args.length + " 个主键值");
+        }
+        StringBuilder where = new StringBuilder();
+        for (int i = 0; i < pks.size(); i++) {
+            if (i > 0) where.append(" AND ");
+            where.append('`').append(pks.get(i).getColumnName().toLowerCase()).append("` = ?");
+        }
+        String sql = "SELECT * FROM `" + tableInfo.getTableName().toLowerCase() + "` WHERE " + where;
+        return query(mysqlTemplate, entityClass, sql, args);
     }
 
     /** 自定义 SQL 查询单条记录，未查询到返回 null */
@@ -88,9 +113,18 @@ public class MysqlDbToBeanHandler implements SqlDbToBeanHandler {
         }
         ResultSetMetaData metaData = rs.getMetaData();
         int columnCount = metaData.getColumnCount();
+        // 精确匹配优先（实体列名与库端一致时零开销）；大小写不敏感的索引按需惰性构建，
+        // 只在出现大小写不匹配时才建一次，避免把 O(cols²) 的线性回退摊到每一行
+        Map<String, ColumnInfo> caseInsensitive = null;
         for (int i = 1; i <= columnCount; i++) {
             String columnLabel = metaData.getColumnLabel(i);
-            ColumnInfo col = lookupColumn(tableInfo, columnLabel);
+            ColumnInfo col = tableInfo.getColumn(columnLabel);
+            if (col == null) {
+                if (caseInsensitive == null) {
+                    caseInsensitive = indexByLower(tableInfo);
+                }
+                col = caseInsensitive.get(columnLabel.toLowerCase());
+            }
             if (col == null) {
                 continue;
             }
@@ -105,27 +139,12 @@ public class MysqlDbToBeanHandler implements SqlDbToBeanHandler {
 
     // ===== 列查找与主键 =====
 
-    /** 按列名查找列元数据（大小写不敏感） */
-    private ColumnInfo lookupColumn(TableInfo tableInfo, String columnLabel) {
-        ColumnInfo col = tableInfo.getColumn(columnLabel);
-        if (col != null) {
-            return col;
-        }
+    /** 构建"列名(小写) → 列元数据"索引，供大小写不敏感回退时一次建、多次查 */
+    private Map<String, ColumnInfo> indexByLower(TableInfo tableInfo) {
+        Map<String, ColumnInfo> index = new HashMap<>();
         for (ColumnInfo c : tableInfo.getColumns().values()) {
-            if (c.getColumnName().equalsIgnoreCase(columnLabel)) {
-                return c;
-            }
+            index.put(c.getColumnName().toLowerCase(), c);
         }
-        return null;
-    }
-
-    private ColumnInfo findPrimaryKey(TableInfo tableInfo, Class<?> entityClass) {
-        for (ColumnInfo col : tableInfo.getColumns().values()) {
-            if (col.isPrimaryKey()) {
-                return col;
-            }
-        }
-        throw new IllegalArgumentException(
-                "实体 " + entityClass.getSimpleName() + " 未定义主键，无法执行 queryById");
+        return index;
     }
 }

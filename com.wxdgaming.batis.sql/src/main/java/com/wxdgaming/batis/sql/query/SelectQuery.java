@@ -213,8 +213,9 @@ public final class SelectQuery<T> implements SelectSqlBuilder.SelectQuerySpec {
      * 手工 limit/offset 出来的非整页偏移，这里推出的页码没有业务含义。</p>
      */
     public Page<T> pageResult() {
-        int size = limit == null ? 10 : limit;
-        int off = offset == null ? 0 : offset;
+        // limit 未设置或为 0/负数（limit() 的"不限制"语义）时回退默认页大小，避免 off/size 除零
+        int size = limit == null || limit <= 0 ? 10 : limit;
+        int off = offset == null || offset < 0 ? 0 : offset;
         long total = count();
         List<T> content = list();
         return new Page<>(content, total, off / size + 1, size, sort);
