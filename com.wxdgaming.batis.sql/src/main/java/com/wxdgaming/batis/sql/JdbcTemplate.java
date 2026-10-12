@@ -20,6 +20,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import lombok.Getter;
 import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
 
 import java.sql.Connection;
 import java.sql.SQLException;
@@ -58,7 +59,15 @@ import java.util.function.Function;
  **/
 @Getter
 @Setter
+@Slf4j
 public class JdbcTemplate extends DbTemplate {
+
+    /**
+     * 表结构缓存与 DDL 同步的互斥锁。
+     * <p>{@link #checkTable(TableInfo)} 是"读缓存 → 可能建表/改表 → 刷新缓存"的复合操作，
+     * 无锁时并发调用（多个线程同时启动同步、或同一张表被两个实体触发）会对同一张表重复下发 DDL。</p>
+     */
+    private final Object tableLock = new Object();
 
     /**
      * 连接池。final 是当前的简化：单数据源假设，读写分离（P2-1）会把它放宽成按 key 路由的集合，
@@ -98,6 +107,16 @@ public class JdbcTemplate extends DbTemplate {
     /** SQL 异常翻译器（方言注入，未设置时使用 DefaultSqlExceptionHandler 兜底） */
     private SqlExceptionHandler sqlExceptionHandler;
 
+    /**
+     * 是否允许 {@link #checkTable(TableInfo)} 删除"实体里没有声明"的索引，默认 true（既有语义）。
+     * <p>
+     * 关掉它的场景很具体：存量表首次接入框架时，数据库里往往有 DBA 手工建的索引（含全文索引、
+     * 覆盖索引）而实体注解还没补齐，默认语义会在一次 checkTable 里把它们删掉且不留日志。
+     * 关闭后框架只 warn 列出将被删除的索引名，不动库。
+     * </p>
+     */
+    private boolean dropRedundantIndexes = true;
+
     /** 由池配置自建连接池：适用于独立使用；已持有 DataSource 时请用下面的重载，避免重复建池 */
     public JdbcTemplate(HikariConfig config) {
         this(new HikariDataSource(config));
@@ -129,47 +148,99 @@ public class JdbcTemplate extends DbTemplate {
      */
     public void loadAllTables() {
         if (dbMetaProvider == null) return;
-        HashMap<String, TableInfo> cache = new HashMap<>();
+        synchronized (tableLock) {
+            HashMap<String, TableInfo> cache = new HashMap<>();
 
-        try (QueryRunner qr = new QueryRunner(this)) {
-            String catalog = dbMetaProvider.getCatalog(this);
-            if (catalog == null) return;
+            try (QueryRunner qr = new QueryRunner(this)) {
+                String catalog = dbMetaProvider.getCatalog(this);
+                if (catalog == null) return;
 
-            List<TableInfo> tables = qr.query(
-                    dbMetaProvider.tableListSql(),
-                    new Object[]{catalog},
-                    dbMetaProvider.tableListHandler()
-            );
-
-            for (TableInfo tableInfo : tables) {
-                String tableName = tableInfo.getTableName();
-                String key = tableName.toLowerCase();
-
-                List<ColumnInfo> columns = qr.query(
-                        dbMetaProvider.columnListSql(),
-                        new Object[]{catalog, tableName},
-                        dbMetaProvider.columnListHandler()
+                List<TableInfo> tables = qr.query(
+                        dbMetaProvider.tableListSql(),
+                        new Object[]{catalog},
+                        dbMetaProvider.tableListHandler()
                 );
 
-                List<IndexInfo> indexes = qr.query(
-                        dbMetaProvider.indexListSql(),
-                        new Object[]{catalog, tableName},
-                        dbMetaProvider.indexListHandler()
-                );
-
-                // key 统一小写：库端列名大小写与实体字段派生出的列名可能不一致，diff 时靠小写对齐
-                LinkedHashMap<String, ColumnInfo> columnMap = new LinkedHashMap<>();
-                for (ColumnInfo col : columns) {
-                    columnMap.put(col.getColumnName().toLowerCase(), col);
+                for (TableInfo tableInfo : tables) {
+                    String tableName = tableInfo.getTableName();
+                    cache.put(tableName.toLowerCase(), readTable(qr, catalog, tableName, tableInfo));
                 }
-                tableInfo.setColumns(columnMap);
-                tableInfo.setIndexes(indexes);
+            }
 
-                cache.put(key, tableInfo);
+            this.tableCache = cache;
+        }
+    }
+
+    /**
+     * 读取单张表的列与索引并填进给定的 TableInfo。
+     * <p>列按库端顺序放进 LinkedHashMap，<b>顺序即库中的列序</b>——后续 ALTER 生成与 diff 依赖它；
+     * key 统一小写，因为库端列名大小写与实体字段派生出的列名可能不一致，diff 时靠小写对齐。</p>
+     */
+    private TableInfo readTable(QueryRunner qr, String catalog, String tableName, TableInfo target) {
+        List<ColumnInfo> columns = qr.query(
+                dbMetaProvider.columnListSql(),
+                new Object[]{catalog, tableName},
+                dbMetaProvider.columnListHandler()
+        );
+
+        List<IndexInfo> indexes = qr.query(
+                dbMetaProvider.indexListSql(),
+                new Object[]{catalog, tableName},
+                dbMetaProvider.indexListHandler()
+        );
+
+        LinkedHashMap<String, ColumnInfo> columnMap = new LinkedHashMap<>();
+        for (ColumnInfo col : columns) {
+            columnMap.put(col.getColumnName().toLowerCase(), col);
+        }
+        target.setColumns(columnMap);
+        target.setIndexes(indexes);
+        return target;
+    }
+
+    /**
+     * 单表增量刷新：只重读这一张表并并进缓存（copy-on-write，不动其他线程正在读的旧 map）。
+     * <p>
+     * 为什么不全量 {@link #loadAllTables()}：checkTable 常在启动期被逐实体调用，而全量加载是
+     * "1 条表列表 + 每表 2 条（列/索引）"，N 个实体就是 N×(1+2N) 条元数据查询。
+     * 单表刷新把这一步压回常数级（3 条查询）。
+     * </p>
+     * <p>表已从库里消失时把它从缓存摘掉；刷新过程出错则清空缓存，让下一次走全量加载兜底。</p>
+     */
+    private void refreshTableCache(String tableNameLower) {
+        if (dbMetaProvider == null) return;
+        synchronized (tableLock) {
+            try (QueryRunner qr = new QueryRunner(this)) {
+                String catalog = dbMetaProvider.getCatalog(this);
+                if (catalog == null) {
+                    clearTableCache();
+                    return;
+                }
+                List<TableInfo> tables = qr.query(
+                        dbMetaProvider.tableListSql(),
+                        new Object[]{catalog},
+                        dbMetaProvider.tableListHandler()
+                );
+                TableInfo fresh = null;
+                for (TableInfo ti : tables) {
+                    if (ti.getTableName() != null && ti.getTableName().equalsIgnoreCase(tableNameLower)) {
+                        fresh = ti;
+                        break;
+                    }
+                }
+                HashMap<String, TableInfo> copy = tableCache != null
+                        ? new HashMap<>(tableCache) : new HashMap<>();
+                if (fresh == null) {
+                    copy.remove(tableNameLower);
+                } else {
+                    copy.put(tableNameLower, readTable(qr, catalog, fresh.getTableName(), fresh));
+                }
+                this.tableCache = copy;
+            } catch (RuntimeException e) {
+                log.warn("单表结构刷新失败，回退为清空缓存（下次 checkTable 走全量加载）: {}", e.getMessage());
+                clearTableCache();
             }
         }
-
-        this.tableCache = cache;
     }
 
     /** 新建一个执行器（独立持有连接，必须 close）。事务内使用也走这里：Runner 会自动改用事务连接 */
@@ -307,11 +378,12 @@ public class JdbcTemplate extends DbTemplate {
      * <p>三条路径：</p>
      * <ol>
      *   <li>缓存为 null → 先 {@link #loadAllTables()} 全量读库；</li>
-     *   <li>缓存里没有这张表 → 交给 {@link TableCreateHandler} 建表，建完重新全量加载，
+     *   <li>缓存里没有这张表 → 交给 {@link TableCreateHandler} 建表，建完只<b>单表增量刷新</b>，
      *       让后续操作能立刻读到新表；</li>
      *   <li>缓存里有 → 交给 {@link TableAlterHandler} 逐列 diff，只在真的不同时才发 ALTER，
-     *       执行后刷新缓存。</li>
+     *       执行后同样只刷新这一张表。</li>
      * </ol>
+     * <p>整段以 {@code tableLock} 互斥：并发调用不会对同一张表重复下发 DDL。</p>
      * <p>
      * <b>本方法必须幂等</b>：同一实体反复调用应当零 ALTER。它常在应用启动时被批量调用，
      * 一旦渲染/规格化不等价就会产生"虚假漂移"，每次启动都刷一遍表结构（锁表 + binlog 膨胀），
@@ -323,22 +395,25 @@ public class JdbcTemplate extends DbTemplate {
      * @param tableInfo 实体解析得到的表元数据
      */
     public void checkTable(TableInfo tableInfo) {
-        if (tableCache == null) {
-            loadAllTables();
-        }
         String tableName = tableInfo.getTableName().toLowerCase();
-        TableInfo dbTable = tableCache != null ? tableCache.get(tableName) : null;
-        if (dbTable == null) {
-            if (tableCreateHandler != null) {
-                tableCreateHandler.doAction(this, tableInfo);
-                // 创建后刷新缓存：否则紧接着的第二次 checkTable 会以为表还不存在，重复建表
+        // 整段互斥：并发调用同一模板时，避免对同一张表重复建表/重复 ALTER，也避免刷新缓存与 diff 交叉
+        synchronized (tableLock) {
+            if (tableCache == null) {
                 loadAllTables();
             }
-        } else {
-            if (tableAlterHandler != null) {
-                tableAlterHandler.doAction(this, tableInfo);
-                // 变更后刷新缓存：diff 的基准必须是库端最新状态
-                loadAllTables();
+            TableInfo dbTable = tableCache != null ? tableCache.get(tableName) : null;
+            if (dbTable == null) {
+                if (tableCreateHandler != null) {
+                    tableCreateHandler.doAction(this, tableInfo);
+                    // 只刷新这一张表：否则 N 个实体各调一次 checkTable 就是 N×(1+2N) 条元数据查询
+                    refreshTableCache(tableName);
+                }
+            } else {
+                if (tableAlterHandler != null) {
+                    tableAlterHandler.doAction(this, tableInfo);
+                    // 变更后刷新缓存：diff 的基准必须是库端最新状态
+                    refreshTableCache(tableName);
+                }
             }
         }
     }

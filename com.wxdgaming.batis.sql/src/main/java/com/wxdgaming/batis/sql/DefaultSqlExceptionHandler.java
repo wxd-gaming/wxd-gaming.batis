@@ -82,6 +82,12 @@ public class DefaultSqlExceptionHandler implements SqlExceptionHandler {
                     return new DeadlockLoserDataAccessException(describe(ex), sql, params, code, state, ex);
                 case "42": // 语法/对象缺失
                     return grammar(ex, sql, params, code, state, msg);
+                case "57": // 操作被中断（语句超时、管理员终止）
+                case "HYT": // ODBC 风格超时类
+                    // 最典型的是 57014（query_canceled）与 HYT00（timeout expired）。
+                    // 不映射会落进"未知错误"（NonTransient、不可重试），而 BeanRunner 的批量降级
+                    // 正是按 isRetryable() 判断"上抛还是逐条重跑"——一次超时会被放大成 N 次逐条压库。
+                    return new QueryTimeoutException(describe(ex), sql, params, code, state, ex);
                 default:
                     break;
             }
@@ -109,7 +115,10 @@ public class DefaultSqlExceptionHandler implements SqlExceptionHandler {
         if (msg.contains("too many connections")) {
             return new CannotGetJdbcConnectionException(describe(ex), sql, params, code, state, ex);
         }
-        if (msg.contains("query timeout") || msg.contains("max_execution_time")) {
+        if (msg.contains("query timeout") || msg.contains("max_execution_time")
+                || msg.contains("statement timeout") || msg.contains("canceling statement")
+                || msg.contains("cancelled statement") || msg.contains("timeout expired")) {
+            // 顺序有意排在 "lock wait timeout" 之后：锁等待超时仍归 CannotAcquireLockException
             return new QueryTimeoutException(describe(ex), sql, params, code, state, ex);
         }
         if (msg.contains("unknown column")) {

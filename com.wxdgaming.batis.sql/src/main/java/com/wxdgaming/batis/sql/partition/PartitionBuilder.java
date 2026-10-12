@@ -168,9 +168,12 @@ public class PartitionBuilder {
     // ==================== 指定表 ====================
 
     /**
-     * 由实体类指定表（解析实体得到真实表名，并顺带保证表已存在）
+     * 由实体类指定表（解析实体得到真实表名）
      * <p>表名统一转小写：缓存 key 和后续 {@code cache.contains} 都按小写比对，
      * 大小写混用会让去重失效。</p>
+     * <p><b>本方法不会建表</b>：它只做 {@code EntityParser.parse} 取表名，
+     * 不调用 {@code JdbcTemplate#checkTable}。表不存在时会在 DDL 阶段报 1146，
+     * 需要建表请在调用前自行 {@code checkTable}。</p>
      * <p>注意这一步会 {@link #resetConfig()} 丢掉上一轮的分区列表——复用同一实例跑第二轮时，
      * 必须从本方法重新开始。</p>
      */
@@ -192,11 +195,15 @@ public class PartitionBuilder {
      * 重置配置（每次调用 table() 时清空）
      * <p>清掉本轮所有意图数据，但<b>不清 expr</b>：翻译器是实例级配置，
      * 这样 {@code builder.table(A).withExpr(E).…} 之后换表重用不必重复注入。</p>
+     * <p>{@code truncateName} 必须一并清掉：它是单值目标，换表复用后若残留，
+     * 下一轮 {@code executeTruncatePartition()} 会拿上一张表的分区名去 TRUNCATE 新表——
+     * 各表分区名同构（形如 p20260801）时极可能同名，等于清空另一张表的数据且不报错。</p>
      */
     private void resetConfig() {
         config.clearPartitions();
         config.clearDropNames();
         config.clearReorganize();
+        config.setTruncateName(null);
         config.setPartitionCount(0);
         config.setType(null);
         config.setExpression(null);
@@ -569,12 +576,36 @@ public class PartitionBuilder {
 
     /**
      * 构建"非分区表 → 分区表"的 DDL
-     * <p>与 {@link #buildAddPartition()} 不同，这里<b>没有空列表保护</b>：
-     * 类型是 RANGE 而分区列表为空时，会把空括号交给 Manager 渲染出无法执行的语句。
-     * 调用前要保证已经至少添加过一个分区定义。</p>
+     * <p>
+     * RANGE / LIST（含 COLUMNS 变体）必须至少有一个分区定义，否则会渲染出空括号
+     * {@code PARTITION BY RANGE(...) ( );}，发到库端是语法错误（1064）；
+     * 而进程重启后缓存为空重跑又会撞 "Duplicate partition name"。因此这类目标缺失时
+     * 与 {@link #buildAddPartition()} 保持一致：<b>返回 null</b> 并记 info，让调用方幂等重跑。
+     * </p>
+     * <p>HASH / KEY 系列只靠 {@code partitionCount}，分区列表本来就允许为空。</p>
+     *
+     * @return SQL 语句；无分区类型或缺少必要分区定义时返回 null
      */
     public String buildPartition() {
+        if (config.getType() == null) {
+            log.info("表 {} 未指定分区类型，跳过建分区", config.getTableName());
+            return null;
+        }
+        if (requiresExplicitPartitions(config.getType()) && config.getPartitions().isEmpty()) {
+            log.info("表 {} 的分区类型 {} 需要至少一个分区定义，本轮没有候选，跳过建分区",
+                    config.getTableName(), config.getType());
+            return null;
+        }
         return manager.buildCreatePartition(config);
+    }
+
+    /** 这些分区类型必须显式给出边界定义；HASH / KEY 系列只靠 count，允许空列表 */
+    private static boolean requiresExplicitPartitions(PartitionType type) {
+        return switch (type) {
+            case RANGE, LIST, RANGE_COLUMNS, LIST_COLUMNS -> true;
+            // 刻意不写 default：将来新增分区类型时编译期就会要求在这里表态
+            case HASH, KEY, LINEAR_HASH, LINEAR_KEY -> false;
+        };
     }
 
     /**
@@ -596,18 +627,45 @@ public class PartitionBuilder {
         return manager.buildAddPartition(config);
     }
 
-    /** 构建删除分区的 SQL（dropNames 为空时会渲染出无 DROP 子句的语句，调用方需自行保证有目标） */
+    /**
+     * 构建删除分区的 SQL
+     * <p>没有目标分区时返回 null（与 {@link #buildAddPartition()} 同一约定）：
+     * 否则会渲染出只有表名的 {@code ALTER TABLE `t` ;}，库端只会回一句语法错误。</p>
+     *
+     * @return SQL 语句；dropNames 为空时返回 null
+     */
     public String buildDropPartition() {
+        if (config.getDropNames().isEmpty()) {
+            log.info("表 {} 没有需要删除的分区，跳过", config.getTableName());
+            return null;
+        }
         return manager.buildDropPartition(config);
     }
 
-    /** 构建清空分区的 SQL（只清数据，保留分区定义） */
+    /**
+     * 构建清空分区的 SQL（只清数据，保留分区定义）
+     *
+     * @return SQL 语句；未指定分区名时返回 null
+     */
     public String buildTruncatePartition() {
+        if (config.getTruncateName() == null || config.getTruncateName().isEmpty()) {
+            log.info("表 {} 没有指定要清空的分区名，跳过", config.getTableName());
+            return null;
+        }
         return manager.buildTruncatePartition(config);
     }
 
-    /** 构建重组分区的 SQL（把原分区拆成 reorganizeDefs 里的若干新分区） */
+    /**
+     * 构建重组分区的 SQL（把原分区拆成 reorganizeDefs 里的若干新分区）
+     *
+     * @return SQL 语句；缺少原分区名或新分区定义时返回 null
+     */
     public String buildReorganizePartition() {
+        if (config.getReorganizeOldName() == null || config.getReorganizeOldName().isEmpty()
+                || config.getReorganizeDefs().isEmpty()) {
+            log.info("表 {} 的重组意图不完整（原分区名与新分区定义都要有），跳过", config.getTableName());
+            return null;
+        }
         return manager.buildReorganizePartition(config);
     }
 
@@ -624,6 +682,7 @@ public class PartitionBuilder {
      */
     public void executePartition() {
         String sql = buildPartition();
+        if (sql == null) return;
         execute(sql);
         // 建分区后刷新缓存
         if (cache != null) {
@@ -675,6 +734,9 @@ public class PartitionBuilder {
      */
     public void executeDropPartition() {
         String sql = buildDropPartition();
+        // 必须先判空再动缓存：没有真正执行 DDL 却把名字从缓存里摘掉，
+        // 会让下一轮补分区误判"这个分区不存在"而重复下发 ADD PARTITION
+        if (sql == null) return;
         execute(sql);
         if (cache != null) {
             for (String name : config.getDropNames()) {
@@ -698,7 +760,9 @@ public class PartitionBuilder {
      * 所以直接重读库端视图。</p>
      */
     public void executeReorganizePartition() {
-        execute(buildReorganizePartition());
+        String sql = buildReorganizePartition();
+        if (sql == null) return;
+        execute(sql);
         if (cache != null) {
             cache.refresh(config.getTableName());
         }

@@ -14,7 +14,19 @@ import java.util.List;
  **/
 public record Criterion(String column, CriterionOperator op, List<Object> values) {
 
+    /**
+     * 构造叶子条件。
+     * <p>值里出现 null 时抛 {@link IllegalArgumentException} 而不是让 {@code List.of} 抛出无消息的 NPE：
+     * 只有 {@code IS_NULL / IS_NOT_NULL} 才表达空值语义，其它操作符绑 null 在 SQL 里恒为"未知"，
+     * 属于调用方用错了条件类型，报错要能看出是哪一列、哪个操作符。</p>
+     */
     public static Criterion of(String column, CriterionOperator op, Object... values) {
+        for (Object value : values) {
+            if (value == null) {
+                throw new IllegalArgumentException(
+                        "列 " + column + " 的 " + op + " 条件不接受 null 值，空值判断请用 IS_NULL / IS_NOT_NULL");
+            }
+        }
         return new Criterion(column, op, List.of(values));
     }
 

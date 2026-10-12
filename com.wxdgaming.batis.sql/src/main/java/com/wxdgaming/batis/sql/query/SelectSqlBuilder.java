@@ -167,21 +167,35 @@ public final class SelectSqlBuilder {
         @Override
         public Frag visitLeaf(Criterion c) {
             if (c.op() == CriterionOperator.RAW) {
-                // raw 的 column 槽位存的是 SQL 片段本身：逃生舱，不引用、不校验、值仍走占位符绑定
+                // raw 的 column 槽位存的是 SQL 片段本身：逃生舱，不引用、不校验、值仍走占位符绑定。
+                // 这里无法核验片段里的 ? 个数与参数个数（? 可能出现在字符串字面量里），
+                // 因此片段与参数的一致性由调用方负责。
                 params.addAll(c.values());
                 return new Frag(c.column(), Criteria.Kind.LEAF);
             }
             String qc = handler.quote(resolveColumn(table, c.column()).getColumnName());
             return switch (c.op()) {
-                case IS_NULL -> new Frag(qc + " IS NULL", Criteria.Kind.LEAF);
-                case IS_NOT_NULL -> new Frag(qc + " IS NOT NULL", Criteria.Kind.LEAF);
+                case IS_NULL -> {
+                    requireValueCount(c, 0);
+                    yield new Frag(qc + " IS NULL", Criteria.Kind.LEAF);
+                }
+                case IS_NOT_NULL -> {
+                    requireValueCount(c, 0);
+                    yield new Frag(qc + " IS NOT NULL", Criteria.Kind.LEAF);
+                }
                 case EQ_COL -> {
                     // 列=列比较：右值也是标识符，同样必须解析+引用，不能当参数绑定
+                    requireValueCount(c, 1);
                     String other = handler.quote(
                             resolveColumn(table, (String) c.values().getFirst()).getColumnName());
                     yield new Frag(qc + " = " + other, Criteria.Kind.LEAF);
                 }
                 case IN, NOT_IN -> {
+                    if (c.values().isEmpty()) {
+                        // 空列表会渲染出 `col IN ()`：MySQL 直接语法错误，语义上也等价于恒假
+                        throw new IllegalArgumentException(
+                                "列 " + c.column() + " 的 " + c.op() + " 条件至少需要一个值");
+                    }
                     StringBuilder ph = new StringBuilder(qc).append(' ').append(c.op().getSql()).append(" (");
                     // 占位符个数由值列表决定，二者必须同步增长，否则绑定阶段错位
                     for (int i = 0; i < c.values().size(); i++) {
@@ -192,14 +206,33 @@ public final class SelectSqlBuilder {
                     yield new Frag(ph.toString(), Criteria.Kind.LEAF);
                 }
                 case BETWEEN -> {
+                    requireValueCount(c, 2);
                     params.addAll(c.values());
                     yield new Frag(qc + " BETWEEN ? AND ?", Criteria.Kind.LEAF);
                 }
                 default -> {
+                    requireValueCount(c, 1);
                     params.addAll(c.values());
                     yield new Frag(qc + " " + c.op().getSql() + " ?", Criteria.Kind.LEAF);
                 }
             };
+        }
+
+        /**
+         * 校验"值个数 == 占位符个数"。
+         * <p>
+         * {@link Criterion} 是公开 record、{@code Criterion.of(...)} 是公开工厂，手工构造出数量不符的叶子
+         * 会让渲染出的 {@code ?} 少于追加的参数，<b>后续所有条件整体错位一格</b>：SQL 照常执行、
+         * 结果静默错误。{@code Criterion#placeholderCount()} 的注释一直写着"渲染端据此校验"，
+         * 这里把这条契约真正落地。
+         * </p>
+         */
+        private static void requireValueCount(Criterion c, int expected) {
+            if (c.values().size() != expected) {
+                throw new IllegalArgumentException(
+                        "列 " + c.column() + " 的 " + c.op() + " 条件需要 " + expected
+                                + " 个值，实际 " + c.values().size() + " 个（数量不符会导致参数与占位符错位）");
+            }
         }
 
         @Override

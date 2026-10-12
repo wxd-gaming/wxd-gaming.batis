@@ -852,6 +852,81 @@ class CachedBeanRunnerTest {
         }
     }
 
+    // ==================== 回归用例（缺陷修复对应） ====================
+
+    /**
+     * 回归用例：立即插入后，正式主键必须能命中缓存。
+     * <p>
+     * 曾经的缺陷：缓存写入用的是插入前算出的 key。IDENTITY 主键的表在插入前主键还不存在，
+     * 那时 key 形如 {@code t_order:#pending:N}；主键回写后缓存条目仍留在临时 key 下，
+     * {@code queryById(真实主键)} 永远未命中（每次都回源），临时条目则无人可读地占着容量。
+     * </p>
+     * <p>断言用 {@code assertSame} 而不是比对内容：只有命中缓存才会返回同一个实例，
+     * 回源必然是新对象——这正是老用例（只断言非空 + cacheSize==1）漏掉该缺陷的原因。</p>
+     */
+    @Test
+    @Order(20)
+    void testImmediateInsertFillsCacheUnderRealKey() {
+        OrderEntity order = buildSampleOrder("立即插入缓存键", 2, 200, false, new BigDecimal("4.00"));
+        Number genId = cachedRunner.insertBean(order, true);
+        assertNotNull(genId);
+        assertEquals(genId.longValue(), order.getId());
+
+        OrderEntity first = cachedRunner.queryById(OrderEntity.class, genId.longValue());
+        OrderEntity second = cachedRunner.queryById(OrderEntity.class, genId.longValue());
+        assertNotNull(first);
+        assertSame(first, second, "同一次插入后的两次点查必须命中同一缓存实例");
+        assertSame(order, first, "立即插入应把该实例回填到正式主键下");
+    }
+
+    /**
+     * 回归用例：{@code deleteAll} 之后缓存必须失效。
+     * <p>
+     * 曾经的缺陷：deleteAll 只清库不清缓存，于是 {@code queryById} 从缓存返回已删除的行，
+     * 而 {@code queryAll}（直通 DB）返回 0 条——同一对象的两个读接口互相矛盾。
+     * </p>
+     */
+    @Test
+    @Order(21)
+    void testDeleteAllInvalidatesCache() {
+        OrderEntity order = buildSampleOrder("清表缓存", 1, 100, true, new BigDecimal("1.00"));
+        Number genId = cachedRunner.insertBean(order, true);
+        assertNotNull(cachedRunner.queryById(OrderEntity.class, genId.longValue()));
+
+        cachedRunner.deleteAll(OrderEntity.class);
+
+        assertNull(cachedRunner.queryById(OrderEntity.class, genId.longValue()),
+                "清表后点查必须读不到（缓存不能继续作答）");
+        assertTrue(cachedRunner.queryAll(OrderEntity.class).isEmpty(), "库里也应当没有数据");
+    }
+
+    /**
+     * 回归用例：对"尚未刷盘的延迟插入"做立即更新时，不能把那次插入丢掉。
+     * <p>
+     * 曾经的缺陷：立即分支先执行 UPDATE（该行还没落库 → 0 行），随后无条件
+     * {@code dirtyInserts.remove(key)}，于是脏插入被摘掉、DB 里从来没有这行、缓存里留着新值——
+     * 数据彻底消失且不会再有任何补偿。
+     * </p>
+     */
+    @Test
+    @Order(22)
+    void testImmediateUpdateOnPendingInsertStillWritesRow() {
+        OrderEntity order = buildSampleOrder("待插入上立即更新", 3, 300, false, new BigDecimal("9.00"));
+        assertNull(cachedRunner.insertBean(order, false), "延迟插入返回 null（主键未生成）");
+        assertEquals(1, cachedRunner.dirtyInsertCount());
+
+        order.setTitle("待插入上立即更新-改");
+        int rows = cachedRunner.updateBean(order, true);
+        assertTrue(rows > 0, "应当先补一次 INSERT 再更新，而不是报 0 行");
+        assertEquals(0, cachedRunner.dirtyInsertCount(), "已落库，脏插入应被清空");
+
+        try (BeanRunner br = template.beanRunner()) {
+            OrderEntity fromDb = br.queryById(OrderEntity.class, order.getId());
+            assertNotNull(fromDb, "这一行必须真的在库里");
+            assertEquals("待插入上立即更新-改", fromDb.getTitle());
+        }
+    }
+
     // ======================== 辅助方法 ========================
 
     /** 构建一条示例订单 */

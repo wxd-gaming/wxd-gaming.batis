@@ -75,10 +75,15 @@ public class TransactionTemplate {
 
     /**
      * 事务提交后自动刷盘 CachedBeanRunner 的脏数据（推荐的高吞吐姿势）。
-     * <p>为什么放在 afterCommit 而不是事务内：脏表是 JVM 全局共享的，事务内 flushAll
-     * 会把<b>其他线程</b>的待写数据一并卷进本事务，本事务回滚时它们的写入也一起消失；
-     * 放在提交后再刷，业务事务时长也不受批量刷盘影响。代价是"提交成功但进程立刻崩溃"
-     * 这一窗口内脏数据会丢失，属于 Write-Behind 的固有权衡。</p>
+     * <p>为什么放在 afterCommit 而不是事务内：事务内 flushAll 会 JOIN 当前事务，
+     * 把整批刷盘写进业务事务里，既拖长事务与锁持有时间，回滚时又得靠补偿把脏数据追回来；
+     * 放在提交后再刷，两者都不必承担。</p>
+     * <p><b>注意刷盘跑在事务之外</b>：{@code afterCommit} 的触发点固定在"解绑 + 归还连接"之后
+     * （见 {@link #finish}），所以刷盘用的是新借的 autocommit 连接；失败时脏数据会被放回脏表，
+     * 由下一次 flush 或缓存淘汰重试，而不是静默丢失。剩下的风险窗口是
+     * "提交成功但进程在刷盘前崩溃"，这属于 Write-Behind 的固有权衡。</p>
+     * <p>延迟写的脏表与缓存是<b>每个 CachedBeanRunner 实例一份</b>，请始终使用同一个实例，
+     * 否则本方法刷不到另一个实例积压的脏数据。</p>
      * <p>若需要强一致（回滚也不丢），改用事务内 immediate 写或直接走 BeanRunner。</p>
      */
     public <T> T executeAndFlush(CachedBeanRunner runner, TransactionCallback<T> callback) {
@@ -153,7 +158,8 @@ public class TransactionTemplate {
                 }
                 return callback.doInTransaction(new Status(null, false, false, false));
             default:
-                // NESTED 等未实现的档位落到这里：明确报错优于静默按 REQUIRED 执行
+                // Propagation 目前没有 NESTED（有意不实现，见枚举注释）；保留 default 是为了
+                // 将来新增档位时明确报错，而不是被 switch 静默漏掉、按"不升级"处理
                 throw new IllegalTransactionStateException("不支持的传播行为: " + propagation);
         }
     }
@@ -184,27 +190,69 @@ public class TransactionTemplate {
         ConnectionHolder holder = doBegin();
         TxContext.bind(jdbcTemplate, holder);
         Status status = new Status(holder, true, true, holder.isReadOnly());
+        // 事务完成状态：MIN_VALUE = 尚未判定（仅"回调自己抛异常"时才会用到）
+        int[] completion = {Integer.MIN_VALUE};
         try {
             T result = callback.doInTransaction(status);
             // 正常返回也可能被要求回滚（setRollbackOnly），所以提交前必须再查一次标志
             if (holder.isRollbackOnly()) {
                 rollback(holder);
+                completion[0] = TransactionSynchronization.STATUS_ROLLED_BACK;
             } else {
-                commit(holder);
+                commit(holder, completion);
             }
             return result;
         } catch (Throwable ex) {
-            try {
-                rollback(holder);
-            } catch (RuntimeException rollbackEx) {
-                // 回滚本身失败不覆盖原始异常：业务异常才是现场，回滚异常挂成 suppressed 供排障
-                ex.addSuppressed(rollbackEx);
+            // commit() 内部已按需回滚过（completion 已判定），只有"回调自己抛异常"这一种情形要在这里补回滚
+            if (completion[0] == Integer.MIN_VALUE) {
+                try {
+                    rollback(holder);
+                } catch (RuntimeException rollbackEx) {
+                    // 回滚本身失败不覆盖原始异常：业务异常才是现场，回滚异常挂成 suppressed 供排障
+                    ex.addSuppressed(rollbackEx);
+                }
+                completion[0] = TransactionSynchronization.STATUS_ROLLED_BACK;
             }
             throw ex;
         } finally {
+            // 顺序不可变：先解绑、再归还连接、最后才跑提交后回调。
+            // "afterCommit 放在这里而不是 commit() 内部"是一条硬约束：只有事务上下文已解绑、
+            // 连接已归还，回调里的刷盘（CachedBeanRunner#flushAll）才是事务外的普通写。
+            // 若在 commit() 内部触发，刷盘线程读到的仍是"我在事务中"，失败时
+            // requeueFailed/requeueDeleted 会直接 return，而那批脏数据已被 takeByPrefix 摘走——
+            // 结果是数据静默丢失、调用方却收到"事务成功"。
             TxContext.unbind(jdbcTemplate);
             release(holder);
+            finish(holder, completion[0]);
         }
+    }
+
+    /**
+     * 事务收尾：提交成功时先跑 afterCommit，再触发恰好一次的 afterCompletion。
+     * <p>
+     * 调用点固定在 {@link #executeNew} 的 finally 内、且一定在"解绑 + 归还连接"之后，
+     * 因此这里的回调看到的事务状态是"已结束"：既不能再写回事务连接，
+     * 也不能指望 {@code TxContext} 里还挂着自己的持有者。
+     * </p>
+     * <p>
+     * 回调异常一律只记日志（含 Error）：数据已经落库，此时把异常上抛会让
+     * {@code executeNew} 的 catch 分支误判成"需要回滚"，把一笔已提交的事务上报成
+     * STATUS_ROLLED_BACK，触发 Write-Behind 补偿把已落库的数据重新变脏。
+     * </p>
+     */
+    private void finish(ConnectionHolder holder, int status) {
+        int finalStatus = status == Integer.MIN_VALUE
+                ? TransactionSynchronization.STATUS_UNKNOWN : status;
+        if (finalStatus == TransactionSynchronization.STATUS_COMMITTED) {
+            for (TransactionSynchronization sync : holder.getSynchronizations()) {
+                try {
+                    sync.afterCommit();
+                } catch (Throwable t) {
+                    log.warn("afterCommit 回调异常: {}", t.getMessage());
+                }
+            }
+        }
+        triggerAfterCompletion(holder, finalStatus);
     }
 
     /**
@@ -246,20 +294,22 @@ public class TransactionTemplate {
     }
 
     /**
-     * 提交：beforeCommit → JDBC commit → afterCommit → afterCompletion
+     * 提交阶段：beforeCommit → JDBC commit
      * <p>
-     * beforeCommit 的异常会走 catch 分支进而触发回滚——这是它和 afterCommit 的本质区别，
-     * 也是"提交前补最后一刀"的逻辑该放这里的原因。
+     * beforeCommit 的异常会在这里就地回滚并把状态记成 ROLLED_BACK——这是它和 afterCommit 的
+     * 本质区别，也是"提交前补最后一刀"的逻辑该放这里的原因。
      * </p>
      * <p>
-     * commit 调用本身失败时上报的是 {@code STATUS_UNKNOWN} 而不是 ROLLED_BACK：
+     * commit 调用本身失败时记录的是 {@code STATUS_UNKNOWN} 而不是 ROLLED_BACK：
      * 网络/超时类失败下数据库可能其实已经提交了，把它当成"肯定没提交"会让补偿逻辑写出重复数据。
      * 此处随后尝试的 rollback 只是尽力把连接收拾干净，不代表结果可知。
      * </p>
-     * <p>afterCommit/afterCompletion 里的异常一律只记日志：数据已经落库，
-     * 这时候把缓存刷盘的失败上抛给业务方，只会让人误以为"事务没成功"。</p>
+     * <p>afterCommit / afterCompletion 不在这里触发，统一由 {@link #finish} 在事务上下文解绑、
+     * 连接归还之后执行——理由见 {@link #executeNew} 的 finally 注释。</p>
+     *
+     * @param completion 出参：写入本次事务的最终状态常量，供 finally 阶段收尾使用
      */
-    private void commit(ConnectionHolder holder) {
+    private void commit(ConnectionHolder holder, int[] completion) {
         try {
             for (TransactionSynchronization sync : holder.getSynchronizations()) {
                 sync.beforeCommit();
@@ -272,7 +322,7 @@ public class TransactionTemplate {
             } catch (SQLException rollbackEx) {
                 holder.markRollbackFailed();
             }
-            triggerAfterCompletion(holder, TransactionSynchronization.STATUS_ROLLED_BACK);
+            completion[0] = TransactionSynchronization.STATUS_ROLLED_BACK;
             throw e;
         }
         try {
@@ -284,20 +334,11 @@ public class TransactionTemplate {
             } catch (SQLException rollbackEx) {
                 holder.markRollbackFailed();
             }
-            // commit 调用本身失败时上报 STATUS_UNKNOWN 而不是 ROLLED_BACK：网络/超时类失败下
-            // 数据库可能其实已经提交了，当成"肯定没提交"会让补偿逻辑写出重复数据。
-            triggerAfterCompletion(holder, TransactionSynchronization.STATUS_UNKNOWN);
+            // 结果不可知：上报 STATUS_UNKNOWN，让补偿逻辑不要假定数据一定没落库
+            completion[0] = TransactionSynchronization.STATUS_UNKNOWN;
             throw new TransactionStartedException("事务提交失败: " + e.getMessage(), e);
         }
-        // 提交成功后才跑：此刻数据已不可撤回，回调只该做"通知类"工作
-        for (TransactionSynchronization sync : holder.getSynchronizations()) {
-            try {
-                sync.afterCommit();
-            } catch (Exception e) {
-                log.warn("afterCommit 回调异常: {}", e.getMessage());
-            }
-        }
-        triggerAfterCompletion(holder, TransactionSynchronization.STATUS_COMMITTED);
+        completion[0] = TransactionSynchronization.STATUS_COMMITTED;
         log.debug("事务提交");
     }
 
@@ -307,6 +348,8 @@ public class TransactionTemplate {
      * 把次要的连接清理异常顶掉主异常反而更糟。但回滚失败的连接状态不可信，
      * 会标记 {@code rollbackFailed} 让 {@link #release} 跳过 autoCommit 恢复直接关闭，
      * 否则 setAutoCommit(true) 会把本该回滚的数据隐式提交进库。</p>
+     * <p>这里不再触发 afterCompletion：收尾动作统一由 {@link #finish} 在解绑、归还连接之后
+     * 执行，保证"回滚后精确失效缓存"这类补偿看到的连接已经是池里的普通连接。</p>
      */
     private void rollback(ConnectionHolder holder) {
         try {
@@ -315,23 +358,23 @@ public class TransactionTemplate {
             log.warn("事务回滚失败: {}", e.getMessage());
             holder.markRollbackFailed();
         }
-        // Write-Behind 的"精确失效缓存"挂在这里：库没写成，缓存里那条也必须作废
-        triggerAfterCompletion(holder, TransactionSynchronization.STATUS_ROLLED_BACK);
         log.debug("事务回滚");
     }
 
     /**
      * 触发 afterCompletion：恰好一次（幂等），单个回调异常吞掉，避免一个收尾失败连带跳过其余收尾。
-     * <p>幂等靠 {@link ConnectionHolder#markCompletionNotified} 的原子抢占：commit 失败路径先触发
-     * STATUS_UNKNOWN 再抛异常，外层 catch 的 rollback 又试图触发 ROLLED_BACK，第二次被这里拦下。</p>
+     * <p>幂等靠 {@link ConnectionHolder#markCompletionNotified} 的原子抢占：commit 失败路径先把状态
+     * 记成 STATUS_UNKNOWN、外层 finally 再统一通知，重复调用会被这里拦下。</p>
+     * <p>捕获 {@code Throwable} 而不是 {@code Exception}：Error 逃出去会连带中断其余回调，
+     * 而它们才是真正负责"失效缓存 / 放回脏数据"的一方。</p>
      */
     private void triggerAfterCompletion(ConnectionHolder holder, int status) {
         if (!holder.markCompletionNotified()) return;
         for (TransactionSynchronization sync : holder.getSynchronizations()) {
             try {
                 sync.afterCompletion(status);
-            } catch (Exception e) {
-                log.warn("afterCompletion 回调异常: {}", e.getMessage());
+            } catch (Throwable t) {
+                log.warn("afterCompletion 回调异常: {}", t.getMessage());
             }
         }
     }

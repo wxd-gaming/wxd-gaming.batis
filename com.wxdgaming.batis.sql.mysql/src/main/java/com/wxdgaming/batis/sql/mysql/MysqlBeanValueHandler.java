@@ -227,13 +227,29 @@ public class MysqlBeanValueHandler extends AbstractBeanValueHandler {
             return UUID.fromString(value.toString());
         }
         if (javaType == Character.class || javaType == char.class) {
-            if (value instanceof String s && !s.isEmpty()) return s.charAt(0);
-            return value.toString().charAt(0);
+            if (value instanceof String s) {
+                if (s.isEmpty()) {
+                    // 空串没有"第一个字符"：直接说明是哪一列，而不是抛 StringIndexOutOfBoundsException
+                    throw new TypeMismatchDataAccessException(
+                            "列 " + col.getFieldName() + " 声明为 char/Character，但库端值为空字符串");
+                }
+                return s.charAt(0);
+            }
+            String text = value.toString();
+            if (text.isEmpty()) {
+                throw new TypeMismatchDataAccessException(
+                        "列 " + col.getFieldName() + " 声明为 char/Character，但库端值转换后为空字符串");
+            }
+            return text.charAt(0);
         }
         if (javaType == String.class) {
             return value.toString();
         }
-        return value;
+        // 未识别的类型组合：显式报错并带上列名与类型，不要把原始 JDBC 对象直接塞给 setter
+        // （setter 抛出的参数类型错误里没有列名，定位成本很高）
+        throw new TypeMismatchDataAccessException(
+                "列 " + col.getFieldName() + " 无法把库端值 " + value.getClass().getName()
+                        + " 转换为 " + javaType.getName() + "，请为该列配置 @Column(converter=...)");
     }
 
     /**

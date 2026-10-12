@@ -98,7 +98,7 @@ public class MysqlTableCreateHandler implements TableCreateHandler {
         sb.append("\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
         if (tableInfo.getComment() != null && !tableInfo.getComment().isEmpty()) {
-            sb.append(" COMMENT='").append(escapeComment(tableInfo.getComment())).append("'");
+            sb.append(" COMMENT='").append(MysqlSqlLiteral.escapeString(tableInfo.getComment())).append("'");
         }
 
         sb.append(";");
@@ -119,7 +119,9 @@ public class MysqlTableCreateHandler implements TableCreateHandler {
         }
 
         if (col.getDefaultValue() != null && !col.getDefaultValue().isEmpty()) {
-            sb.append(" DEFAULT ").append(col.getDefaultValue());
+            // 默认值按 SQL 字面量渲染：字符串形态转义后拼接，裸字面量（数字/函数/关键字）走白名单校验。
+            // 与 MysqlTableAlterHandler 共用 MysqlSqlLiteral，避免两条路径各自漏转义
+            sb.append(" DEFAULT ").append(MysqlSqlLiteral.defaultValue(col.getDefaultValue()));
         }
 
         // AUTO_INCREMENT 是 MySQL 专有语法：仅自增主键才加，且一个表至多一个 AUTO_INCREMENT 列
@@ -129,16 +131,9 @@ public class MysqlTableCreateHandler implements TableCreateHandler {
         }
 
         if (col.getComment() != null && !col.getComment().isEmpty()) {
-            sb.append(" COMMENT '").append(escapeComment(col.getComment())).append("'");
+            sb.append(" COMMENT '").append(MysqlSqlLiteral.escapeString(col.getComment())).append("'");
         }
 
         return sb.toString();
-    }
-
-    /**
-     * 转义 SQL 注释中的特殊字符：单引号会提前终结 COMMENT 字符串，换行会截断语句，均需反斜杠转义。
-     */
-    private static String escapeComment(String comment) {
-        return comment.replace("'", "\\'").replace("\n", "\\n");
     }
 }

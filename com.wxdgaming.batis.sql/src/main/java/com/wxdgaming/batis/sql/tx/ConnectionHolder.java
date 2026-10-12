@@ -31,13 +31,21 @@ public class ConnectionHolder {
     /** begin 之前的 autoCommit 值，完成时恢复（池化连接被复用，谁借到都得是"默认自动提交"的状态） */
     private final boolean previousAutoCommit;
     /**
-     * 事务内被直接写过 DB 的缓存 key（供回滚时精确失效缓存）
+     * 事务内被直接写过 DB、或读过（可能读到未提交行）的缓存 key（供回滚时精确失效缓存）
      * <p>只记 key 不记旧值：回滚后缓存里的内容已经不可信，正确做法是丢掉让下次读回源，
      * 而不是凭内存快照猜一个回去。</p>
+     * <p>由 {@code CachedBeanRunner} 追加，事务完成时由<b>一个</b>同步器统一遍历失效；
+     * 因此这里必须是并发容器（刷盘线程也可能追加）。</p>
      */
     private final Set<String> cacheKeysWritten = ConcurrentHashMap.newKeySet();
     /** 事务同步回调列表（注册顺序执行；用并发容器是因为刷盘线程也可能注册） */
     private final List<TransactionSynchronization> synchronizations = new CopyOnWriteArrayList<>();
+    /**
+     * "回滚失效缓存"的同步器是否已注册（原子抢占）
+     * <p>缓存 key 是按需追加的，但同步器每个事务只应注册一个：按 key 注册会让事务写 N 条
+     * 就产生 N 个回调对象，并在 {@code CopyOnWriteArrayList.add} 上退化成 O(N²)。</p>
+     */
+    private final AtomicBoolean cacheInvalidationRegistered = new AtomicBoolean(false);
     /** 是否只读事务：既用于连接层 setReadOnly，也是 Runner 写保护的判据 */
     private final boolean readOnly;
     /** 语句级超时（秒），0 表示不限制；由 QueryRunner 在每条语句上应用 */
@@ -125,6 +133,11 @@ public class ConnectionHolder {
     /** 原子抢占"afterCompletion 已通知"标记，仅第一次调用返回 true（保证回调恰好触发一次） */
     public boolean markCompletionNotified() {
         return completionNotified.compareAndSet(false, true);
+    }
+
+    /** 原子抢占"回滚失效缓存的同步器已注册"标记，仅第一次调用返回 true（每个事务只需一个） */
+    public boolean markCacheInvalidationRegistered() {
+        return cacheInvalidationRegistered.compareAndSet(false, true);
     }
 
     /** 记录回滚失败（连接状态不可信，归还前禁止恢复 autoCommit） */

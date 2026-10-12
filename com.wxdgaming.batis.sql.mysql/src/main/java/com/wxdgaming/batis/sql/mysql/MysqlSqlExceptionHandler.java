@@ -11,6 +11,7 @@ import com.wxdgaming.batis.exception.DuplicateKeyException;
 import com.wxdgaming.batis.exception.ForeignKeyConstraintViolationException;
 import com.wxdgaming.batis.exception.NotNullConstraintViolationException;
 import com.wxdgaming.batis.exception.QueryTimeoutException;
+import com.wxdgaming.batis.exception.RecoverableDataAccessException;
 import com.wxdgaming.batis.exception.UnknownColumnException;
 import com.wxdgaming.batis.sql.DefaultSqlExceptionHandler;
 import com.wxdgaming.batis.sql.SqlExceptionHandler;
@@ -76,6 +77,14 @@ public class MysqlSqlExceptionHandler implements SqlExceptionHandler {
                 return new BadSqlGrammarException(msg, sql, params, code, ex.getSQLState(), ex);
             case MysqlSqlCodes.ER_BAD_FIELD_ERROR:
                 return new UnknownColumnException(msg, sql, params, code, ex.getSQLState(), ex);
+            // 驱动侧连接类错误码（CR_*）：连接抖动属于可自愈的瞬时故障，必须可重试，
+            // 否则批量降级/重试补偿会把"重连就能好"的失败直接抛给业务
+            case MysqlSqlCodes.CR_SERVER_GONE_ERROR:
+            case MysqlSqlCodes.CR_SERVER_LOST:
+                return new RecoverableDataAccessException(msg, sql, params, code, ex.getSQLState(), ex);
+            case MysqlSqlCodes.CR_CONNECTION_ERROR:
+            case MysqlSqlCodes.CR_CONN_HOST_ERROR:
+                return new CannotGetJdbcConnectionException(msg, sql, params, code, ex.getSQLState(), ex);
             default:
                 // 数字码未命中（如驱动侧异常 errorCode=0），按 SQLState/关键字兜底
                 return DefaultSqlExceptionHandler.INSTANCE.translate(ex, sql, params);

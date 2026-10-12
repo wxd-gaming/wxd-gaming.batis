@@ -51,6 +51,21 @@ public final class MysqlSqlCodes {
     /** 查询超时 MAX_EXECUTION_TIME */
     public static final int ER_QUERY_TIMEOUT = 3024;
 
+    /*
+     * 以下四个是**客户端侧**错误码（CR_*，由 Connector/J 在连接层抛出，不走服务端 errmsg）。
+     * 它们与"可重试"判定直接相关：连接抖动本可自愈，落到"不可重试"的兜底会让业务直接失败。
+     * 常见情况下驱动的 SQLState 已是 08S01（已能被 SQLState 映射兜住），
+     * 但不同驱动/版本会用 HY000 上报，码表里显式列一条更稳。
+     */
+    /** 连接被拒绝 Can't connect to MySQL server */
+    public static final int CR_CONNECTION_ERROR = 2002;
+    /** 无法连接主机 Can't connect to MySQL server on host */
+    public static final int CR_CONN_HOST_ERROR = 2003;
+    /** 服务端已关闭连接 MySQL server has gone away */
+    public static final int CR_SERVER_GONE_ERROR = 2006;
+    /** 查询过程中连接丢失 Lost connection to MySQL server during query */
+    public static final int CR_SERVER_LOST = 2013;
+
     /** 纯常量表，禁止实例化 */
     private MysqlSqlCodes() {
     }

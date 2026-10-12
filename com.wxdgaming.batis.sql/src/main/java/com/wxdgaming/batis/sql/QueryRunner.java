@@ -1,11 +1,14 @@
 package com.wxdgaming.batis.sql;
 
+import com.wxdgaming.batis.exception.BatchUpdateFailedException;
+import com.wxdgaming.batis.exception.DataAccessException;
 import com.wxdgaming.batis.exception.IllegalTransactionStateException;
 import com.wxdgaming.batis.sql.tx.ConnectionHolder;
 import com.wxdgaming.batis.sql.tx.TxContext;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
+import java.sql.BatchUpdateException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -347,6 +350,10 @@ public class QueryRunner implements AutoCloseable {
      *         求和时按非负处理，见 {@link #sumRows}）
      */
     public int[] executeBatch(String sql, List<Object[]> batchArgs) {
+        // 空批次直接短路：既避免裸 NPE（batchArgs == null），也不为"什么都不做"去借一条连接
+        if (batchArgs == null || batchArgs.isEmpty()) {
+            return new int[0];
+        }
         checkWritable();
         final boolean dbg = log.isDebugEnabled();
         final long t0 = dbg ? System.nanoTime() : 0L;
@@ -358,11 +365,9 @@ public class QueryRunner implements AutoCloseable {
                 // 提交/回滚由外层 TransactionTemplate 统一管理（全有或全无）
                 try (PreparedStatement stmt = conn.prepareStatement(sql)) {
                     applyQueryTimeout(stmt);
-                    for (Object[] args : batchArgs) {
-                        bind(stmt, args);
-                        stmt.addBatch();
-                    }
+                    addBatch(stmt, batchArgs);
                     int[] result = stmt.executeBatch();
+                    checkExecuteFailures(result, batchArgs.size(), sql);
                     if (dbg) log.debug("[批量] 完成，耗时 {} ms，影响 {} 行",
                             (System.nanoTime() - t0) / 1_000_000, sumRows(result));
                     return result;
@@ -374,11 +379,11 @@ public class QueryRunner implements AutoCloseable {
             try {
                 conn.setAutoCommit(false);
                 try (PreparedStatement stmt = conn.prepareStatement(sql)) {
-                    for (Object[] args : batchArgs) {
-                        bind(stmt, args);
-                        stmt.addBatch();
-                    }
+                    addBatch(stmt, batchArgs);
                     int[] result = stmt.executeBatch();
+                    // 驱动以 EXECUTE_FAILED 表达失败而不抛异常时，绝不能继续 commit：
+                    // 那会把"部分成功"永久落库，而调用方以为整批都成了
+                    checkExecuteFailures(result, batchArgs.size(), sql);
                     conn.commit();
                     if (dbg) log.debug("[批量] 完成，耗时 {} ms，影响 {} 行",
                             (System.nanoTime() - t0) / 1_000_000, sumRows(result));
@@ -386,19 +391,97 @@ public class QueryRunner implements AutoCloseable {
                 }
             } catch (SQLException e) {
                 // 回滚失败不覆盖原始异常：真正的病因是 executeBatch 抛出的那个
-                try {
-                    conn.rollback();
-                } catch (SQLException ignored) {
-                }
-                throw jdbcTemplate.translateException(e, sql, null);
+                rollbackQuietly(conn);
+                throw translateBatchException(e, sql, batchArgs.size());
+            } catch (RuntimeException e) {
+                // 本地检测到的部分失败：先把这一小批回滚掉，
+                // 否则 finally 里恢复 autoCommit 会把它隐式提交
+                rollbackQuietly(conn);
+                throw e;
             } finally {
-                try {
-                    conn.setAutoCommit(autoCommit);
-                } catch (SQLException ignored) {
-                }
+                restoreAutoCommitQuietly(conn, autoCommit);
             }
         } catch (SQLException e) {
-            throw jdbcTemplate.translateException(e, sql, null);
+            throw translateBatchException(e, sql, batchArgs.size());
+        }
+    }
+
+    /** 绑定并累积一批参数（executeBatch 的两个分支共用，避免下标与空值处理分叉） */
+    private static void addBatch(PreparedStatement stmt, List<Object[]> batchArgs) throws SQLException {
+        for (Object[] args : batchArgs) {
+            bind(stmt, args);
+            stmt.addBatch();
+        }
+    }
+
+    /**
+     * 校验批量返回值：驱动可能不抛异常，而是用 {@code Statement.EXECUTE_FAILED(-3)} 表达"该条失败"
+     * （如 {@code continueBatchOnError=true}）。这种"部分成功"必须当场中断，否则
+     * {@code BatchResult} 会把失败条目记成成功，插入路径还会因生成键按序 zip 而写错主键。
+     *
+     * @param results  驱动返回的逐条结果
+     * @param expected 本次提交的条目数
+     * @param sql      触发批量的 SQL（进异常上下文）
+     */
+    // 包内可见：BeanRunner 的批量插入旁路（要回填生成键，不能走本类）复用同一套校验口径
+    void checkExecuteFailures(int[] results, int expected, String sql) {
+        int failedIndex = firstExecuteFailure(results, expected);
+        if (failedIndex >= 0) {
+            throw new BatchUpdateFailedException(
+                    "批量执行存在失败条目（首个失败下标 " + failedIndex + "，本批共 " + expected
+                            + " 条）：驱动以 EXECUTE_FAILED 返回而未抛异常，已中断本批以避免部分提交",
+                    sql, null, 0, null, failedIndex, null);
+        }
+    }
+
+    /**
+     * 定位首个失败条目下标。
+     * <p>
+     * 两种来源都适用：① 返回值里显式的 {@code EXECUTE_FAILED}；② 返回数组比提交条数短
+     * —— 驱动在抛 {@code BatchUpdateException} 时（默认 {@code continueBatchOnError=false}），
+     * {@code getUpdateCounts()} 只给到失败之前的语句，缺的那个位置就是失败点。
+     * </p>
+     *
+     * @return 失败下标；全部成功或无信息时返回 -1
+     */
+    private static int firstExecuteFailure(int[] results, int expected) {
+        if (results == null) return -1;
+        for (int i = 0; i < expected; i++) {
+            if (i >= results.length) return i;
+            if (results[i] == Statement.EXECUTE_FAILED) return i;
+        }
+        return -1;
+    }
+
+    /**
+     * 批量异常翻译：{@link BatchUpdateException} 携带的 {@code getUpdateCounts()}
+     * 是唯一能定位"第几条失败"的信息，不能像普通异常那样一译了之。
+     */
+    // 包内可见：与 checkExecuteFailures 一样供 BeanRunner 的批量插入旁路复用
+    DataAccessException translateBatchException(SQLException e, String sql, int expected) {
+        if (e instanceof BatchUpdateException bue) {
+            int failedIndex = firstExecuteFailure(bue.getUpdateCounts(), expected);
+            return new BatchUpdateFailedException(
+                    "批量执行失败"
+                            + (failedIndex >= 0 ? "（首个失败下标 " + failedIndex + "）" : "（驱动未提供可靠下标）"),
+                    sql, null, bue.getErrorCode(), bue.getSQLState(), failedIndex, bue);
+        }
+        return jdbcTemplate.translateException(e, sql, null);
+    }
+
+    /** 回滚并吞掉回滚自身的异常：调用点正在上抛真正的病因 */
+    private static void rollbackQuietly(Connection conn) {
+        try {
+            conn.rollback();
+        } catch (SQLException ignored) {
+        }
+    }
+
+    /** 恢复 autoCommit：失败也吞掉，池会在归还连接时重置 */
+    private static void restoreAutoCommitQuietly(Connection conn, boolean autoCommit) {
+        try {
+            conn.setAutoCommit(autoCommit);
+        } catch (SQLException ignored) {
         }
     }
 

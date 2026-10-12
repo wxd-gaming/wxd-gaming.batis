@@ -575,12 +575,19 @@ tx.executeWithoutResult(status -> { /* 无返回值场景 */ });
 `STATUS_COMMITTED = 0`、`STATUS_ROLLED_BACK = 1`、`STATUS_UNKNOWN = 2`。
 
 ```
-提交路径：所有 beforeCommit() → conn.commit() → 所有 afterCommit() → afterCompletion(COMMITTED)
-回滚路径：conn.rollback() → afterCompletion(ROLLED_BACK)
+提交路径：所有 beforeCommit() → conn.commit() → 解绑 TxContext + 归还连接
+          → 所有 afterCommit() → afterCompletion(COMMITTED)
+回滚路径：conn.rollback() → 解绑 TxContext + 归还连接 → afterCompletion(ROLLED_BACK)
 ```
 
+- **`afterCommit` / `afterCompletion` 跑在事务之外**：触发点固定在「解绑 + 归还连接」之后，
+  所以回调里的 SQL 用的是新借的 autocommit 连接，读到的也不再是「我在事务中」。
+  这一点对 Write-Behind 是硬要求：刷盘若在事务上下文里失败，
+  `requeueFailed` / `requeueDeleted` 会因 `txActive()` 仍为 true 直接返回，
+  而那批脏数据已被 `takeByPrefix` 摘走——数据静默丢失、调用方却收到「事务成功」。
 - `beforeCommit()` 抛异常 ⇒ 走回滚路径（此时 JDBC commit 尚未发出）。
-- `afterCommit()` 只在提交成功后执行，其异常只记 `warn`，不影响事务结果。
+- `afterCommit()` 只在提交成功后执行，其异常（含 `Error`）只记 `warn`，不影响事务结果，
+  也不会把已提交的事务误报成回滚。
 - `afterCompletion(int)` 保证**恰好触发一次**（`ConnectionHolder#markCompletionNotified()`
   用 `AtomicBoolean.compareAndSet` 把关），单个回调异常被吞掉。
 - 提交失败 ⇒ `rollback()` + `afterCompletion(UNKNOWN)` + 抛 `TransactionStartedException`；
@@ -671,27 +678,40 @@ public interface EntityCache<K, V> {
 补充语义（都来自实现，容易误判）：
 
 - **读缓存只覆盖 `queryById`**。`queryById` 走 `getIfPresent` → 未命中则 `getOrLoad` 单飞回源
-  并回填，且对回源结果再查一次 Tombstone。
-- `queryAll` / `queryOne` / `queryList` / `select` / `deleteAll` 是**直通**的
+  并回填，且对回源结果再查一次 Tombstone；命中值还会做一次实体类型校验，
+  类型不符（同表多实体共用 key）时按未命中重载，不会在调用点抛 `ClassCastException`。
+- `queryAll` / `queryOne` / `queryList` / `select` 是**直通**的
   （新开 `BeanRunner`，绕过缓存与脏表），因此**延迟写的改动在这里看不见**，
   而 `queryById` 看得见。这个不对称是有意设计。
+- **`deleteAll` 是例外**：它直连 DB 清表，同时按 key 前缀**失效该表的缓存**
+  （不清脏表——脏数据之后仍会被刷进这张已清空的表，需要确定语义请先 `flushAll()`）。
 - **`FlushResult` 报告「意图条数」与「实际影响行数」两组数字**：
   `getInsertCount/getUpdateCount/getDeleteCount` 与
   `getInsertAffected/getUpdateAffected/getDeleteAffected`，另有 `getTotalCount()` / `getTotalAffected()`
-  ——两者不一致时说明刷盘期间数据状态已变（例如行已被别处删除）。
+  ——`affected` 取自驱动回传的逐条行数，因此「更新一条库里不存在的行」会表现为
+  `updateCount=1, updateAffected=0`（只统计"语句没抛异常"是发现不了这种情况的）。
+  INSERT 侧驱动给不出行数时按「语句成功即 1 行」计。
 - 刷盘顺序固定为 **INSERT → UPDATE → DELETE**，按具体 bean 类分组后复用
   `BeanRunner` 的批量方法；刷盘失败时把失败 bean 重新放回脏表
   （`requeueFailed` / `requeueDeleted`，**事务内不重放**）并记 `warn`。
 - `flush(Object bean)` 会把该 key 从三张脏表摘出并就地执行，不走批量。
 - **无主键实体也能用延迟写**：主键缺失（`null`、数值 `0`、复合主键全缺）时分配临时 key
   `table:#pending:N`（按对象身份记账），待刷盘写回主键后再把 key 与 Tombstone 迁移到真实 key。
+- **临时 key 会在主键回写后迁移到正式 key**（立即写与批量刷盘两条路径都会迁移）：
+  迁移前 `queryById(真实主键)` 必然未命中，且临时条目无人可读地占着缓存容量。
+- **脏表与缓存是每个 `CachedBeanRunner` 实例一份**，不是进程全局的；
+  `JdbcTemplate#cachedBeanRunner()` 每次调用都会新建实例（各自一份缓存），
+  因此请把它当单例持有，否则多个实例之间互相看不见对方的脏数据与缓存。
 - `clearAll()` 会清空三张脏表 + 临时 key 映射 + 缓存，并 `warn` 提示有未保存数据。
 
 ### 数据一致性三重机制
 
 1. **手动刷盘**：`flushAll()` / `flush(Class)` / `flush(Object)`。
-2. **淘汰兜底**：缓存条目过期时 `onEvict` 回调自动把脏数据刷到 DB。
-3. **失败恢复**：刷盘失败后脏数据放回脏表，下次 flush 或淘汰时重试。
+2. **淘汰兜底**：缓存条目过期/被容量挤出时 `onEvict` 回调**同步**把脏数据刷到 DB
+   （本地实现用 Caffeine 的 `evictionListener`，默认在触发淘汰的线程上执行；
+   换成异步回调的实现会让这条"最后一道防线"在进程退出时失效）。
+3. **失败恢复**：刷盘失败后脏数据放回脏表（`putIfAbsent` 语义，不覆盖并发写入的新版本），
+   下次 flush 或淘汰时重试；事务内摘走的会在回滚时由补偿放回。
 
 ### 事务边界三条硬规则
 
@@ -793,6 +813,12 @@ PartitionBuilder.of(MysqlPartitionManager.INSTANCE, cache)
 - `DROP` 与 `TRUNCATE` 的分工是「删不删定义」：误用 `DROP` 会让边界消失，新数据全堆进兜底分区，
   按时间查询失去分区裁剪而退化成全表扫，**且不报错**。
 - `addPartition` 会走缓存去重（幂等），`dropPartition` **不做**存在性检查（点名删除，名字错由库端报错）。
+- **`build*` 在没有目标时返回 `null`（这是正常结果，不是错误）**：`buildPartition()` 在未指定分区类型、
+  或 RANGE/LIST 系列没有分区定义时返回 null；`buildDropPartition()` 在 `dropNames` 为空、
+  `buildTruncatePartition()` 在未指定分区名、`buildReorganizePartition()` 在缺原分区名/新定义时同样返回 null。
+  对应的 `executeXxx()` 会跳过执行并且**不动缓存**——早期这些路径会渲染出 `PARTITION BY RANGE(...) ( );`
+  或 `ALTER TABLE \`t\` ;` 这类非法 DDL，重跑还会撞 "Duplicate partition name"。
+- **`table(...)` 会重置上一轮的意图数据（含 `truncateName`）**：换表复用同一 builder 时不会拿旧表的分区名去 TRUNCATE 新表。
 - 分区名与边界值都是纯数字编码，便于比较：
   按日 `p20260801` / 值 `20260802`；按月 `p202608` / 值 `202609`（`YEAR*100+MONTH`，零填充）；
   按周 `p202632` / 值 `202633`（`YEARWEEK(col,1)` 口径，起点回退对齐周一）；
@@ -1214,36 +1240,56 @@ wxd-gaming.batis/
    报错是实例化异常而非数据访问异常，排查时容易误认为 SQL 问题。
 10. **`JSON` 存储模式在 MySQL 侧渲染为 `LONGTEXT`**，不是原生 `json` 列，无法用 JSON 函数查询。
 11. **`CachedBeanRunner` 的延迟写不落库**，返回值无意义（`null` / `-1`），跨进程不可见；
-    且只有 `queryById` 走缓存，`queryAll`/`queryOne`/`queryList`/`select`/`deleteAll` 直通数据库、
-    **看不到未刷盘的延迟写**。
+    且只有 `queryById` 走缓存，`queryAll`/`queryOne`/`queryList`/`select` 直通数据库、
+    **看不到未刷盘的延迟写**。`deleteAll` 是例外：它清库之外还会失效该表缓存。
 12. **`MysqlTableAlterHandler` 从不生成 `DROP COLUMN`**：实体里删掉的字段，库端的列会永久保留
-    （只删对应索引）。想清列必须手工 DDL。
+    （只删对应索引）。想清列必须手工 DDL。索引则相反——实体里没有声明的索引会被 `DROP`，
+    现在会逐条 `warn` 出索引名，也可用 `setDropRedundantIndexes(false)` 改为只告警不删除。
 13. **JSON 反序列化刻意关闭 `Feature.SupportAutoType`**（防 fastjson autoType 反序列化攻击），
-    因此多态子类元素无法靠 JSON 里的 `@type` 还原。注意 `@Column#storageMode` 的 Javadoc
-    仍写着「需要 SupportAutoType」，该注释已过时。
-14. **`SelectQuery#toParams()` 用 `List.of(plan.params())`**，若某个绑定值为 `null`
-    会抛 `NullPointerException`（`List.of` 不接受 null 元素）；`toSql()` 不受影响。
-15. **`JdbcTemplate#loadAllTables()` 会静默返回**：未注入 `dbMetaProvider` 或取不到 catalog 时
-    不加载任何表，`tableCache` 可能保持 `null`。
-16. **`PartitionCache` 把元数据读取失败降级为「空分区集」**，去重随之静默失效，
+    因此多态子类元素无法靠 JSON 里的 `@type` 还原。
+14. **列的字符集/排序规则只告警不修复**：两边 `COLUMN_TYPE` 相同而字符集不同（库端 latin1、
+    实体期望 utf8mb4）时，类型比对发现不了，框架会在 `checkTable` 时 `warn` 出列名，
+    但不会自动 `MODIFY`——实体注解目前无法表达 charset/collation。
+15. **自增属性只单向修复**：实体声明 `@GeneratedValue(strategy = IDENTITY)` 而库端列不是
+    `AUTO_INCREMENT` 时会发 `MODIFY COLUMN` 修回来；反方向（库端有自增、实体没声明）只 `warn`，
+    避免把存量表人工加的自增属性摘掉。
+16. **表注释只单向修复**：实体声明了 `@Table(comment=...)` 且与库端不同才发 `COMMENT='...'`；
+    实体没写注释时不会清空库端已有注释。
+17. **`JdbcTemplate#loadAllTables()` 会静默返回**：未注入 `dbMetaProvider` 或取不到 catalog 时
+    不加载任何表，`tableCache` 可能保持 `null`。`checkTable` 之后的刷新是**单表增量**的
+    （3 条元数据查询），整段以内部锁互斥，避免并发重复下发 DDL。
+18. **`PartitionCache` 把元数据读取失败降级为「空分区集」**，去重随之静默失效，
     补分区作业会重复下发 `ADD PARTITION`（库端报分区已存在）。
-17. **`@Column#converter` 在解析期实例化**，缺无参构造会让整个实体解析失败，
-    报错是实例化异常而非数据访问异常，排查时容易误认为 SQL 问题。
-18. **索引按名字去重**，同名索引会被静默丢弃——命名冲突比缺索引更难查，建议显式命名。
-19. **`@Entity` 与 `@Table` 不可互补**：`@Table` 存在时 `@Entity` 被完全忽略，
-    所以用 `@Entity` 就没法配复合索引（只能靠字段级 `@Index`）。
-20. **`EntityParser` 缓存是强引用且无上限**：类只解析一次、无 TTL、无弱引用，
+19. **`EntityParser` 缓存是强引用且无上限**：类只解析一次、无 TTL、无弱引用，
     热更实体定义必须显式 `clearCache` / `clearAll` 或重启。
-21. **分区模块的分层并不彻底**：`RANGE_COLUMNS` / `LIST_COLUMNS` 是 MySQL 特化常量放在通用枚举里，
+20. **分区模块的分层并不彻底**：`RANGE_COLUMNS` / `LIST_COLUMNS` 是 MySQL 特化常量放在通用枚举里，
     边界子句文本在 `PartitionBuilder` 中拼接。换方言时这两处需要下沉。
-22. **`logback-test.xml` 引用了本仓库未定义的类**
+21. **`logback-test.xml` 引用了本仓库未定义的类**
     `ch.qos.logback.core.LogbackResetTimeFilter`（`file_info` appender 的 filter），
     它必须来自外部依赖，否则测试日志配置会加载失败。
-23. ~~**根 POM 的编译版本配置有冗余**~~ **已修复**：原先 `maven.compiler.source/target`
+22. **DDL 里的 `DEFAULT` 与 `COMMENT` 现在走统一的转义工具**（`MysqlSqlLiteral`）：
+    字符串默认值必须自带引号（如 `defaultValue = "'unknown'"`），裸字面量（`0`、`CURRENT_TIMESTAMP`、
+    `CURRENT_TIMESTAMP(3)`）走字符白名单；两者都不符合会抛 `IllegalArgumentException` 而不是拼出坏 DDL。
+23. **遗留的字符串 `whereSection` API 收紧了闸门**：除原有的分号/注释/UNION 黑名单外，
+    现在要求占位符数量与参数数量一致，且"没有参数却含字符串字面量"会被直接拒绝
+    （`' OR '1'='1` 这类绕过黑名单的经典注入正落在这条上）。迁移到查询 DSL 即可绕开。
+24. **批量执行的"部分失败"现在会中断本批**：驱动若用 `Statement.EXECUTE_FAILED(-3)` 返回失败
+    而不抛异常，`QueryRunner#executeBatch` 与 `BeanRunner` 的批量插入旁路会在 `commit` 之前
+    回滚并抛 `BatchUpdateFailedException`（带首个失败下标）；`BatchUpdateException` 的
+    `getUpdateCounts()` 也不再被丢弃，用于把失败定位到具体条目。
+25. **缓存 key 只按表名隔离**：两个实体映射同一张表时会共用 key，`queryById` 已加类型校验
+    （不符时按未命中重载，不会 `ClassCastException`），但两者会互相挤占同一条缓存条目。
+26. **MySQL 客户端侧错误码已映射**：2006/2013 归 `RecoverableDataAccessException`（可重试），
+    2002/2003 归 `CannotGetJdbcConnectionException`；SQLState `57`/`HYT`（语句超时、查询被取消）
+    归 `QueryTimeoutException`，避免瞬时超时被当成"未知错误不可重试"而被批量降级放大。
+27. ~~**根 POM 的编译版本配置有冗余**~~ **已修复**：原先 `maven.compiler.source/target`
     被声明两次，后一次用 `${java.version}`，而该属性在 POM 中**未定义**，实际取自运行
     Maven 的 JDK 保留系统属性——在 JDK 21 下碰巧与前面写死的 `21` 一致，换到 JDK 25
     编译就会把字节码目标提到 25，新环境因此表现不一致。现在根 POM 只保留
     `<java.version>21</java.version>` 与 `<maven.compiler.release>${java.version}</maven.compiler.release>`：
     `release` 同时约束语法级别和可引用的 JDK API，无法再跟随构建机 JDK 漂移。
-24. **仓库仍无 LICENSE、无 `distributionManagement`**，构件需本地 `mvnw install` 后使用；
+28. **仓库仍无 LICENSE、无 `distributionManagement`**，构件需本地 `mvnw install` 后使用；
     `mvnw` wrapper 已补齐（Maven 3.9.9，`only-script` 模式，含 SHA-256 校验）。
+29. **父 POM 把 `fastjson` / `logback-classic` / `commons-*` / `protostuff` 作为 compile 依赖下发**，
+    使用方会被传递引入这些库（含一个日志绑定）。若要嵌入宿主应用，建议按需 `optional`
+    或在自己的 POM 里排除。

@@ -25,7 +25,9 @@ import java.util.regex.Pattern;
 public class MysqlTemplate extends JdbcTemplate {
 
     /** 用于提取 JDBC URL 中数据库名的正则 */
-    private static final Pattern DB_NAME_PATTERN = Pattern.compile("jdbc:mysql://[^/]+/([^?&#]+)");
+    private static final Pattern DB_NAME_PATTERN = Pattern.compile("jdbc:(?:mysql|mariadb)://[^/]+/([^?&#]+)");
+    /** 库名白名单：它会被拼进标识符位置，必须限制字符集 */
+    private static final Pattern DB_NAME_SAFE = Pattern.compile("[A-Za-z0-9_$]+");
     private static final Logger log = LoggerFactory.getLogger(MysqlTemplate.class);
 
     /**
@@ -89,7 +91,7 @@ public class MysqlTemplate extends JdbcTemplate {
         if (dbName != null) {
             // 将 URL 中的目标库替换为 mysql 系统库，用于执行 CREATE DATABASE
             String systemJdbcUrl = jdbcUrl.replaceFirst(
-                    "(jdbc:mysql://[^/]+/)[^?&#]+", "$1mysql"
+                    "(jdbc:(?:mysql|mariadb)://[^/]+/)[^?&#]+", "$1mysql"
             );
             try (Connection conn = DriverManager.getConnection(
                     systemJdbcUrl, config.getUsername(), config.getPassword()
@@ -112,18 +114,27 @@ public class MysqlTemplate extends JdbcTemplate {
     }
 
     /**
-     * 从 JDBC URL 中提取数据库名
+     * 从 JDBC URL 中提取数据库名（同时兼容 {@code jdbc:mysql://} 与 {@code jdbc:mariadb://}）。
      * <p>例如 {@code jdbc:mysql://10.28.0.26:13306/test?serverTimezone=Asia/Shanghai} → {@code test}</p>
+     * <p>只接受字母数字与 {@code _ $}：库名会被拼进 {@code CREATE DATABASE} 的标识符位置，
+     * 含反引号之类的字符可以闭合标识符并注入后续 SQL。非法名字不抛异常而是返回 null
+     * （跳过自动建库）——数据库可能本来就已存在，配置不合法不该演变成启动失败，
+     * 但必须留一条 warn 让人看见。</p>
      *
      * @param jdbcUrl MySQL JDBC 连接串
-     * @return 数据库名，若 URL 中不包含则返回 null
+     * @return 数据库名；URL 中不包含或名字不合法时返回 null
      */
     private static String extractDbName(String jdbcUrl) {
         if (jdbcUrl == null) return null;
         Matcher m = DB_NAME_PATTERN.matcher(jdbcUrl);
         if (!m.find()) return null;
         String dbName = m.group(1);
-        return dbName.isEmpty() ? null : dbName;
+        if (dbName.isEmpty()) return null;
+        if (!DB_NAME_SAFE.matcher(dbName).matches()) {
+            log.warn("JDBC URL 中的数据库名 '{}' 只允许字母数字与 _ $，已跳过自动建库（避免拼接出非法/可注入的 DDL）", dbName);
+            return null;
+        }
+        return dbName;
     }
 
 }

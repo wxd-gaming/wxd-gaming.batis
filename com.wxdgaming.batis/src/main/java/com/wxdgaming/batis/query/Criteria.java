@@ -1,7 +1,10 @@
 package com.wxdgaming.batis.query;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * 查询条件表达式树（不可变，线程安全，可作为常量复用）
@@ -87,15 +90,21 @@ public final class Criteria {
 
     /** 取反 */
     public static Criteria not(Criteria condition) {
-        return new Criteria(Kind.NOT, null, List.of(condition));
+        return new Criteria(Kind.NOT, null, List.of(Objects.requireNonNull(condition, "not 的条件不能为 null")));
     }
 
     /**
      * 原始 SQL 片段逃生舱（有注入风险，仅限受信输入），如 {@code Criteria.raw("JSON_EXTRACT(meta, '$.k') = ?", v)}
+     * <p>与其它构造入口不同，这里<b>允许</b>参数里出现 null：片段由调用方自己写，
+     * 绑定 NULL（如 {@code "col IS NOT DISTINCT FROM ?"}）是合法用法，而 {@code List.of} 会直接抛无消息的 NPE。</p>
      */
     public static Criteria raw(String fragment, Object... params) {
+        List<Object> values = (params == null || params.length == 0)
+                ? List.of()
+                : Collections.unmodifiableList(Arrays.asList(params.clone()));
         return new Criteria(Kind.LEAF,
-                new Criterion(fragment, CriterionOperator.RAW, List.of(params)), null);
+                new Criterion(Objects.requireNonNull(fragment, "raw 片段不能为 null"),
+                        CriterionOperator.RAW, values), null);
     }
 
     /**
@@ -115,14 +124,18 @@ public final class Criteria {
         return new Criteria(kind, null, List.copyOf(list));
     }
 
-    /** 与另一条件 AND */
+    /**
+     * 与另一条件 AND
+     * <p>传 null 直接快速失败，不静默丢弃：若 other 本应来自权限/租户/状态过滤而因上游 bug 为 null，
+     * 丢弃它等于把过滤条件无声放宽（结果集扩大），是排查成本最高的一类越权读。</p>
+     */
     public Criteria and(Criteria other) {
-        return allOf(this, other);
+        return allOf(this, Objects.requireNonNull(other, "and 的条件不能为 null"));
     }
 
-    /** 与另一条件 OR */
+    /** 与另一条件 OR（同样拒绝 null，理由见 {@link #and(Criteria)}） */
     public Criteria or(Criteria other) {
-        return anyOf(this, other);
+        return anyOf(this, Objects.requireNonNull(other, "or 的条件不能为 null"));
     }
 
     /** 取反（实例风格） */

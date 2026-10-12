@@ -1,6 +1,7 @@
 package com.wxdgaming.batis.sql.query;
 
 import com.wxdgaming.batis.exception.TooManyResultsException;
+import com.wxdgaming.batis.exception.TypeMismatchDataAccessException;
 import com.wxdgaming.batis.model.TableInfo;
 import com.wxdgaming.batis.parser.EntityParser;
 import com.wxdgaming.batis.query.Criteria;
@@ -12,6 +13,8 @@ import com.wxdgaming.batis.sql.JdbcTemplate;
 import com.wxdgaming.batis.sql.QueryRunner;
 import com.wxdgaming.batis.sql.ResultSetHandlers;
 
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -171,14 +174,25 @@ public final class SelectQuery<T> implements SelectSqlBuilder.SelectQuerySpec {
 
     /**
      * 条件计数（忽略排序与分页）
-     * <p>返回基本类型 long，读不到值时给 0 而不是抛：COUNT 一定有一行一列，
-     * 拿不到数字只可能是处理器异常，此时 0 与"确实没数据"在业务上通常同走向。</p>
+     * <p>
+     * COUNT 必然返回一行一列，因此读不到数字只可能是方言/处理器出了问题
+     * （例如把计数报成字符串）。这种情况抛异常而不是静默返回 0：
+     * 0 会让 {@link #exists()} 误报 false、分页的 total 归零，业务表现为"数据明明在却查不到"，
+     * 而且没有任何日志线索。
+     * </p>
+     *
+     * @throws TypeMismatchDataAccessException COUNT 结果不是数值类型
      */
     public long count() {
         SelectSqlBuilder.Plan plan = buildPlan(true, null, null);
         try (QueryRunner qr = new QueryRunner(template)) {
             Object cell = qr.query(plan.sql(), plan.params(), ResultSetHandlers.firstCell());
-            return cell instanceof Number n ? n.longValue() : 0L;
+            if (cell instanceof Number n) {
+                return n.longValue();
+            }
+            throw new TypeMismatchDataAccessException(
+                    "COUNT 结果不是数值类型（实际为 "
+                            + (cell == null ? "null" : cell.getClass().getName()) + "）: " + plan.sql());
         }
     }
 
@@ -226,9 +240,14 @@ public final class SelectQuery<T> implements SelectSqlBuilder.SelectQuerySpec {
         return buildPlan(false, null, null).sql();
     }
 
-    /** 渲染参数序列（不执行），顺序与 SQL 占位符一致，可与 {@link #toSql()} 配对打印 */
+    /**
+     * 渲染参数序列（不执行），顺序与 SQL 占位符一致，可与 {@link #toSql()} 配对打印。
+     * <p>用 {@code Arrays.asList} 而不是 {@code List.of}：{@code Criteria.raw(...)} 允许绑定 null
+     * （片段由调用方书写，{@code IS NOT DISTINCT FROM ?} 这类写法是合法的），
+     * 而 {@code List.of} 遇到 null 元素会抛无消息的 NPE，把"渲染参数"变成新的坑。</p>
+     */
     public List<Object> toParams() {
-        return List.of(buildPlan(false, null, null).params());
+        return Collections.unmodifiableList(Arrays.asList(buildPlan(false, null, null).params()));
     }
 
     public JdbcTemplate getTemplate() {

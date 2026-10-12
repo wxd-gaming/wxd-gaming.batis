@@ -7,12 +7,17 @@ import com.wxdgaming.batis.parser.EntityParser;
 import java.lang.reflect.InvocationTargetException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * 缓存 Key 构建工具
  * <p>Key 格式: {@code tableName:pkValue}，通过表名前缀天然隔离不同实体类型。</p>
- * <p>表名统一转小写，消除不同数据库/连接对表名大小写敏感性差异带来的"同实体不同 Key"问题；
- * 前缀（含结尾冒号）供上层按表批量摘取脏数据复用，故临时 Key 也必须保留该前缀才能命中前缀过滤。</p>
+ * <p>表名统一转小写（固定 {@link Locale#ROOT}，避免土耳其语等默认区域把 {@code I} 折成 {@code ı}
+ * 导致同一张表在不同节点算出不同 Key），消除不同数据库/连接对表名大小写敏感性差异带来的
+ * "同实体不同 Key"问题；前缀（含结尾冒号）供上层按表批量摘取脏数据复用，故临时 Key 也必须保留该前缀。</p>
+ * <p><b>已知边界</b>：Key 只按表名隔离，因此"两个实体类映射同一张表"（读写模型分离等）会共用同一个 Key。
+ * {@code CachedBeanRunner#queryById} 对命中值做了类型校验并按未命中重载，不会串型返回，
+ * 但两个模型会互相挤占同一条缓存；{@code flush(Class)} 的前缀过滤也会把两类当一张表一起刷。</p>
  *
  * @author wxd-gaming(無心道, 15388152619)
  * @version 2026-08-05
@@ -24,7 +29,7 @@ public final class CacheKeyBuilder {
      */
     public static String buildKey(Class<?> entityClass, Object id) {
         TableInfo ti = EntityParser.parse(entityClass);
-        return ti.getTableName().toLowerCase() + ":" + idToString(id);
+        return ti.getTableName().toLowerCase(Locale.ROOT) + ":" + idToString(id);
     }
 
     /**
@@ -33,7 +38,7 @@ public final class CacheKeyBuilder {
     public static String buildKey(Object bean) {
         TableInfo ti = EntityParser.parse(bean.getClass());
         Object pk = extractPk(ti, bean);
-        return ti.getTableName().toLowerCase() + ":" + idToString(pk);
+        return ti.getTableName().toLowerCase(Locale.ROOT) + ":" + idToString(pk);
     }
 
     /**
@@ -42,7 +47,7 @@ public final class CacheKeyBuilder {
      */
     public static String keyPrefix(Class<?> entityClass) {
         TableInfo ti = EntityParser.parse(entityClass);
-        return ti.getTableName().toLowerCase() + ":";
+        return ti.getTableName().toLowerCase(Locale.ROOT) + ":";
     }
 
     /**

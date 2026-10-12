@@ -378,21 +378,39 @@ public class EntityParser {
             }
         }
 
-        // 3. @Column(unique=true) → 自动生成唯一索引
+        // 3. @Column(unique=true) → 保证该列上存在一个单列唯一索引
         for (ColumnInfo col : columns.values()) {
-            if (col.isUnique()) {
-                boolean alreadyExists = indexes.stream().anyMatch(idx ->
-                        idx.getColumns().size() == 1
-                                && idx.getColumns().get(0).equals(col.getColumnName())
-                );
-                if (!alreadyExists) {
-                    IndexInfo indexInfo = new IndexInfo();
-                    indexInfo.setName("uk_" + col.getColumnName());
-                    indexInfo.setColumns(List.of(col.getColumnName()));
-                    indexInfo.setUnique(true);
-                    indexes.add(indexInfo);
+            if (!col.isUnique()) continue;
+            // 判重必须看 isUnique：只看"同列是否已有单列索引"会让一条普通的查询索引
+            // （@Index(unique=false)）把唯一约束静默吞掉——数据库层不再拦重复值，
+            // 而结构比对（库端 vs 实体）也看不到这个缺失的唯一键。
+            IndexInfo sameColumn = indexes.stream()
+                    .filter(idx -> idx.getColumns() != null && idx.getColumns().size() == 1
+                            && idx.getColumns().get(0).equals(col.getColumnName()))
+                    .findFirst().orElse(null);
+            if (sameColumn != null && sameColumn.isUnique()) continue;
+
+            String ukName = "uk_" + col.getColumnName();
+            IndexInfo sameName = indexes.stream()
+                    .filter(idx -> ukName.equals(idx.getName()))
+                    .findFirst().orElse(null);
+            if (sameName != null) {
+                boolean sameSingleColumn = sameName.getColumns() != null && sameName.getColumns().size() == 1
+                        && sameName.getColumns().get(0).equals(col.getColumnName());
+                if (sameSingleColumn) {
+                    // 用户手写的同名索引正好覆盖这一列：就地升级为唯一索引，名字不用改
+                    sameName.setUnique(true);
+                    continue;
                 }
+                // 名字被别的定义占用：既不静默丢弃唯一约束，也不擅自改动别人索引的语义
+                throw new IllegalStateException("@Column(unique=true) 需要生成索引 " + ukName
+                        + "，但实体上已存在同名索引（列: " + sameName.getColumns() + "），请为该索引改名");
             }
+            IndexInfo indexInfo = new IndexInfo();
+            indexInfo.setName(ukName);
+            indexInfo.setColumns(List.of(col.getColumnName()));
+            indexInfo.setUnique(true);
+            indexes.add(indexInfo);
         }
 
         return indexes.stream()
@@ -419,15 +437,20 @@ public class EntityParser {
         if (javaType == UUID.class && sqlType == SqlType.VARCHAR) {
             columnInfo.setLength(36);
         }
-        // 定点数自动档固定精度契约（避免注解默认 length=255 污染精度）：
-        // BigDecimal 走 DECIMAL(20,6)；BigInteger 是任意精度整数，走 DECIMAL(65,0)（MySQL DECIMAL 精度上限 65 位）
-        if (storageMode == StorageMode.AUTO && sqlType == SqlType.DECIMAL) {
-            if (javaType == BigInteger.class) {
-                columnInfo.setLength(65);
-                columnInfo.setScale(0);
-            } else {
-                columnInfo.setLength(20);
-                columnInfo.setScale(6);
+        // 定点数精度契约：BigDecimal 走 DECIMAL(20,6)；BigInteger 是任意精度整数，走 DECIMAL(65,0)
+        // （65 是 MySQL DECIMAL 的精度上限）。
+        // AUTO 档恒定套用默认值，保证存量库零漂移；显式指定 DECIMAL 档时只在"没有可用精度"时兜底——
+        // 否则注解默认的 length=255 会一路渲染成 DECIMAL(255,0)，建表直接报 1426。
+        if (sqlType == SqlType.DECIMAL) {
+            boolean usablePrecision = columnInfo.getLength() > 0 && columnInfo.getLength() <= 65;
+            if (!usablePrecision || storageMode == StorageMode.AUTO) {
+                if (javaType == BigInteger.class) {
+                    columnInfo.setLength(65);
+                    columnInfo.setScale(0);
+                } else {
+                    columnInfo.setLength(20);
+                    columnInfo.setScale(6);
+                }
             }
         }
         // char/Character 固定 1 字符宽度（与原字面量推断 CHAR(1) 一致）

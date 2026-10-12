@@ -92,7 +92,9 @@ public interface BeanToSelectHandler {
      *       追加顺序也要换成 offset 在前，否则值会绑到错的占位符上，
      *       表现为"翻页结果偏移量莫名不对"，是最难查的一类 bug；</li>
      *   <li>limit / offset 为 null 或小于等于 0 时既不追加子句也不追加参数——
-     *       "不分页"和"分页 0 条"是两回事。</li>
+     *       "不分页"和"分页 0 条"是两回事。默认实现额外处理了"只给 offset"：MySQL 不接受
+     *       没有 LIMIT 的 OFFSET，因此会补一个无上限的 {@code LIMIT 18446744073709551615}
+     *       （该常量不占位符、不进参数，所以参数顺序不变）。</li>
      * </ul>
      * <p>默认实现把两个值都做成占位符绑定，分页数字因此不出现在 SQL 文本里，
      * 没有注入面，也便于语句复用。</p>
@@ -103,11 +105,20 @@ public interface BeanToSelectHandler {
      * @param offset 跳过条数，null 或小于等于 0 表示不跳过
      */
     default void appendPaging(StringBuilder sql, List<Object> params, Integer limit, Integer offset) {
-        if (limit != null && limit > 0) {
+        boolean hasLimit = limit != null && limit > 0;
+        boolean hasOffset = offset != null && offset > 0;
+        if (!hasLimit && !hasOffset) {
+            return;
+        }
+        if (hasLimit) {
             sql.append(" LIMIT ?");
             params.add(limit);
+        } else {
+            // MySQL 的分页语法要求 OFFSET 必须伴随 LIMIT：只给 offset 时补一个"无上限"的 LIMIT。
+            // 否则会渲染出 `... OFFSET ?`，运行期直接语法错误（而这是可渲染期就避免的事）。
+            sql.append(" LIMIT 18446744073709551615");
         }
-        if (offset != null && offset > 0) {
+        if (hasOffset) {
             sql.append(" OFFSET ?");
             params.add(offset);
         }

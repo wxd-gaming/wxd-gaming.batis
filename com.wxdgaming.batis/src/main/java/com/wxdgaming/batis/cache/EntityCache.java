@@ -52,6 +52,23 @@ public interface EntityCache<K, V> {
      */
     void remove(K key);
 
+    /**
+     * 按 key 前缀移除缓存（整表失效用）
+     * <p>key 前缀由 {@link CacheKeyBuilder#keyPrefix(Class)} 定义（形如 {@code tablename:}）。
+     * 用于 {@code deleteAll} 这类"整张表的行都没了"的场景：此时逐个 key 无从枚举，
+     * 但缓存里可能还留着整表的数据，不失效就会继续被读到。</p>
+     * <p>语义要求与 {@link #remove} 相同：属于主动移除，<b>不得</b>触发 {@link #onEvict}
+     * （那会把已经确定要丢弃的数据又刷回库里）。</p>
+     * <p>默认实现抛 {@link UnsupportedOperationException}：无法枚举 key 的实现（部分远程缓存）
+     * 应当显式拒绝，让调用方明确知道"这条路径上的缓存不会自动失效"，而不是静默什么都不做。</p>
+     *
+     * @param keyPrefix key 前缀
+     */
+    default void invalidateByPrefix(K keyPrefix) {
+        throw new UnsupportedOperationException(
+                getClass().getName() + " 未实现按前缀失效，请自行清理或改用 clear()");
+    }
+
     /** 清空所有缓存（不保证触发 onEvict，因此未刷盘的脏数据不能只靠它收尾） */
     void clear();
 

@@ -64,16 +64,21 @@ public class MysqlDbMetaHandler implements DbMetaHandler {
      * <p>关键列 COLUMN_TYPE 会带回 MySQL 原生形态（整数列含显示宽度，如 int(11)），这正是
      * normalize 必须剥宽度才能与实体侧对齐的源头；{@code ORDER BY ORDINAL_POSITION} 保证列按建表顺序返回，
      * 与实体侧的列顺序可比（SchemaDriftIT 的快照正是按此顺序逐行对拍）。</p>
+     * <p>另外三个字段各有明确用途，不是"顺手多查"：{@code CHARACTER_SET_NAME}/{@code COLLATION_NAME}
+     * 用于发现"两边 COLUMN_TYPE 相同但字符集不同"的漂移（写 emoji 才会暴露的那种）；
+     * {@code EXTRA} 用于比对自增属性（{@code auto_increment}）。</p>
      */
     @Override
     public String columnListSql() {
-        return "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_COMMENT, COLUMN_KEY, EXTRA "
+        return "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_COMMENT, COLUMN_KEY, EXTRA, "
+                + "CHARACTER_SET_NAME, COLLATION_NAME "
                 + "FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? "
                 + "ORDER BY ORDINAL_POSITION";
     }
 
     /**
-     * 列 ResultSet → ColumnInfo：只填库端可读到的属性（类型字符串、可空、默认值、注释、是否主键）。
+     * 列 ResultSet → ColumnInfo：只填库端可读到的属性（类型字符串、可空、默认值、注释、是否主键、
+     * 字符集/排序规则、EXTRA）。
      * <p>注意此处 {@code setType} 存的是原生 COLUMN_TYPE（带显示宽度），逻辑类型 sqlType 留空——
      * 库端只有物理形态，判定漂移时靠 normalize 而非 sqlType 渲染。主键识别用 {@code COLUMN_KEY='PRI'}。</p>
      */
@@ -89,6 +94,9 @@ public class MysqlDbMetaHandler implements DbMetaHandler {
                 col.setDefaultValue(handleDefaultValue(rs.getString("COLUMN_DEFAULT")));
                 col.setComment(rs.getString("COLUMN_COMMENT") != null ? rs.getString("COLUMN_COMMENT") : "");
                 col.setPrimaryKey("PRI".equals(rs.getString("COLUMN_KEY")));
+                col.setCharacterSet(rs.getString("CHARACTER_SET_NAME"));
+                col.setCollation(rs.getString("COLLATION_NAME"));
+                col.setExtra(rs.getString("EXTRA") != null ? rs.getString("EXTRA") : "");
                 columns.add(col);
             }
             return columns;

@@ -78,20 +78,39 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
         Class<?> paramType = setter.getParameterTypes()[0];
         Object arg;
         if (paramType == long.class || paramType == Long.class) arg = genId.longValue();
-        else if (paramType == int.class || paramType == Integer.class) arg = genId.intValue();
-        else if (paramType == short.class || paramType == Short.class) arg = genId.shortValue();
-        else if (paramType == byte.class || paramType == Byte.class) arg = genId.byteValue();
-        else if (paramType == double.class || paramType == Double.class) arg = genId.doubleValue();
+        else if (paramType == int.class || paramType == Integer.class) {
+            arg = (int) requireInRange(genId, col, Integer.MIN_VALUE, Integer.MAX_VALUE, "int");
+        } else if (paramType == short.class || paramType == Short.class) {
+            arg = (short) requireInRange(genId, col, Short.MIN_VALUE, Short.MAX_VALUE, "short");
+        } else if (paramType == byte.class || paramType == Byte.class) {
+            arg = (byte) requireInRange(genId, col, Byte.MIN_VALUE, Byte.MAX_VALUE, "byte");
+        } else if (paramType == double.class || paramType == Double.class) arg = genId.doubleValue();
         else if (paramType == float.class || paramType == Float.class) arg = genId.floatValue();
         else if (paramType == BigDecimal.class) arg = BigDecimal.valueOf(genId.longValue());
         else if (paramType == BigInteger.class) arg = BigInteger.valueOf(genId.longValue());
-        else if (paramType == AtomicInteger.class) arg = new AtomicInteger(genId.intValue());
-        else if (paramType == AtomicLong.class) arg = new AtomicLong(genId.longValue());
+        else if (paramType == AtomicInteger.class) {
+            arg = new AtomicInteger((int) requireInRange(genId, col, Integer.MIN_VALUE, Integer.MAX_VALUE, "int"));
+        } else if (paramType == AtomicLong.class) arg = new AtomicLong(genId.longValue());
         else arg = genId;
         try {
             setter.invoke(bean, arg);
         } catch (Exception e) {
             throw new RuntimeException("通过 setter 写回字段 " + col.getFieldName() + " 失败", e);
         }
+    }
+
+    /**
+     * 收窄前做范围校验：生成键超出字段类型范围时抛错，而不是静默溢出成负数。
+     * <p>
+     * {@code intValue()} 在自增 ID 超过 int 上限时会回绕成负数，调用方拿这个负 ID 继续关联，
+     * 表现为"查不到自己刚插入的行"这类难查的问题；{@code byte/short} 截断更隐蔽。</p>
+     */
+    private static long requireInRange(Number genId, ColumnInfo col, long min, long max, String typeName) {
+        long value = genId.longValue();
+        if (value < min || value > max) {
+            throw new IllegalStateException("字段 " + col.getFieldName() + " 声明为 " + typeName
+                    + "，但数据库生成的键值 " + value + " 超出其取值范围，请把该字段改为 long/Long");
+        }
+        return value;
     }
 }

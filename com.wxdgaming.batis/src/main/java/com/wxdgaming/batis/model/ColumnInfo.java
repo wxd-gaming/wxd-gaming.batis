@@ -66,6 +66,19 @@ public class ColumnInfo {
     private Method writeMethod;
     /** 自定义类型转换器，从 @Column(converter=...) 解析而来，可能为 null */
     private TypeConverter<?, ?> converter;
+    /**
+     * 库端列的字符集（仅由数据库元数据回填，实体解析不产出）
+     * <p>用于发现"库端 latin1 / 实体期望 utf8mb4"这类漂移：两边的 COLUMN_TYPE 完全相同，
+     * 只比类型永远发现不了，而写入非 ASCII 字符时会被截断或直接报 1366。</p>
+     */
+    private String characterSet;
+    /** 库端列的排序规则（仅由数据库元数据回填） */
+    private String collation;
+    /**
+     * 库端列的 EXTRA 信息（如 {@code auto_increment}、{@code DEFAULT_GENERATED}）
+     * <p>仅由数据库元数据回填；结构比对用它判断自增属性是否与实体声明一致。</p>
+     */
+    private String extra;
 
     @Override
     public String toString() {

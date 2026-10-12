@@ -211,9 +211,11 @@ public class BeanRunner implements AutoCloseable {
     private <T> void doInsertBatchSafe(List<T> beans, int baseIndex, BatchResult<T> result) {
         // Fast path: 批量插入
         try {
-            doInsertBatch(beans);
+            int[] results = doInsertBatch(beans);
             for (int i = 0; i < beans.size(); i++) {
-                result.recordSuccess();
+                // 插入语句的影响行数：驱动给 1 就记 1，给 SUCCESS_NO_INFO(-2)/缺失时按"这条确实插入了"记 1
+                int affected = i < results.length && results[i] > 0 ? results[i] : 1;
+                result.recordSuccess(affected);
             }
             return;
         } catch (Exception batchEx) {
@@ -287,6 +289,8 @@ public class BeanRunner implements AutoCloseable {
                         stmt.addBatch();
                     }
                     int[] results = stmt.executeBatch();
+                    // 事务内同样要先校验：失败条目会导致生成键按序 zip 错位，把 A 的自增 ID 写进 B
+                    queryRunner.checkExecuteFailures(results, beans.size(), sql);
                     writeGeneratedKeys(stmt, beans, handler, identityColumn);
                     if (dbg) log.debug("[批量插入] 完成（事务内），耗时 {} ms，影响 {} 条",
                             (System.nanoTime() - t0) / 1_000_000, results.length);
@@ -307,6 +311,9 @@ public class BeanRunner implements AutoCloseable {
                         stmt.addBatch();
                     }
                     int[] results = stmt.executeBatch();
+                    // 与 QueryRunner.executeBatch 同一口径：驱动不抛异常、只用 EXECUTE_FAILED 报失败时
+                    // 必须在 commit 之前中断并回滚；否则"部分成功"被永久落库，生成键还会整体错位
+                    queryRunner.checkExecuteFailures(results, beans.size(), sql);
                     // 生成键必须在 commit 之前读（游标随语句关闭失效）
                     writeGeneratedKeys(stmt, beans, handler, identityColumn);
                     conn.commit();
@@ -319,7 +326,14 @@ public class BeanRunner implements AutoCloseable {
                     conn.rollback();
                 } catch (SQLException ignored) {
                 }
-                throw jdbcTemplate.translateException(e, sql, null);
+                throw queryRunner.translateBatchException(e, sql, beans.size());
+            } catch (RuntimeException e) {
+                // 本地检测到的部分失败：先回滚这一小批，否则 finally 恢复 autoCommit 会隐式提交它
+                try {
+                    conn.rollback();
+                } catch (SQLException ignored) {
+                }
+                throw e;
             } finally {
                 try {
                     conn.setAutoCommit(autoCommit);
@@ -394,9 +408,11 @@ public class BeanRunner implements AutoCloseable {
     private <T> void doUpdateBatchSafe(List<T> beans, int baseIndex, BatchResult<T> result) {
         // Fast path: 批量更新
         try {
-            doUpdateBatchInternal(beans);
+            int[] results = doUpdateBatchInternal(beans);
             for (int i = 0; i < beans.size(); i++) {
-                result.recordSuccess();
+                // 这里必须用驱动回传的真实行数："更新一条库里不存在的行"会得到 0，
+                // 若按"没抛异常"记为成功，FlushResult 就再也发现不了这种 0 行更新
+                result.recordSuccess(i < results.length ? results[i] : 0);
             }
             return;
         } catch (Exception batchEx) {
@@ -407,8 +423,8 @@ public class BeanRunner implements AutoCloseable {
         // Slow path: 逐条更新（无事务，每条 autocommit）
         for (int i = 0; i < beans.size(); i++) {
             try {
-                updateBean(beans.get(i));
-                result.recordSuccess();
+                int rows = updateBean(beans.get(i));
+                result.recordSuccess(rows);
             } catch (Exception singleEx) {
                 result.recordFailure(baseIndex + i, beans.get(i), singleEx);
             }
@@ -533,8 +549,10 @@ public class BeanRunner implements AutoCloseable {
             sql = handler.buildSelectAllSql(tableInfo);
             args = null;
         } else {
-            // 拼接前过滤：分号/注释/UNION 等直接拒绝，属于纵深防御，不替代参数化
-            sql = handler.buildSelectAllSql(tableInfo) + " WHERE " + SqlFragments.guardWhereSection(whereSection);
+            // 拼接前过滤：分号/注释/UNION 等直接拒绝，并校验占位符与参数数量一致、
+            // 拒绝"夹带字符串字面量却不传参"的拼接写法（属纵深防御，不替代参数化）
+            sql = handler.buildSelectAllSql(tableInfo) + " WHERE "
+                    + SqlFragments.guardWhereSection(whereSection, params);
             args = params.length > 0 ? params : null;
         }
         return queryRunner.query(sql, args, ResultSetHandlers.bean(jdbcTemplate, entityClass));
@@ -561,7 +579,9 @@ public class BeanRunner implements AutoCloseable {
             sql = handler.buildSelectAllSql(tableInfo);
             args = null;
         } else {
-            sql = handler.buildSelectAllSql(tableInfo) + " WHERE " + SqlFragments.guardWhereSection(whereSection);
+            // 同 queryOne：黑名单 + 占位符/参数数量一致性 + 禁止无参字符串字面量
+            sql = handler.buildSelectAllSql(tableInfo) + " WHERE "
+                    + SqlFragments.guardWhereSection(whereSection, params);
             args = params.length > 0 ? params : null;
         }
         return queryRunner.query(sql, args, ResultSetHandlers.beanList(jdbcTemplate, entityClass));

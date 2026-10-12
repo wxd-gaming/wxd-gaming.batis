@@ -53,6 +53,14 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
 
         List<String> alterClauses = new ArrayList<>();
 
+        // ===== 0. 表级注释 =====
+        // 只处理"实体声明了注释且与库端不同"的情形：实体没写注释时不去清空库端注释，
+        // 避免存量表接入框架时把 DBA 写的表注释抹掉
+        String entityComment = normalizeComment(entityTable.getComment());
+        if (!entityComment.isEmpty() && !entityComment.equals(normalizeComment(dbTable.getComment()))) {
+            alterClauses.add("COMMENT='" + MysqlSqlLiteral.escapeString(entityComment) + "'");
+        }
+
         // ===== 1. 列对比 =====
         for (ColumnInfo entityCol : entityTable.getColumns().values()) {
             String colName = entityCol.getColumnName().toLowerCase();
@@ -60,9 +68,15 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
             if (dbCol == null) {
                 // 新增列
                 alterClauses.add("ADD COLUMN " + buildColumnDef(entityCol, typeDef));
-            } else if (hasColumnChanged(entityCol, dbCol, typeDef)) {
-                // 修改列
-                alterClauses.add("MODIFY COLUMN " + buildColumnDef(entityCol, typeDef));
+            } else {
+                warnCharacterSetDrift(tableName, colName, dbCol);
+                if (!expectsAutoIncrement(entityCol)) {
+                    warnUnexpectedAutoIncrement(tableName, colName, dbCol);
+                }
+                if (hasColumnChanged(entityCol, dbCol, typeDef)) {
+                    // 修改列
+                    alterClauses.add("MODIFY COLUMN " + buildColumnDef(entityCol, typeDef));
+                }
             }
         }
 
@@ -95,7 +109,15 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
 
             // 删除实体中已移除的索引
             for (IndexInfo dropIdx : dbIndexMap.values()) {
-                alterClauses.add("DROP INDEX `" + dropIdx.getName() + "`");
+                if (jdbcTemplate.isDropRedundantIndexes()) {
+                    alterClauses.add("DROP INDEX `" + dropIdx.getName() + "`");
+                    log.warn("表 {} 的索引 {} 在实体中没有声明，将被 DROP（需要保留请补上注解，"
+                                    + "或设置 JdbcTemplate#setDropRedundantIndexes(false)）",
+                            tableName, dropIdx.getName());
+                } else {
+                    log.warn("表 {} 的索引 {} 在实体中没有声明，按配置跳过删除（dropRedundantIndexes=false）",
+                            tableName, dropIdx.getName());
+                }
             }
         }
 
@@ -126,7 +148,9 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
         }
 
         if (col.getDefaultValue() != null && !col.getDefaultValue().isEmpty()) {
-            sb.append(" DEFAULT ").append(col.getDefaultValue());
+            // 默认值按 SQL 字面量渲染：已带引号的转义后拼接，裸字面量走白名单校验，
+            // 越界输入在这里快速失败，而不是把半截 DDL 发到库端
+            sb.append(" DEFAULT ").append(MysqlSqlLiteral.defaultValue(col.getDefaultValue()));
         }
 
         if (col.getGenerationType() == GenerationType.IDENTITY && col.isPrimaryKey()) {
@@ -134,7 +158,7 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
         }
 
         if (col.getComment() != null && !col.getComment().isEmpty()) {
-            sb.append(" COMMENT '").append(escapeComment(col.getComment())).append("'");
+            sb.append(" COMMENT '").append(MysqlSqlLiteral.escapeString(col.getComment())).append("'");
         }
 
         return sb.toString();
@@ -155,16 +179,53 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
     }
 
     /**
-     * 判断列是否发生变化：逐项比较规格化类型、可空性、默认值、注释。
+     * 判断列是否发生变化：逐项比较规格化类型、可空性、默认值、注释、自增属性。
      * <p>类型比较走 normalize 后的字符串而非原始字面量——实体侧渲染大写 {@code INT}、库端回读小写带宽度
-     * {@code int(11)}，只有归一到同一形式才不会误判漂移；其余三项只要有一项不等即判定需 MODIFY。</p>
+     * {@code int(11)}，只有归一到同一形式才不会误判漂移；其余各项只要有一项不等即判定需 MODIFY。</p>
      */
     private boolean hasColumnChanged(ColumnInfo entityCol, ColumnInfo dbCol, ColumnTypeDefHandler typeDef) {
         if (!typeDef.renderNormalized(entityCol).equals(typeDef.normalize(dbCol.getType()))) return true;
         if (entityCol.isNullable() != dbCol.isNullable()) return true;
         if (!defaultValueEquals(entityCol.getDefaultValue(), dbCol.getDefaultValue())) return true;
         if (!Objects.equals(normalizeComment(entityCol.getComment()), normalizeComment(dbCol.getComment()))) return true;
+        // 实体声明了 IDENTITY 而库端列不是 AUTO_INCREMENT：插入拿不到生成键（主键回写为 null），
+        // 属于功能缺失，必须修回来。反方向（库端有自增而实体没声明）只告警不改动：
+        // 存量表人工加过自增的情况很常见，直接 MODIFY 会把自增属性摘掉。
+        if (expectsAutoIncrement(entityCol) && !hasAutoIncrement(dbCol)) {
+            return true;
+        }
         return false;
+    }
+
+    /** 实体是否要求该列为 AUTO_INCREMENT（自增主键） */
+    private static boolean expectsAutoIncrement(ColumnInfo col) {
+        return col.isPrimaryKey() && col.getGenerationType() == GenerationType.IDENTITY;
+    }
+
+    /** 库端列是否带 auto_increment（来自 information_schema.COLUMNS.EXTRA） */
+    private static boolean hasAutoIncrement(ColumnInfo dbCol) {
+        String extra = dbCol.getExtra();
+        return extra != null && extra.toLowerCase().contains("auto_increment");
+    }
+
+    /**
+     * 字符集漂移只告警不修复。
+     * <p>
+     * 库端列是 latin1、实体期望 utf8mb4 时，{@code COLUMN_TYPE} 两边都是 {@code varchar(64)}，
+     * 类型比对因此"一致"，框架会一直宣称结构没问题，而写入 emoji 时严格模式报 1366、非严格模式被截断成 ?。
+     * </p>
+     * <p>之所以只告警：实体注解目前无法表达 charset/collation，自动发 MODIFY 等于替用户决定
+     * （可能把有意的 latin1 列改掉）。给出明确日志让人来决定。
+     * </p>
+     */
+    private static void warnCharacterSetDrift(String tableName, String colName, ColumnInfo dbCol) {
+        String charset = dbCol.getCharacterSet();
+        if (charset == null || charset.isEmpty() || "utf8mb4".equalsIgnoreCase(charset)) return;
+        String type = dbCol.getType() == null ? "" : dbCol.getType().toLowerCase();
+        if (!type.contains("char") && !type.contains("text")) return;
+        log.warn("列 {}.{} 的库端字符集是 {}，框架建表统一用 utf8mb4，"
+                        + "字符集不会被自动修复（实体无对应注解），如需统一请手工执行 ALTER TABLE ... CONVERT TO CHARACTER SET utf8mb4",
+                tableName, colName, charset);
     }
 
     /**
@@ -208,8 +269,15 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
         return Objects.equals(entityDefault, dbDefault);
     }
 
-    /** 转义 SQL 注释中的特殊字符 */
-    private static String escapeComment(String comment) {
-        return comment.replace("'", "\\'").replace("\n", "\\n");
+    /**
+     * 库端是自增列、实体却没声明 {@code IDENTITY} 时告警（不改动结构）。
+     * <p>反方向（实体要自增、库端没有）会走 MODIFY COLUMN 修回来；这个方向只提示，
+     * 因为存量表人工加过自增很常见，直接摘掉自增属性风险大于收益。</p>
+     */
+    private static void warnUnexpectedAutoIncrement(String tableName, String colName, ColumnInfo dbCol) {
+        if (hasAutoIncrement(dbCol)) {
+            log.warn("列 {}.{} 在库端是 AUTO_INCREMENT，实体没有声明 @GeneratedValue(strategy = IDENTITY)，"
+                            + "框架不会自动摘除该属性；若确实不需要请手工 ALTER", tableName, colName);
+        }
     }
 }

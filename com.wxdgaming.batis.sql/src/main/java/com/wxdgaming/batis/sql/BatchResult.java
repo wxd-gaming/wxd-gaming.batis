@@ -25,6 +25,12 @@ public class BatchResult<T> {
     private final List<T> requestList;
     /** 成功条数 */
     private int successCount;
+    /**
+     * 实际影响行数合计
+     * <p>与"成功条数"不是一个概念，两者差额本身就是最有用的信号：UPDATE 一条库里不存在的行
+     * 会"语句执行成功但影响 0 行"。由执行器把 {@code executeBatch} 的逐条行数累加进来。</p>
+     */
+    private long affectedRows;
     /** 失败条数 */
     private int errorCount;
     /** 失败明细 */
@@ -44,9 +50,23 @@ public class BatchResult<T> {
 
     // ==================== 包内写入方法（BeanRunner 调用） ====================
 
-    /** 记一条成功；由执行器在每条落库后调用，外部无从伪造 */
+    /** 记一条成功（单条写入固定影响 1 行）；由执行器在每条落库后调用，外部无从伪造 */
     void recordSuccess() {
+        recordSuccess(1);
+    }
+
+    /**
+     * 记一条成功并累加实际影响行数。
+     * <p>{@code affected} 非正时按 0 计：{@code Statement.SUCCESS_NO_INFO(-2)} 表示"驱动没给出行数"，
+     * 不是"影响了负数行"；而 UPDATE 影响 0 行是真实结果，必须如实体现在汇总里。</p>
+     *
+     * @param affected 该条语句影响的行数
+     */
+    void recordSuccess(int affected) {
         successCount++;
+        if (affected > 0) {
+            affectedRows += affected;
+        }
     }
 
     /**
@@ -85,6 +105,15 @@ public class BatchResult<T> {
         return successCount;
     }
 
+    /**
+     * 实际影响行数合计。
+     * <p>典型用法是看它与 {@link #getSuccessCount()} 的差额：更新一条库里不存在的行时
+     * "成功条数 +1、影响行数 +0"，只统计成功条数会把这种情况报成"全部更新成功"。</p>
+     */
+    public long getAffectedRows() {
+        return affectedRows;
+    }
+
     /** 失败的条数，与 {@link #getFailures()} 大小一致 */
     public int getErrorCount() {
         return errorCount;
@@ -98,8 +127,8 @@ public class BatchResult<T> {
     /** 摘要形式，只报总数与成败计数；明细请遍历 {@link #getFailures()}，避免日志被堆满 */
     @Override
     public String toString() {
-        return String.format("BatchResult{total=%d, success=%d, error=%d}",
-                getTotalCount(), successCount, errorCount);
+        return String.format("BatchResult{total=%d, success=%d, affected=%d, error=%d}",
+                getTotalCount(), successCount, affectedRows, errorCount);
     }
 
     // ==================== 内部类 ====================

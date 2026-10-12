@@ -50,6 +50,9 @@ public class ProtostuffUtil {
      * 解码到新实例：需目标类提供无参构造，失败时抛出带类名的明确异常
      */
     public static <T> T decode(byte[] bytes, Class<T> clazz) {
+        if (clazz == null) {
+            throw new IllegalArgumentException("Protostuff 不能解码到 null 类型");
+        }
         T object;
         try {
             object = clazz.getDeclaredConstructor().newInstance();
@@ -65,11 +68,26 @@ public class ProtostuffUtil {
      */
     @SuppressWarnings("unchecked")
     public static <T> T decode(byte[] bytes, T object) {
+        if (object == null) {
+            // 不判空会在 object.getClass() 上抛裸 NPE，调用方无法区分"列值为 null"与"实体少无参构造"
+            throw new IllegalArgumentException(
+                    "Protostuff 不能解码到 null 实例，请改用 decode(bytes, Class) 指定目标类型");
+        }
         return decode(bytes, (Class<T>) object.getClass(), object);
     }
 
-    /** 解码核心：mergeFrom 把字节流字段级合并进 object，未出现的字段保持 object 原值 */
+    /**
+     * 解码核心：mergeFrom 把字节流字段级合并进 object，未出现的字段保持 object 原值
+     * <p>三个入参都显式判空，与 {@link #encode} 的契约保持对称：调用方拿到的是"哪个参数为空"的
+     * 可读异常，而不是第三方库内部抛出的裸 NPE。</p>
+     */
     public static <T> T decode(byte[] bytes, Class<T> clazz, T object) {
+        if (bytes == null) {
+            throw new IllegalArgumentException("Protostuff 不能解码 null 字节数组");
+        }
+        if (clazz == null || object == null) {
+            throw new IllegalArgumentException("Protostuff 不能解码到 null 类型或 null 实例");
+        }
         Schema<T> schema = RuntimeSchema.getSchema(clazz);
         ProtostuffIOUtil.mergeFrom(bytes, object, schema);
         return object;

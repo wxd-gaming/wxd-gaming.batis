@@ -3,6 +3,7 @@ package com.wxdgaming.batis;
 import lombok.Getter;
 import lombok.Setter;
 
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongArray;
 
@@ -172,6 +173,12 @@ public class DbStats {
         private final AtomicLong maxMs = new AtomicLong(0);
         /** 单次最低耗时 (ms)，无记录时为 0 */
         private final AtomicLong minMs = new AtomicLong(0);
+        /**
+         * minMs 是否已写入过
+         * <p>不能用 0 当"未初始化"哨兵：毫秒计时下 0ms 记录很常见，一旦写入 0，
+         * 哨兵位就永远为"未初始化"，下一次更大的耗时会直接覆盖它（min 变成 200 这类偏大值）。</p>
+         */
+        private final AtomicBoolean minInitialized = new AtomicBoolean(false);
 
         /** 最近一次操作耗时 (ms) */
         private volatile long lastMs;
@@ -210,13 +217,17 @@ public class DbStats {
                 if (elapsedMs <= curMax) break;
             } while (!maxMs.compareAndSet(curMax, elapsedMs));
 
-            // 更新 min（CAS 循环）：以 0 当作"尚未初始化"哨兵——首次记录(curMin==0)必须写入，
-            // 之后只有更小的耗时才替换；否则 min 会永远停在初始值 0
-            long curMin;
-            do {
-                curMin = minMs.get();
-                if (curMin != 0 && elapsedMs >= curMin) break;
-            } while (!minMs.compareAndSet(curMin, elapsedMs));
+            // 更新 min：首次记录无条件写入，之后只有更小的耗时才替换（用独立的已初始化标志，
+            // 而不是拿 0 当哨兵——否则"最小值恰好是 0ms"会被后一次更大的耗时覆盖）
+            if (minInitialized.compareAndSet(false, true)) {
+                minMs.set(elapsedMs);
+            } else {
+                long curMin;
+                do {
+                    curMin = minMs.get();
+                    if (elapsedMs >= curMin) break;
+                } while (!minMs.compareAndSet(curMin, elapsedMs));
+            }
 
             // 最近一次
             this.lastMs = elapsedMs;
@@ -288,6 +299,7 @@ public class DbStats {
             totalMs.set(0);
             maxMs.set(0);
             minMs.set(0);
+            minInitialized.set(false);
             lastMs = 0;
             lastRecords = 0;
             for (int i = 0; i < histogram.length(); i++) {
