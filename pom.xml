@@ -22,13 +22,17 @@
 
     <properties>
         <encoding>utf-8</encoding>
-        <maven.compiler.source>21</maven.compiler.source>
-        <maven.compiler.target>21</maven.compiler.target>
+        <java.version>21</java.version>
+        <!--
+          只设置 release，不再单独设置 source/target：release 会同时约束「语法级别」与
+          「可引用的 JDK API」，避免在 JDK 25 等更高版本上编译时误用 21 之后才有的 API。
+          注意不要再用 ${java.version} 去赋值 maven.compiler.source/target：那样会跟随执行
+          构建的 JDK 版本变化，正是新环境编译结果不一致的根源。
+        -->
+        <maven.compiler.release>${java.version}</maven.compiler.release>
         <project.build.sourceEncoding>${encoding}</project.build.sourceEncoding>
         <project.reporting.outputEncoding>${encoding}</project.reporting.outputEncoding>
         <maven.compiler.encoding>${encoding}</maven.compiler.encoding>
-        <maven.compiler.source>${java.version}</maven.compiler.source>
-        <maven.compiler.target>${java.version}</maven.compiler.target>
         <logback.version>1.5.36</logback.version>
         <slf4j.version>2.0.18</slf4j.version>
     </properties>

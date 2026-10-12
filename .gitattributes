@@ -1,0 +1,23 @@
+# 统一换行符，避免新环境因 Git 的 core.autocrlf 设置不同而拿到不同文件。
+#
+# Maven wrapper 的两个脚本对换行符敏感：mvnw 是 /bin/sh 脚本，被检出成 CRLF 后
+# 在 Linux/macOS 上会以 "bad interpreter" 之类的方式直接失败；mvnw.cmd 保持 CRLF
+# 才是 Windows 上的常规形态。这里显式固定，不依赖各人的 autocrlf 配置。
+mvnw        text eol=lf
+mvnw.cmd    text eol=crlf
+
+# Windows 批处理脚本同样固定为 CRLF。
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+
+# shell 脚本固定为 LF。
+*.sh        text eol=lf
+
+# Windows 下这些是二进制/机器生成文件，不做换行转换。
+*.jar       binary
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.zip       binary
