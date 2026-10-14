@@ -145,7 +145,7 @@ Windows 下把 `./mvnw` 换成 `mvnw.cmd`（`.\mvnw.cmd -q clean install`）。
 
 ```xml
 <dependency>
-    <groupId>wxd-gaming</groupId>
+    <groupId>com.wxdgaming.batis</groupId>
     <artifactId>com.wxdgaming.batis.sql.mysql</artifactId>
     <version>1.0.1</version>
 </dependency>
