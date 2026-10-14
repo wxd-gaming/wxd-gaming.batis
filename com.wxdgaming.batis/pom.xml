@@ -18,17 +18,4 @@
         </dependency>
     </dependencies>
 
-    <build>
-        <plugins>
-            <!-- 单测中 fastjson 序列化含 Field/AnnotatedType 的模型对象需要开放 JDK 内部包 -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <configuration>
-                    <argLine>--add-opens java.base/java.lang.reflect=ALL-UNNAMED --add-opens java.base/sun.reflect.annotation=ALL-UNNAMED</argLine>
-                </configuration>
-            </plugin>
-        </plugins>
-    </build>
-
 </project>

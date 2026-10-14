@@ -1,6 +1,7 @@
 package com.wxdgaming.batis.sql.pgsql;
 
-import com.alibaba.fastjson.JSONObject;
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONObject;
 import com.wxdgaming.batis.exception.DataAccessException;
 import com.wxdgaming.batis.sql.BeanRunner;
 import com.wxdgaming.batis.sql.QueryRunner;
@@ -19,6 +20,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -26,7 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * PG 原生 JSON 列回归测试（真库：嵌入式 PostgreSQL）
- * <p>覆盖四件互相依赖的事，缺一不可：</p>
+ * <p>覆盖五件互相依赖的事，缺一不可：</p>
  * <ol>
  *   <li>物理类型：{@code @Column(type = "json"/"JSONB")} 真落成 PG 的 json/jsonb 列，
  *       默认（不带 type）仍是 text；</li>
@@ -34,7 +36,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>零虚假 ALTER：重复同步既不刷结构快照，也不<b>重写表文件</b>
  *       （PG 的 {@code ALTER COLUMN ... TYPE} 是整表重写，只看列快照查不出"重复做一次同样的改写"）；</li>
  *   <li>迁移：存量文本列改声明成 jsonb 后，{@code ALTER ... TYPE jsonb USING} 能把数据搬过去，
- *       反向 jsonb → text 同理。</li>
+ *       反向 jsonb → text 同理；</li>
+ *   <li>多态：{@code @Column(polymorphic = true)} 追加的类型标记仍是标准 JSON，
+ *       因此 jsonb 收得下、PG 算子读得到，而框架读回来的是具体子类。</li>
  * </ol>
  * <p>用例④（裸字符串参数直接失败）是给②③的包装动作留的<em>反面</em>证据：
  * 如果没有 {@code PGobject} 包装，这条 SQL 会以 42804 失败。删掉包装后②会立刻红，
@@ -310,7 +314,43 @@ class PgJsonTypeIT {
         try (BeanRunner br = tpl.beanRunner()) {
             PgJsonMigrateEntity back = br.queryById(PgJsonMigrateEntity.class, 1L);
             assertNotNull(back, "反向迁移不能丢行");
-            assertEquals(List.of(1, 2, 3), toIntList(JSONObject.parseArray(back.getPayload())));
+            assertEquals(List.of(1, 2, 3), toIntList(JSON.parseArray(back.getPayload())));
+        }
+    }
+
+    /**
+     * 用例⑧：多态列能落进 PG 原生 jsonb，并且读回来还是具体子类。
+     * <p>"开启多态后写出的仍然是合法 JSON"这句承诺，只有真库能证明：类型标记若带上
+     * {@code 9L}、{@code Set[...]} 这类私有字面量，Java 侧的单测照样通过，而 PG 会在写入阶段
+     * 就以非法输入拒绝整条 INSERT。所以这里两头都断言——
+     * 用 jsonb 自己的算子把 {@code @type} 取出来（证明它是列里的一个普通键，不是别的什么形态），
+     * 再用框架读回对象图（证明子类没有静默退化成接口代理）。</p>
+     */
+    @Test
+    @Order(8)
+    void polymorphicColumnLandsInJsonbAndReadsBackAsSubtype() {
+        PgJsonEntity bean = newEntity("polymorphic-jsonb");
+        // 改掉标签值：用例③按 tags @> '["a"]' 统计命中行数，这一行不能混进那个谓词
+        bean.setTags(new ArrayList<>(List.of("poly")));
+        bean.setShape(new PgCircle("red", 2.0));
+        Number id;
+        try (BeanRunner br = template().beanRunner()) {
+            id = br.insertBean(bean);
+            PgJsonEntity back = br.queryById(PgJsonEntity.class, id);
+            assertNotNull(back);
+            assertInstanceOf(PgCircle.class, back.getShape(),
+                    "多态列必须还原成具体子类，不能是接口的动态代理");
+            assertEquals("red", back.getShape().getColor());
+            assertEquals(Math.PI * 4, ((PgCircle) back.getShape()).area(), 1e-9);
+        }
+        // 库端口径：jsonb 算子能直接读到类型标记键，说明它是标准 JSON 结构的一部分
+        try (QueryRunner qr = new QueryRunner(template())) {
+            List<JSONObject> rows = qr.query(
+                    "SELECT \"shape\" ->> '@type' AS t, \"shape\" ->> 'radius' AS r FROM "
+                            + PgsqlIdentifier.quote(TABLE) + " WHERE \"biz_key\" = ?",
+                    new Object[]{"polymorphic-jsonb"}, ResultSetHandlers.list());
+            assertEquals(PgCircle.class.getName(), rows.getFirst().getString("t"));
+            assertEquals("2.0", rows.getFirst().getString("r"));
         }
     }
 

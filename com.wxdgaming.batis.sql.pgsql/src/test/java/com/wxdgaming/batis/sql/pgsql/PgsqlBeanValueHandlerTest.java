@@ -1,6 +1,6 @@
 package com.wxdgaming.batis.sql.pgsql;
 
-import com.alibaba.fastjson.TypeReference;
+import com.alibaba.fastjson2.TypeReference;
 import com.wxdgaming.batis.converter.TypeConverter;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.SqlType;
@@ -153,7 +153,7 @@ class PgsqlBeanValueHandlerTest {
     /**
      * 用例⑤：JSON 存储模式写读对称，且反解按字段声明的泛型走。
      * <p>断言写出来是 {@code ["a","b"]}、读回来还是两元素 List。
-     * 这里顺带守住了"不开 fastjson autoType"这条安全约定：解码用的是 genericType，
+     * 这里顺带守住了"非多态列不开 autoType"这条安全约定：解码只按字段声明的泛型走，
      * 与 JSON 文本里是否含 {@code @type} 无关，所以库里被塞进恶意 @type 也不会实例化任意类。</p>
      */
     @Test

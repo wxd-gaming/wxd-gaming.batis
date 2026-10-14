@@ -1,6 +1,6 @@
 package com.wxdgaming.batis.sql;
 
-import com.alibaba.fastjson.JSONObject;
+import com.alibaba.fastjson2.JSONObject;
 import lombok.AccessLevel;
 import lombok.NoArgsConstructor;
 

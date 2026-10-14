@@ -54,9 +54,9 @@ public class ColumnInfo {
     private StorageMode storageMode = StorageMode.AUTO;
     /**
      * 多态 JSON 列开关，来自 {@code @Column(polymorphic = true)}。
-     * <p>只在 JSON 编码路径生效：写出侧带上 fastjson 的类型标记，读取侧靠"声明类型的子类"
-     * 这条受限通道还原运行时类型，全程不开 autoType。默认 false——存量列的 JSON 文本里没有
-     * 类型标记，也不该因为框架升级就改格式，所以必须由实体逐列显式声明。</p>
+     * <p>只在 JSON 编码路径生效：写出侧带上 fastjson2 的类型标记，读取侧用"由声明类型算出的
+     * 继承树白名单"限定能被实例化的类。默认 false——存量列的 JSON 文本里没有类型标记，
+     * 也不该因为框架升级就改格式，所以必须由实体逐列显式声明。</p>
      */
     private boolean polymorphic;
     /** 对应的 Java 字段名 */

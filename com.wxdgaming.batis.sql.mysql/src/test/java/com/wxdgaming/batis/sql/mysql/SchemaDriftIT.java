@@ -1,6 +1,6 @@
 package com.wxdgaming.batis.sql.mysql;
 
-import com.alibaba.fastjson.JSONObject;
+import com.alibaba.fastjson2.JSONObject;
 import com.wxdgaming.batis.sql.QueryRunner;
 import com.wxdgaming.batis.sql.ResultSetHandlers;
 import com.zaxxer.hikari.HikariConfig;

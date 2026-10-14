@@ -1,7 +1,9 @@
 package com.wxdgaming.batis.sql;
 
-import com.alibaba.fastjson.JSON;
-import com.alibaba.fastjson.serializer.SerializerFeature;
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONException;
+import com.alibaba.fastjson2.JSONReader;
+import com.alibaba.fastjson2.JSONWriter;
 import com.wxdgaming.batis.converter.TypeConverter;
 import com.wxdgaming.batis.exception.TypeMismatchDataAccessException;
 import com.wxdgaming.batis.model.ColumnInfo;
@@ -9,8 +11,12 @@ import com.wxdgaming.batis.model.StorageMode;
 import com.wxdgaming.batis.util.ProtostuffUtil;
 import lombok.extern.slf4j.Slf4j;
 
+import java.lang.reflect.GenericArrayType;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
+import java.lang.reflect.WildcardType;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.sql.Blob;
@@ -22,6 +28,12 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZonedDateTime;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -36,7 +48,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>之所以把反射与编解码都抽成基类而不是 default 方法：这些逻辑与数据库完全无关，
  * 但错误信息、数值收窄、可访问性处理都很容易在各方言里写歪，收敛到一处才能保证
  * "同一个字段在 MySQL 和 pgsql 里报错方式一致"。新增方言时继承本类，
- * 不要再复制一遍反射与序列化代码——尤其是 JSON 侧"刻意不开 autoType"这条安全约定，
+ * 不要再复制一遍反射与序列化代码——尤其是 JSON 侧"类型标记必须过继承树白名单"这条安全约定，
  * 复制一份就意味着未来的修复只落在其中一个方言上。</p>
  *
  * @author wxd-gaming(無心道, 15388152619)
@@ -47,6 +59,47 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
 
     /** JSON/Protostuff 序列化最大重试次数，应对多线程并发修改集合的并发问题 */
     private static final int MAX_SERIALIZE_RETRIES = 3;
+
+    /** 普通 JSON 列的写特性：空数组即 fastjson2 默认（不写类名、不做引用探测） */
+    private static final JSONWriter.Feature[] NO_WRITE_FEATURES = new JSONWriter.Feature[0];
+
+    /**
+     * 多态列的写特性：写类型标记，但抑制 JDK 容器、数字与 Set 的类名。
+     * <p>这三类抑制不是美化输出，而是保住列的形态：开了 {@code WriteClassName} 后 fastjson2 会把
+     * {@code Long} 写成 {@code 9L}、把非 ArrayList 的 Set 写成 {@code Set[...]}——都不是标准 JSON，
+     * PG 的原生 json/jsonb 列会直接报非法输入，别的语言也读不懂。
+     * 抑制后容器实现类（TreeMap 之类）仍可能留下类名，那是合法 JSON 的伪键，读取端会统一换成
+     * {@code LinkedHashMap}/{@code ArrayList}；Number 的具体子类与容器实现本来就不在多态保证范围内，
+     * 要精确保住请用 {@code @Column(converter = ...)}。</p>
+     */
+    private static final JSONWriter.Feature[] MARK_WITH_ROOT = {
+            JSONWriter.Feature.WriteClassName,
+            JSONWriter.Feature.NotWriteHashMapArrayListClassName,
+            JSONWriter.Feature.NotWriteSetClassName,
+            JSONWriter.Feature.NotWriteNumberClassName,
+    };
+
+    /** 根值是容器/数组/final 类型时的写特性：根上的类名要么无意义，要么会破坏列形态 */
+    private static final JSONWriter.Feature[] MARK_WITHOUT_ROOT = {
+            JSONWriter.Feature.WriteClassName,
+            JSONWriter.Feature.NotWriteRootClassName,
+            JSONWriter.Feature.NotWriteHashMapArrayListClassName,
+            JSONWriter.Feature.NotWriteSetClassName,
+            JSONWriter.Feature.NotWriteNumberClassName,
+    };
+
+    /**
+     * 多态列的编解码配置：写特性与读白名单必须同源。
+     * <p>分开算会出现"库里写了标记、读取端不认"的半截状态，表现是数据写得进去但取回来类型丢了，
+     * 这种问题只在读存量行时暴露。</p>
+     */
+    private record PolymorphicCodec(JSONWriter.Feature[] writeFeatures,
+                                    JSONReader.AutoTypeBeforeHandler readFilter) {
+
+        /** 声明类型给不出可用上界时的配置：两侧都退化成普通列，绝不写出无人认领的类型标记 */
+        static final PolymorphicCodec UNBOUNDED =
+                new PolymorphicCodec(NO_WRITE_FEATURES, null);
+    }
 
     /**
      * 自定义 {@link TypeConverter} 是否存在——写读两侧都用它决定"是否完全接管该字段"。
@@ -85,18 +138,16 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
 
     /**
      * JSON 存储模式的写入编码：对象 → JSON 字符串。
-     * <p>默认<b>不</b>写类型标记（见 {@link #fromJsonText} 的安全约定）；只有列显式声明
-     * {@code @Column(polymorphic = true)} 时追加 {@code WriteClassName}，让"接口/父类字段存子类"
-     * 能被读回。读取端不需要为此开 autoType——fastjson 在期望类型是接口或抽象类时，
-     * 只放行指向其子类的类型标记，这条通道本身就是受限的。</p>
+     * <p>默认<b>不</b>写类型标记；只有列显式声明 {@code @Column(polymorphic = true)} 且声明类型给得出
+     * 继承树上界时才追加 {@code WriteClassName}（见 {@link #polymorphicCodec}）。</p>
      * <p>失败按 {@link #MAX_SERIALIZE_RETRIES} 重试并 {@code Thread.yield}——针对集合被多线程并发修改
      * 导致的偶发序列化异常，让出 CPU 后重试通常即可成功，重试耗尽才升级为
      * {@code TypeMismatchDataAccessException}。</p>
      */
     protected String toJsonString(Object value, ColumnInfo col) {
-        SerializerFeature[] features = col.isPolymorphic()
-                ? new SerializerFeature[]{SerializerFeature.WriteClassName}
-                : new SerializerFeature[0];
+        JSONWriter.Feature[] features = col.isPolymorphic()
+                ? polymorphicCodec(col).writeFeatures()
+                : NO_WRITE_FEATURES;
         for (int i = 0; ; i++) {
             try {
                 return JSON.toJSONString(value, features);
@@ -133,22 +184,193 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
 
     /**
      * JSON 存储模式的读取解码：按字段声明类型反解。
-     * <p>刻意不开 Feature.SupportAutoType：开了之后，凡声明得比较宽的字段（Object、
-     * {@code Map<String, Object>} 的 value）都会按 JSON 里的类型标记实例化任意非黑名单类，
-     * 而"谁能写这一列"就不再是边界了——业务把用户输入塞进 Map 再落库，等于对外开放反序列化入口。</p>
-     * <p>关闭后按字段声明的 genericType/javaType 反解，普通 POJO 与集合不受影响。
-     * 多态场景（接口/抽象类字段存具体子类）由 {@code @Column(polymorphic = true)} 逐列开启写侧类型标记，
-     * 读取走 fastjson 的受限通道：类型标记只有指向期望类型的子类时才被接受，指向不相干类照样拒绝。
-     * 实测边界：polymorphic 只对声明为接口/抽象类/父类的列有确定效果；期望类型为 Object 时是否放行标记
-     * 取决于 fastjson 内部的已注册类缓存，同一份文本读到过具体子类、也直接抛过反序列化失败，不能当契约用。</p>
+     * <p>只有 {@code @Column(polymorphic = true)} 且声明类型能算出上界的列才开启 autoType，
+     * 且必须配 {@link SubtypeFilter}：上界由字段声明类型自己推出，标记是这些上界的子类才放行，
+     * JDK 容器实现类归一到 LinkedHashMap/ArrayList，其余一律抛异常，本方法再升级为带列名的
+     * {@link TypeMismatchDataAccessException}。开 autoType 是因为嵌套容器只有在这个特性下才带
+     * {@code @type} 写回（否则对象图里的 List/Map 子类读不回来），而白名单会拒绝继承树外的类，
+     * 所以"谁能写这一列"仍然是安全边界。</p>
+     * <p>非多态列，以及声明太宽、算不出上界的列（Object、{@code List<Object>}、
+     * {@code Map<String, Object>}）都走默认解析：不注入任何 autoType 特性，
+     * 这类字段开了就等于让 JSON 里的类型标记决定实例化哪个类，业务把用户输入塞进 Map 再落库，
+     * 就变成对外开放的反序列化入口。写入端同源，这类列也不写类型标记。</p>
      */
     protected Object fromJsonText(Object value, ColumnInfo col) {
-        Type genericType = col.getGenericType();
+        Type type = declaredType(col);
         String jsonStr = value.toString();
         try {
-            return JSON.parseObject(jsonStr, genericType != null ? genericType : col.getJavaType());
+            if (!col.isPolymorphic()) {
+                return JSON.parseObject(jsonStr, type);
+            }
+            JSONReader.AutoTypeBeforeHandler filter = polymorphicCodec(col).readFilter();
+            return filter == null
+                    ? JSON.parseObject(jsonStr, type)
+                    : JSON.parseObject(jsonStr, type, filter, JSONReader.Feature.SupportAutoType);
         } catch (Exception e) {
             throw new TypeMismatchDataAccessException("JSON 反序列化字段 " + col.getFieldName() + " 失败，value=" + jsonStr, e);
+        }
+    }
+
+    /** 字段声明类型：优先泛型签名，裸类型字段退回 javaType */
+    private static Type declaredType(ColumnInfo col) {
+        return col.getGenericType() != null ? col.getGenericType() : col.getJavaType();
+    }
+
+    /**
+     * 取多态列的编解码配置：一次算出写特性与读白名单，保证两侧同源。
+     * <p>不做缓存：上界只是沿着声明类型走几层 instanceof，比随后的 JSON 编解码便宜得多，
+     * 而把 ColumnInfo 当 map 键要依赖它的 equals/hashCode（模型类多为 Lombok @Data，
+     * 按字段全量比较），两个语义相同的列会被折叠，风险大于收益。</p>
+     */
+    private static PolymorphicCodec polymorphicCodec(ColumnInfo col) {
+        Type declared = declaredType(col);
+        Set<Class<?>> bounds = new LinkedHashSet<>();
+        collectBounds(declared, bounds);
+        if (bounds.isEmpty()) {
+            return PolymorphicCodec.UNBOUNDED;
+        }
+        // 根位置不可能装子类时抑制根类名：容器/数组根会写成 {"@type":"...","@value":[...]} 这种破坏列形态的包装
+        boolean suppressRoot = !canCarrySubtypeAtRoot(declared);
+        return new PolymorphicCodec(suppressRoot ? MARK_WITHOUT_ROOT : MARK_WITH_ROOT,
+                new SubtypeFilter(bounds));
+    }
+
+    /**
+     * 声明类型的根位置是否可能装着子类：只有接口和非 final 的普通类可能。
+     * <p>容器和数组先判——{@code List}/{@code Map} 本身也是接口，但根上的容器类名不是子类信息，
+     * 写成 {@code {"@type":"java.util.LinkedHashMap","value":...}} 反而让 fastjson2 读不回来。
+     * final 类型（String、包装类、枚举、record）没有子类可还原，写了只剩伪键。</p>
+     */
+    private static boolean canCarrySubtypeAtRoot(Type declared) {
+        if (declared instanceof GenericArrayType) {
+            return false;
+        }
+        Class<?> raw = erase(declared);
+        if (raw == null) {
+            return false;
+        }
+        if (raw.isArray() || raw.isPrimitive() || raw.isEnum() || raw.isRecord()
+                || Collection.class.isAssignableFrom(raw) || Map.class.isAssignableFrom(raw)) {
+            return false;
+        }
+        return raw.isInterface() || !Modifier.isFinal(raw.getModifiers());
+    }
+
+    /** 取声明类型的裸类型：拿不到（TypeVariable 等）返回 null */
+    private static Class<?> erase(Type type) {
+        if (type instanceof Class<?> c) {
+            return c;
+        }
+        if (type instanceof ParameterizedType pt && pt.getRawType() instanceof Class<?> raw) {
+            return raw;
+        }
+        return null;
+    }
+
+    /**
+     * 由字段声明类型算出多态允许实例化的上界集合。
+     * <p>{@code Object} 一律排除——它 assignable-from 一切，收下就等于开了全局 autoType。
+     * 容器（Collection/Map）的裸类型也不作为上界：写侧已经抑制了容器类名，列里不会出现
+     * {@code java.util.ArrayList} 这种标记；把 {@code List} 当成上界只会让"声明是 List&lt;Object&gt;
+     * 或 Map&lt;String,Object&gt;"这类无界字段被误判成可用（上界非空即启用多态）。</p>
+     * <p>结果是空集时，这一列的多态不生效：写不带标记、读按声明类型，与 {@code polymorphic = false} 等价。
+     * {@code List<Object>}、{@code Map<String,Object>} 正好落在这一档——别指望框架替你猜类型。</p>
+     */
+    private static void collectBounds(Type type, Set<Class<?>> out) {
+        if (type instanceof Class<?> c) {
+            if (c == Object.class) {
+                return;
+            }
+            out.add(c);
+            if (c.isArray()) {
+                // 数组协变：Shape[] 能接受 Circle[]，同时把元素类型也收进来供嵌套解析用
+                collectBounds(c.getComponentType(), out);
+            }
+        } else if (type instanceof ParameterizedType pt) {
+            if (pt.getRawType() instanceof Class<?> raw
+                    && !Collection.class.isAssignableFrom(raw) && !Map.class.isAssignableFrom(raw)) {
+                out.add(raw);
+            }
+            for (Type arg : pt.getActualTypeArguments()) {
+                collectBounds(arg, out);
+            }
+        } else if (type instanceof GenericArrayType array) {
+            collectBounds(array.getGenericComponentType(), out);
+        } else if (type instanceof WildcardType wildcard) {
+            for (Type bound : wildcard.getUpperBounds()) {
+                collectBounds(bound, out);
+            }
+        }
+        // TypeVariable（实体里几乎不出现）没有可执行的上界信息，按"不放行"处理
+    }
+
+    /**
+     * 多态读取白名单。
+     * <p>三条规则，缺一不可：</p>
+     * <ol>
+     *   <li>业务类标记必须落在字段声明类型的继承树里（{@code bounds}），或者是该位置声明类型（{@code expectClass}，
+     *       由 fastjson2 从实体字段声明带出来）的子类——两者都来自编译期声明，不来自库里的字符串；</li>
+     *   <li>JDK 容器标记一律换成 {@code LinkedHashMap}/{@code ArrayList}：容器实现类本来就不在保证范围内，
+     *       换成标准容器既能让 {@code TreeMap}/{@code Map.of} 这类嵌套容器读回来，也不把库里点名的实现类当真；
+     *       出现在业务类型位置上的容器标记（比如 {@code List<Shape>} 的元素写着 PriorityQueue）照样拒绝。</li>
+     *   <li>其余一律抛错。这里不能"忽略标记继续按声明类型读"：fastjson2 的 {@code AutoTypeBeforeHandler}
+     *       交出 null 后仍会走它自己的 autoType 判定，配 {@code SupportAutoType} 就等于放行；
+     *       主动抛是唯一能把边界焊死的写法。</li>
+     * </ol>
+     */
+    private record SubtypeFilter(Class<?>[] bounds) implements JSONReader.AutoTypeBeforeHandler {
+
+        SubtypeFilter(Collection<Class<?>> bounds) {
+            this(bounds.toArray(new Class<?>[0]));
+        }
+
+        @Override
+        public Class<?> apply(String typeName, Class<?> expectClass, long features) {
+            Class<?> clazz = load(typeName);
+            if (clazz == null) {
+                throw new JSONException("多态列的类型标记指向加载不了的类: " + typeName);
+            }
+            if (clazz == Object.class) {
+                throw new JSONException("多态列不接受 java.lang.Object 标记: " + typeName);
+            }
+            // 只置换 JDK 自带容器：业务类可能自己实现 Collection，那是声明类型继承树里的合法子类，不能被换掉
+            if (clazz.getName().startsWith("java.") && isContainer(clazz)) {
+                Class<?> standard = Map.class.isAssignableFrom(clazz) ? LinkedHashMap.class : ArrayList.class;
+                if (expectClass == null || expectClass == Object.class || expectClass.isAssignableFrom(standard)) {
+                    return standard;
+                }
+                throw new JSONException("多态列的容器标记 " + typeName + " 出现在业务类型位置: "
+                        + (expectClass == null ? "?" : expectClass.getName()));
+            }
+            for (Class<?> bound : bounds) {
+                if (bound.isAssignableFrom(clazz)) {
+                    return clazz;
+                }
+            }
+            if (expectClass != null && expectClass != Object.class && expectClass.isAssignableFrom(clazz)) {
+                return clazz;
+            }
+            throw new JSONException("多态列的类型标记 " + typeName + " 不是声明类型 "
+                    + (expectClass == null ? "?" : expectClass.getName()) + " 的子类");
+        }
+
+        private static boolean isContainer(Class<?> clazz) {
+            return Map.class.isAssignableFrom(clazz) || Collection.class.isAssignableFrom(clazz);
+        }
+
+        private static Class<?> load(String typeName) {
+            if (typeName == null || typeName.isEmpty()) {
+                return null;
+            }
+            ClassLoader loader = Thread.currentThread().getContextClassLoader();
+            if (loader == null) {
+                loader = SubtypeFilter.class.getClassLoader();
+            }
+            try {
+                return Class.forName(typeName, false, loader);
+            } catch (Throwable e) {
+                return null;
+            }
         }
     }
 

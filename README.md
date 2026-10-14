@@ -92,14 +92,14 @@ com.wxdgaming.batis.sql.mysql    方言实现层
 | `com.mysql:mysql-connector-j` | 9.5.0 | MySQL 驱动（仅 mysql 层） |
 | `com.github.ben-manes.caffeine:caffeine` | 3.2.2 | 本地缓存实现 |
 | `io.protostuff:protostuff-core` / `-runtime` | 1.8.0 | BLOB 存储模式的二进制序列化 |
-| `com.alibaba:fastjson` | 1.2.83 | JSON 存储模式序列化（带类名） |
+| `com.alibaba.fastjson2:fastjson2` | 2.0.60 | JSON 存储模式序列化（多态列按需带类名） |
 | `org.projectlombok:lombok` | 1.18.46 | 实体 getter/setter 等样板代码 |
 | `org.slf4j:slf4j-api` + `logback-classic/core` | 2.0.18 / 1.5.36 | 日志 |
 | `org.apache.commons:commons-lang3` / `commons-text` | 3.18.0 / 1.10.0 | 工具类 |
 | `ch.vorburger.mariaDB4j:mariaDB4j` | 3.1.0（test） | 嵌入式 MariaDB，自包含集成测试 |
 | `org.junit.jupiter:junit-jupiter-api` | 5.11.4（test） | 单元/集成测试 |
 
-> 根 POM 把 `junit`、`lombok`、`fastjson`、`commons-*`、`logback`、`slf4j`、`protostuff`
+> 根 POM 把 `junit`、`lombok`、`fastjson2`、`commons-*`、`logback`、`slf4j`、`protostuff`
 > 声明在 `<dependencies>`（非 `<dependenciesManagement>`）里，即所有子模块默认继承这些依赖；
 > `caffeine`、`HikariCP`、MySQL 驱动则由各模块按需声明。
 
@@ -1078,11 +1078,16 @@ PARTITIONS 8;
   写入用 `JSON.toJSONString(value)`，读取用
   `JSON.parseObject(json, genericType != null ? genericType : javaType)`——
   即**按字段声明的泛型/类型反解**。
-  > 注意 `@Column#storageMode` 的 Javadoc 里写着「读取端配合 SupportAutoType 才能还原多态元素」，
-  > 但实现（`MysqlBeanValueHandler`）**刻意关闭了 `Feature.SupportAutoType`**：
-  > fastjson 1.x 的 autoType 会按 JSON 里的 `@type` 实例化任意类，凡能写该 JSON 列者
-  > 即可借黑名单绕过发起反序列化攻击。因此**多态子类元素（`List<子类>`）无法靠 `@type` 还原**，
-  > 需要精确类型时请显式声明字段泛型，或改用 BLOB + Protostuff。
+  > 默认档**刻意不带类型标记**（非多态列不注入任何 autoType 特性）：按 JSON 里的 `@type`
+  > 实例化任意类，等于凡能写该 JSON 列者都能发起反序列化攻击。因此多态子元素会静默退化
+  > （`List<接口>` 读回来是 JDK 代理，父类字段读回来是父类且丢子类独有字段）。
+  > 需要保留运行时类型时逐列开启 `@Column(polymorphic = true)`：它走 fastjson2 的
+  > `AutoTypeBeforeHandler` 白名单，允许实例化的类由**字段声明类型自己算出的继承树上界**给出，
+  > 上界外的类名（`JdbcRowSetImpl` 这类 gadget）一律抛错并升级为带列名的
+  > `TypeMismatchDataAccessException`；声明太宽、算不出上界的列（`Object`、`Map<String, Object>`）
+  > 读写两侧都是空操作，避免把"谁能写这一列"当成唯一边界。
+  > 这条通道确实带了 `JSONReader.Feature.SupportAutoType`（嵌套容器只有在这一档才读得回来），
+  > 与旧文档"全程不开 autoType"的说法不同，安全边界改由白名单承担，并有测试钉住。
 - **BLOB**（`StorageMode.BLOB` 等）：用 `ProtostuffUtil` 二进制序列化，体积小、速度快，
   但对数据库而言是一团不透明字节，无法按内容检索。
   `byte[]` 字段直接写原始字节；其它类型走 Protostuff。读取时 `java.sql.Blob` 会先取成 `byte[]`。
@@ -1113,8 +1118,9 @@ PARTITIONS 8;
 
 测试分两类，命名约定：单元测试 `*Test`，集成测试 `*IT`。
 mysql 模块的 POM **显式把 `**/*IT.java` 纳入 surefire 的 includes**（默认只扫 `*Test.java`）。
-根 POM 与 core 模块都为 surefire 配置了 `--add-opens java.base/java.lang.reflect=ALL-UNNAMED`
-等参数，因为单测中 fastjson 序列化含 `Field` / `AnnotatedType` 的模型对象需要开放 JDK 内部包。
+根 POM 只为 surefire 锁版本（2.x 发现不了 JUnit 5），不再传 `--add-opens`：
+JSON 序列化换成 fastjson2 后不再反射触碰 `java.lang.reflect` 内部字段，
+原先为它开放 JDK 内部包的参数已成累赘，删掉后 core 单测仍全绿。
 
 ### 单元测试（无需数据库）
 
@@ -1245,8 +1251,9 @@ wxd-gaming.batis/
 12. **`MysqlTableAlterHandler` 从不生成 `DROP COLUMN`**：实体里删掉的字段，库端的列会永久保留
     （只删对应索引）。想清列必须手工 DDL。索引则相反——实体里没有声明的索引会被 `DROP`，
     现在会逐条 `warn` 出索引名，也可用 `setDropRedundantIndexes(false)` 改为只告警不删除。
-13. **JSON 反序列化刻意关闭 `Feature.SupportAutoType`**（防 fastjson autoType 反序列化攻击），
-    因此多态子类元素无法靠 JSON 里的 `@type` 还原。
+13. **JSON 反序列化默认不碰 autoType**（防按 `@type` 实例化任意类的反序列化攻击），所以多态子类
+    元素会静默退化；只有 `@Column(polymorphic = true)` 的列才走带白名单的还原通道
+    （声明类型继承树外的类名一律抛错）。
 14. **列的字符集/排序规则只告警不修复**：两边 `COLUMN_TYPE` 相同而字符集不同（库端 latin1、
     实体期望 utf8mb4）时，类型比对发现不了，框架会在 `checkTable` 时 `warn` 出列名，
     但不会自动 `MODIFY`——实体注解目前无法表达 charset/collation。
@@ -1290,6 +1297,6 @@ wxd-gaming.batis/
     `release` 同时约束语法级别和可引用的 JDK API，无法再跟随构建机 JDK 漂移。
 28. **仓库仍无 LICENSE、无 `distributionManagement`**，构件需本地 `mvnw install` 后使用；
     `mvnw` wrapper 已补齐（Maven 3.9.9，`only-script` 模式，含 SHA-256 校验）。
-29. **父 POM 把 `fastjson` / `logback-classic` / `commons-*` / `protostuff` 作为 compile 依赖下发**，
+29. **父 POM 把 `fastjson2` / `logback-classic` / `commons-*` / `protostuff` 作为 compile 依赖下发**，
     使用方会被传递引入这些库（含一个日志绑定）。若要嵌入宿主应用，建议按需 `optional`
     或在自己的 POM 里排除。

@@ -116,13 +116,15 @@ public enum StorageMode {
     TIME,
     /**
      * 以 JSON 字符串存储 / 原生 JSON 类型
-     * <p>写出的是<b>不带类名</b>的纯业务 JSON（fastjson 默认，刻意不加 WriteClassName），
+     * <p>写出的是<b>不带类名</b>的纯业务 JSON（fastjson2 默认，刻意不加 WriteClassName），
      * 读取按字段声明的泛型类型反解，因此多态字段会静默退化：{@code List<接口>} 读回来是
      * JDK 动态代理（强转子类在消费点抛 ClassCastException），{@code 父类字段存子类} 读回来是父类
-     * 且子类独有字段直接丢掉（不报错）。声明为 {@code Object} 的字段默认读回来是 JSONObject，
-     * 开启标记后能否还原具体子类则取决于 fastjson 的内部类型缓存，不作为契约。
-     * 需要保留运行时类型时逐列开启 {@code @Column(polymorphic = true)}，
-     * 它只在写侧加类型标记，读侧靠 fastjson 的"只认期望类型子类"受限通道还原，全程不开 autoType。</p>
+     * 且子类独有字段直接丢掉（不报错）。声明为 {@code Object} 的字段读回来是 JSONObject，
+     * 这一档不承诺任何运行时类型还原。
+     * 需要保留运行时类型时逐列开启 {@code @Column(polymorphic = true)}：写侧加类型标记，
+     * 读侧只在"由声明类型算出的继承树白名单"内采信标记，白名单外的类名一律抛错。
+     * 这条通道会带上 {@code JSONReader.Feature.SupportAutoType}（否则对象图里的嵌套容器读不回来），
+     * 安全性由白名单而不是由"不开特性"保证；声明太宽、算不出上界的列读写两侧都不走这条路。</p>
      * <p>建表渲染目前是 LONGTEXT 而不是原生 json（历史兼容，见
      * {@code MysqlColumnTypeDefHandler#renderType}），所以别指望能在 SQL 里用 JSON 函数查它。</p>
      * <p>要原生 JSON 列的话在 pgsql 上把选型写在列上而不是模式上：

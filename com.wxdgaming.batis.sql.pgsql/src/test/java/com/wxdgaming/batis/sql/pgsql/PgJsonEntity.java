@@ -52,6 +52,14 @@ public class PgJsonEntity {
     @Column(storageMode = StorageMode.JSON)
     private List<String> asText;
 
+    /**
+     * 多态列：声明成接口、存具体子类，且落在 PG 原生 jsonb 上。
+     * <p>这一档把两个承诺叠在一起：类型标记只是 JSON 里的一个普通键（否则 jsonb 在写入阶段就报
+     * 非法输入，而 Java 侧的单测看不出来），以及读回来仍然是子类。</p>
+     */
+    @Column(type = "JSONB", polymorphic = true)
+    private PgShape shape;
+
     /** 主键之外的第二个唯一列：迁移用例要在同一张表上按 id 定位这一行 */
     @Column(type = "VARCHAR(32)", nullable = false, unique = true)
     private String bizKey;

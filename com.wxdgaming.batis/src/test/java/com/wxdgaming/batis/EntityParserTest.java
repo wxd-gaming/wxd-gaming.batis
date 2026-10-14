@@ -1,7 +1,7 @@
 package com.wxdgaming.batis;
 
-import com.alibaba.fastjson.JSON;
-import com.alibaba.fastjson.serializer.SerializerFeature;
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONWriter;
 import com.wxdgaming.batis.annotation.Column;
 import com.wxdgaming.batis.annotation.Id;
 import com.wxdgaming.batis.annotation.Table;
@@ -36,7 +36,7 @@ class EntityParserTest {
     @Test
     void testTableNameNoAnnotation() {
         TableInfo info = EntityParser.parse(SimpleEntity.class);
-        System.out.println(JSON.toJSONString(info, SerializerFeature.PrettyFormat));
+        System.out.println(JSON.toJSONString(info, JSONWriter.Feature.PrettyFormat));
         assertEquals("simple_entity", info.getTableName());
         assertNull(info.getComment());
     }
