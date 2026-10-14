@@ -4,7 +4,7 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.wxdgaming.batis</groupId>
+    <groupId>io.github.wxd-gaming</groupId>
     <artifactId>wxd-gaming.batis</artifactId>
     <version>1.0.1</version>
     <packaging>pom</packaging>
@@ -56,11 +56,11 @@
         <module>com.wxdgaming.batis</module>
         <module>com.wxdgaming.batis.sql</module>
         <module>com.wxdgaming.batis.sql.mysql</module>
-        <!--
-          以下两个模块为未实现的占位（pgsql 零源码、mongodb 仅一个空类），已从构建列表摘除，
-          避免打出空 jar 让使用方误引入。落地实现后再加回：
-        <module>com.wxdgaming.batis.mongodb</module>
         <module>com.wxdgaming.batis.sql.pgsql</module>
+        <!--
+          mongodb 模块仍是未实现的占位（仅一个空类），暂不纳入构建，
+          避免打出空 jar 让使用方误引入；落地实现后再加回：
+        <module>com.wxdgaming.batis.mongodb</module>
         -->
     </modules>
 
@@ -79,6 +79,8 @@
         <maven.compiler.encoding>${encoding}</maven.compiler.encoding>
         <logback.version>1.5.36</logback.version>
         <slf4j.version>2.0.18</slf4j.version>
+        <!-- 嵌入式 PostgreSQL 测试用发行包版本（zonky embedded-postgres 的默认版本，与驱动无关） -->
+        <embedded.postgres.version>14.22.0</embedded.postgres.version>
     </properties>
 
     <dependencyManagement>
@@ -140,6 +142,18 @@
                 <groupId>com.github.ben-manes.caffeine</groupId>
                 <artifactId>caffeine</artifactId>
                 <version>3.2.2</version>
+            </dependency>
+            <!--
+              嵌入式 PostgreSQL 的 BOM：它按平台把各操作系统/架构的 PG 发行包声明成 runtime 依赖，
+              PG 版本由 BOM 统一决定。只用它的 dependencyManagement，产物里不会引入任何东西。
+              不在子模块里各写一份版本，避免 pgsql 模块与将来可能的其它 PG 用库版本漂移。
+            -->
+            <dependency>
+                <groupId>io.zonky.test.postgres</groupId>
+                <artifactId>embedded-postgres-binaries-bom</artifactId>
+                <version>${embedded.postgres.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
             </dependency>
         </dependencies>
     </dependencyManagement>
@@ -292,5 +306,106 @@
             </resource>
         </resources>
     </build>
+    <profiles>
+        <profile>
+            <id>deploy</id>
+            <build>
+                <plugins>
+                    <!-- Source JAR -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-source-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>attach-sources</id>
+                                <goals>
+                                    <goal>jar-no-fork</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
 
+                    <!-- Javadoc JAR -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-javadoc-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>attach-javadocs</id>
+                                <goals>
+                                    <goal>jar</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                        <configuration>
+                            <!-- 忽略所有错误 -->
+                            <failOnError>false</failOnError>
+
+                            <!-- 忽略特定错误 -->
+                            <additionalOptions>
+                                <additionalOption>-Xdoclint:none</additionalOption>
+                            </additionalOptions>
+
+                            <!-- 或更细粒度的控制 -->
+                            <doclint>none</doclint>
+                        </configuration>
+                    </plugin>
+                    <!-- GPG 签名 -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>sign-artifacts</id>
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>sign</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <extensions>true</extensions>
+                        <configuration>
+                            <publishingServerId>s01</publishingServerId>
+                            <autoPublish>true</autoPublish>
+                        </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-clean-plugin</artifactId>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-enforcer-plugin</artifactId>
+                    </plugin>
+                    <!--            <plugin>-->
+                    <!--                <groupId>org.springframework.boot</groupId>-->
+                    <!--                <artifactId>spring-boot-maven-plugin</artifactId>-->
+                    <!--                <configuration>-->
+                    <!--                    &lt;!&ndash; 取消查找本项目下的Main方法：为了解决Unable to find main class的问题 &ndash;&gt;-->
+                    <!--                    <mainClass>none</mainClass>-->
+                    <!--                    &lt;!&ndash; 解决maven-plugin插件打的Jar包可以运行，但依赖方打包找不到此模块中的类或属性的问题(程序包xxx不存在) &ndash;&gt;-->
+                    <!--                    <classifier>execute</classifier>-->
+                    <!--                    <excludes>-->
+                    <!--                        <exclude>-->
+                    <!--                            <groupId>org.projectlombok</groupId>-->
+                    <!--                            <artifactId>lombok</artifactId>-->
+                    <!--                        </exclude>-->
+                    <!--                    </excludes>-->
+                    <!--                </configuration>-->
+                    <!--                <executions>-->
+                    <!--                    <execution>-->
+                    <!--                        <goals>-->
+                    <!--                            <goal>repackage</goal>-->
+                    <!--                        </goals>-->
+                    <!--                    </execution>-->
+                    <!--                </executions>-->
+                    <!--            </plugin>-->
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

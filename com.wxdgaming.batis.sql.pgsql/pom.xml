@@ -4,11 +4,53 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
     <parent>
-        <groupId>com.wxdgaming.batis</groupId>
+        <groupId>io.github.wxd-gaming</groupId>
         <artifactId>wxd-gaming.batis</artifactId>
         <version>1.0.1</version>
     </parent>
 
     <artifactId>com.wxdgaming.batis.sql.pgsql</artifactId>
+
+    <dependencies>
+        <dependency>
+            <groupId>io.github.wxd-gaming</groupId>
+            <artifactId>com.wxdgaming.batis.sql</artifactId>
+            <version>1.0.1</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.7.8</version>
+        </dependency>
+
+        <!--
+          嵌入式 PostgreSQL，用于本地/CI 自包含运行集成测试，无需外部 PG 实例。
+          它会把 windows/darwin/linux 各平台的 PG 发行包作为 runtime 依赖一起拉下来
+          （仅测试作用域，不进产物），首次构建需要联网下载。
+        -->
+        <dependency>
+            <groupId>io.zonky.test</groupId>
+            <artifactId>embedded-postgres</artifactId>
+            <version>2.2.2</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- 集成测试类以 *IT 命名，需要显式纳入 surefire 默认范围 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <includes>
+                        <include>**/*Test.java</include>
+                        <include>**/*IT.java</include>
+                    </includes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 
 </project>
