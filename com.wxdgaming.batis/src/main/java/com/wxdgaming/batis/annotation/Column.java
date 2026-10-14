@@ -49,6 +49,9 @@ public @interface Column {
      * <p>这也是唯一的"逃生舱"：unsigned/zerofill 这类逻辑类型表达不出来的列定义只能走字面量。
      * 代价是从此与方言绑定，并且长度/精度的自动修正（如 BigDecimal 兜底精度、UUID 固定 36）
      * 都不会再触发——宽度写错只能自己负责。</p>
+     * <p>另一个正当用途是"在同一份实体里挑方言的原生档位"：pgsql 上写 {@code type = "jsonb"}
+     * 或 {@code "json"} 就是把 {@code StorageMode.JSON} 的列从默认的 text 换成 PG 原生 JSON 类型，
+     * 结构比对与迁移都按这一档走（json 与 jsonb 之间也是两种不同结构，不会互相视为"没变"）。</p>
      */
     String type() default "";
 
@@ -102,8 +105,9 @@ public @interface Column {
      * <p>
      * 谁在读它、读了影响什么：两处。DDL 侧，EntityParser 的类型推断优先按本值分支
      * （非 AUTO 时 Java 类型不再参与判断，直接映射到对应 SqlType）；运行期侧，方言的
-     * BeanValueHandler 在写库前按它决定序列化方式（JSON 走带类名的 JSON 串，BLOB 走
-     * Protostuff 二进制），读库时反向还原。
+     * BeanValueHandler 在写库前按它决定序列化方式（JSON 走<b>不带类名</b>的 JSON 串，
+     * 需要保留子类类型时用 {@link #polymorphic()} 逐列开启；BLOB 走 Protostuff 二进制），
+     * 读库时反向还原。
      * <p>
      * 留 AUTO 时的推断规则：byte 数组例外地保持 AUTO（原生映射为 BLOB，不做任何序列化），
      * 其它数组、Collection、Map 以及不在 JDK 基础类型名单里的类型（自定义 POJO、枚举等）一律升级为 JSON，
@@ -112,6 +116,31 @@ public @interface Column {
      * 显式指定成基础档位（如 INT、VARCHAR）则等于跳过上述全部推断，用 Java 字段的类型换一种列类型落库。
      */
     StorageMode storageMode() default StorageMode.AUTO;
+
+    /**
+     * 多态 JSON 列：让"声明为接口/父类的字段存具体子类"在 JSON 往返后仍然是子类。
+     * <p>默认 false。开启后框架只在写出的 JSON 里追加 fastjson 的类型标记，读取端仍然
+     * <b>不开</b> autoType：反序列化时 fastjson 只接受"类型标记指向声明类型的子类"，
+     * 指向不相干类会被拒绝，所以攻击面被限定在本字段自己的继承树里，不会退化到任意类实例化。</p>
+     * <p>三条实测边界，写之前先对照：</p>
+     * <ul>
+     *   <li>前提是这一列真的走 JSON 编码（{@code storageMode} 为 JSON，或 AUTO 推断成 JSON 的
+     *       List/Map/POJO 列）；标在 BLOB 档或基础类型列上没有作用。</li>
+     *   <li>只对声明为接口/抽象类/父类的列有确定效果。声明成 {@code Object} 的列不在保证范围内：
+     *       期望类型太宽时 fastjson 是否放行标记取决于它内部的已注册类缓存，实测同一份文本读到过
+     *       具体子类、也直接抛过反序列化失败，业务别把正确性压在这上面。</li>
+     *   <li>类型标记会让容器自身的类型也出现在 JSON 里，且 Map 中的 Long/Double 值会被写成
+     *       {@code 9L}、{@code 0.5D} 这类带后缀的字面量——那不是标准 JSON，PG 的原生
+     *       {@code json}/{@code jsonb} 列（见 {@link #type()}）会在写入时报非法输入。
+     *       需要原生 JSON 档时，多态就交给 {@link #converter()} 自己写判别字段。</li>
+     *   <li>存量行不受影响：没有类型标记的旧文本仍按声明类型解析。但同一列一旦开启，
+     *       库里存的就不再是纯业务数据，别的消费者（SQL 里的 JSON 函数、报表、其它服务）
+     *       会多读到一个类型标记键。</li>
+     * </ul>
+     * <p>与 {@link #converter()} 互斥：转换器是完全接管的，框架不再做 JSON 编码，
+     * 本属性会被忽略——这种"配置了但不起作用"在解析阶段就会直接报错。</p>
+     */
+    boolean polymorphic() default false;
 
     /**
      * 自定义类型转换器类，需实现 {@link com.wxdgaming.batis.converter.TypeConverter}

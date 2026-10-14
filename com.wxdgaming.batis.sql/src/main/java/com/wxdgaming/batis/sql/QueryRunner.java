@@ -293,23 +293,39 @@ public class QueryRunner implements AutoCloseable {
     /**
      * 执行 INSERT 并回取自增主键（仅支持单主键列）。
      * <p>
-     * 传入 {@code RETURN_GENERATED_KEYS} 让驱动记录生成键，插入后从
-     * {@code getGeneratedKeys()} 取第一列。返回 null 的三种合法情形：表无自增列、
+     * 让驱动记录生成键，插入后从 {@code getGeneratedKeys()} 取第一列。返回 null 的三种合法情形：表无自增列、
      * 驱动未回传、回传值不是数值（如字符串主键）——所以调用方（{@link BeanRunner}）
      * 必须容忍 null，不能把"没拿到 ID"当成失败。
      * </p>
+     * <p>不指定自增列名的便捷形态；实体侧调用请用
+     * {@link #executeInsert(String, Object[], String)}，理由见该方法。</p>
      *
      * @param sql  INSERT 语句
      * @param args 参数数组
      * @return 自增主键，无自增列或无法获取时返回 null
      */
     public Number executeInsert(String sql, Object[] args) {
+        return executeInsert(sql, args, null);
+    }
+
+    /**
+     * 执行 INSERT 并回取自增主键，可按列名向驱动索取生成键。
+     * <p>WHY 需要 {@code identityColumn} 这一形态：pgjdbc 把 {@code RETURN_GENERATED_KEYS}
+     * 实现成 {@code RETURNING *}，生成键结果集的第一列因此是表的第一个字段而非自增列——
+     * 主键不在首列的实体会把别的列的值当成 ID 回写。指定列名后两种驱动都只回传自增列。</p>
+     *
+     * @param sql            INSERT 语句
+     * @param args           参数数组
+     * @param identityColumn 自增列名，null 表示沿用 {@code RETURN_GENERATED_KEYS}
+     * @return 自增主键，无自增列或无法获取时返回 null
+     */
+    public Number executeInsert(String sql, Object[] args, String identityColumn) {
         checkWritable();
         return timed("插入", sql, args, () -> {
             try {
                 Connection conn = getConnection();
                 // 声明需要生成键：必须在 prepareStatement 时提出，事后无法补取
-                try (PreparedStatement stmt = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+                try (PreparedStatement stmt = prepareForGeneratedKeys(conn, sql, identityColumn)) {
                     applyQueryTimeout(stmt);
                     bind(stmt, args);
                     stmt.executeUpdate();
@@ -325,6 +341,17 @@ public class QueryRunner implements AutoCloseable {
             }
             return null;
         });
+    }
+
+    /**
+     * 为"插入后取生成键"预编译语句：给了列名就按列名索取，否则退回通用的 {@code RETURN_GENERATED_KEYS}。
+     * <p>包内可见，让 {@link BeanRunner} 的批量插入走同一套取键口径。</p>
+     */
+    static PreparedStatement prepareForGeneratedKeys(Connection conn, String sql, String identityColumn)
+            throws SQLException {
+        return identityColumn != null && !identityColumn.isEmpty()
+                ? conn.prepareStatement(sql, new String[]{identityColumn})
+                : conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
     }
 
     /**

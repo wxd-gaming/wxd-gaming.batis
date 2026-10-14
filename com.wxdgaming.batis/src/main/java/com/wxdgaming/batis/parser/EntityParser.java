@@ -208,6 +208,7 @@ public class EntityParser {
             columnInfo.setNullable(columnAnn.nullable());
             columnInfo.setUnique(columnAnn.unique());
             columnInfo.setDefaultValue(columnAnn.defaultValue());
+            columnInfo.setPolymorphic(columnAnn.polymorphic());
 
             // 1. 确定存储模式
             StorageMode storageMode = resolveStorageMode(columnAnn.storageMode(), field.getType());
@@ -241,6 +242,17 @@ public class EntityParser {
                         "实例化字段 " + field.getName() + " 的类型转换器失败: "
                                 + columnAnn.converter().getName(), e);
             }
+        }
+
+        // 多态 JSON 与转换器互斥：转换器完全接管编解码，框架不再走 JSON 编码，
+        // 两者同时声明时 polymorphic 会被静默忽略——这种配置错误必须在解析期报错，
+        // 否则实体作者以为子类类型有保障，实际读回来还是声明类型。
+        if (columnInfo.isPolymorphic() && columnInfo.getConverter() != null) {
+            throw new IllegalStateException("字段 " + field.getName()
+                    + " 同时声明了 polymorphic = true 与 converter = "
+                    + columnInfo.getConverter().getClass().getName()
+                    + "：转换器会完全接管该列的编解码，polymorphic 不生效。"
+                    + "要去掉其中一个；需要自定义多态格式请只保留 converter，并在其中自行写入判别字段。");
         }
 
         // 主键列强制非空：主键注解的存在本身就是 NOT NULL 语义，覆盖注解里的 nullable

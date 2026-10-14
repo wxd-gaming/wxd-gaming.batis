@@ -116,10 +116,20 @@ public enum StorageMode {
     TIME,
     /**
      * 以 JSON 字符串存储 / 原生 JSON 类型
-     * <p>MySQL 侧写出去的是带类名的 JSON（fastjson 的 WriteClassName），读取端配合 SupportAutoType
-     * 才能还原多态元素和泛型集合；不带类名时 {@code List<子类>} 读回来会退化成 JSONObject，
-     * 这是这一档最常见的踩坑点。建表渲染目前是 LONGTEXT 而不是原生 json（历史兼容，见
+     * <p>写出的是<b>不带类名</b>的纯业务 JSON（fastjson 默认，刻意不加 WriteClassName），
+     * 读取按字段声明的泛型类型反解，因此多态字段会静默退化：{@code List<接口>} 读回来是
+     * JDK 动态代理（强转子类在消费点抛 ClassCastException），{@code 父类字段存子类} 读回来是父类
+     * 且子类独有字段直接丢掉（不报错）。声明为 {@code Object} 的字段默认读回来是 JSONObject，
+     * 开启标记后能否还原具体子类则取决于 fastjson 的内部类型缓存，不作为契约。
+     * 需要保留运行时类型时逐列开启 {@code @Column(polymorphic = true)}，
+     * 它只在写侧加类型标记，读侧靠 fastjson 的"只认期望类型子类"受限通道还原，全程不开 autoType。</p>
+     * <p>建表渲染目前是 LONGTEXT 而不是原生 json（历史兼容，见
      * {@code MysqlColumnTypeDefHandler#renderType}），所以别指望能在 SQL 里用 JSON 函数查它。</p>
+     * <p>要原生 JSON 列的话在 pgsql 上把选型写在列上而不是模式上：
+     * {@code @Column(storageMode = JSON, type = "jsonb")}（或 {@code "json"}）——
+     * StorageMode 只管"值怎么写"（产物本来就是 JSON 字符串，text/json/jsonb 三种列都收），
+     * {@code type} 才管"列在库里是什么类型"。PG 方言会按该列的物理类型把参数包成驱动的原生 JSON 形态，
+     * 并在"文本列改 JSON 列"这类迁移里补出必需的 cast 表达式，两端都不用改 Java 代码。</p>
      */
     JSON
 

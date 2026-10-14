@@ -19,6 +19,10 @@ public class StorageModeEntity {
     @Column(storageMode = StorageMode.JSON)
     private List<String> payload;
 
+    /** 多态列：只有这一列写出类型标记，用来验证 polymorphic 的解析与"默认列不受影响" */
+    @Column(storageMode = StorageMode.JSON, polymorphic = true)
+    private List<Object> polymorphicPayload;
+
     @Column(storageMode = StorageMode.LONG)
     private Object counter;
 
@@ -29,6 +33,8 @@ public class StorageModeEntity {
     public void setId(long id) { this.id = id; }
     public List<String> getPayload() { return payload; }
     public void setPayload(List<String> payload) { this.payload = payload; }
+    public List<Object> getPolymorphicPayload() { return polymorphicPayload; }
+    public void setPolymorphicPayload(List<Object> polymorphicPayload) { this.polymorphicPayload = polymorphicPayload; }
     public Object getCounter() { return counter; }
     public void setCounter(Object counter) { this.counter = counter; }
     public String getCode() { return code; }

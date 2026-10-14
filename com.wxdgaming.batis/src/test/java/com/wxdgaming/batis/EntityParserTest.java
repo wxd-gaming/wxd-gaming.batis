@@ -2,9 +2,13 @@ package com.wxdgaming.batis;
 
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.serializer.SerializerFeature;
+import com.wxdgaming.batis.annotation.Column;
+import com.wxdgaming.batis.annotation.Id;
+import com.wxdgaming.batis.annotation.Table;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.IndexInfo;
 import com.wxdgaming.batis.model.SqlType;
+import com.wxdgaming.batis.model.StorageMode;
 import com.wxdgaming.batis.model.TableInfo;
 import com.wxdgaming.batis.parser.EntityParser;
 import org.junit.jupiter.api.Test;
@@ -104,6 +108,55 @@ class EntityParserTest {
                 .filter(c -> c.getFieldName().equals("active")).findFirst().orElse(null);
         assertNotNull(activeCol);
         assertEquals(SqlType.BOOLEAN, activeCol.getSqlType());
+    }
+
+    // ==================== 多态 JSON 列（polymorphic） ====================
+
+    @Test
+    void testPolymorphicFlagParsed() {
+        TableInfo info = EntityParser.parse(StorageModeEntity.class);
+        // 只有显式声明的列带标记：默认档必须保持 false，否则存量列的 JSON 格式会被框架升级改掉
+        assertTrue(info.getColumn("polymorphic_payload").isPolymorphic());
+        assertFalse(info.getColumn("payload").isPolymorphic());
+        assertFalse(info.getColumn("code").isPolymorphic());
+        // 开启标记不改变列的逻辑类型（仍是 JSON 档 -> MySQL 渲染 LONGTEXT）
+        assertEquals(SqlType.JSON, info.getColumn("polymorphic_payload").getSqlType());
+    }
+
+    @Test
+    void testPolymorphicWithConverterFailsFast() {
+        // 转换器完全接管编解码，polymorphic 会被静默忽略——这类配置错误要在解析期炸掉，
+        // 不能等到"子类读回成父类"这种运行期数据损坏才发现
+        IllegalStateException ex = assertThrows(IllegalStateException.class,
+                () -> EntityParser.parse(PolymorphicConflictEntity.class));
+        assertTrue(ex.getMessage().contains("polymorphic"), ex.getMessage());
+    }
+
+    /** 同时声明 converter 与 polymorphic 的非法实体 */
+    @Table(name = "t_poly_conflict")
+    public static class PolymorphicConflictEntity {
+        @Id
+        private long id;
+        @Column(storageMode = StorageMode.JSON, polymorphic = true, converter = TagConverter.class)
+        private List<Object> payload;
+
+        public long getId() { return id; }
+        public void setId(long id) { this.id = id; }
+        public List<Object> getPayload() { return payload; }
+        public void setPayload(List<Object> payload) { this.payload = payload; }
+    }
+
+    /** 占位转换器：只为触发与 polymorphic 的互斥校验 */
+    public static class TagConverter implements com.wxdgaming.batis.converter.TypeConverter<Object, String> {
+        @Override
+        public String convertToDatabaseColumn(Object attribute) {
+            return attribute == null ? null : attribute.toString();
+        }
+
+        @Override
+        public Object convertToEntityAttribute(String dbData) {
+            return dbData;
+        }
     }
 
     @Test
