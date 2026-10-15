@@ -291,8 +291,12 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
                     && !Collection.class.isAssignableFrom(raw) && !Map.class.isAssignableFrom(raw)) {
                 out.add(raw);
             }
-            for (Type arg : pt.getActualTypeArguments()) {
-                collectBounds(arg, out);
+            Type[] args = pt.getActualTypeArguments();
+            // Map 的键类型实参不承载多态语义：JSON 键恒为字符串，@type 只出现在值位置，
+            // 把键类型收进上界会让 Map<String,Object> 误判成有界、写出读不回来的标记
+            int first = pt.getRawType() instanceof Class<?> raw && Map.class.isAssignableFrom(raw) ? 1 : 0;
+            for (int i = first; i < args.length; i++) {
+                collectBounds(args[i], out);
             }
         } else if (type instanceof GenericArrayType array) {
             collectBounds(array.getGenericComponentType(), out);
@@ -309,7 +313,9 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
      * <p>三条规则，缺一不可：</p>
      * <ol>
      *   <li>业务类标记必须落在字段声明类型的继承树里（{@code bounds}），或者是该位置声明类型（{@code expectClass}，
-     *       由 fastjson2 从实体字段声明带出来）的子类——两者都来自编译期声明，不来自库里的字符串；</li>
+     *       由 fastjson2 从实体字段声明带出来）的子类——两者都来自编译期声明，不来自库里的字符串；
+     *       expectClass 分支只放行业务类：白名单类内声明宽泛 JDK 接口字段时，expectClass 会被带成
+     *       {@code AutoCloseable} 这类接口，不加 JDK 前缀闸门等于把 classpath 上任意实现类放进白名单；</li>
      *   <li>JDK 容器标记一律换成 {@code LinkedHashMap}/{@code ArrayList}：容器实现类本来就不在保证范围内，
      *       换成标准容器既能让 {@code TreeMap}/{@code Map.of} 这类嵌套容器读回来，也不把库里点名的实现类当真；
      *       出现在业务类型位置上的容器标记（比如 {@code List<Shape>} 的元素写着 PriorityQueue）照样拒绝。</li>
@@ -335,7 +341,16 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
             }
             // 只置换 JDK 自带容器：业务类可能自己实现 Collection，那是声明类型继承树里的合法子类，不能被换掉
             if (clazz.getName().startsWith("java.") && isContainer(clazz)) {
-                Class<?> standard = Map.class.isAssignableFrom(clazz) ? LinkedHashMap.class : ArrayList.class;
+                Class<?> standard;
+                if (Map.class.isAssignableFrom(clazz)) {
+                    standard = LinkedHashMap.class;
+                } else if ((expectClass != null && Set.class.isAssignableFrom(expectClass))
+                        || Set.class.isAssignableFrom(clazz)) {
+                    // Set 位置归一到 LinkedHashSet：归一成 ArrayList 会让 Set.isAssignableFrom 落空、读取必炸
+                    standard = LinkedHashSet.class;
+                } else {
+                    standard = ArrayList.class;
+                }
                 if (expectClass == null || expectClass == Object.class || expectClass.isAssignableFrom(standard)) {
                     return standard;
                 }
@@ -347,11 +362,21 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
                     return clazz;
                 }
             }
-            if (expectClass != null && expectClass != Object.class && expectClass.isAssignableFrom(clazz)) {
+            // expectClass 分支只放行业务类：白名单类里若声明了 AutoCloseable/Serializable 这类宽泛 JDK 接口字段，
+            // fastjson2 会把 expectClass 带成该接口，JdbcRowSetImpl 这类 JDK gadget 实现
+            // 恰好满足 isAssignableFrom——不加前缀闸门，这一条就是绕出声明继承树的口子
+            if (expectClass != null && expectClass != Object.class
+                    && expectClass.isAssignableFrom(clazz) && !isJdkPackage(clazz)) {
                 return clazz;
             }
             throw new JSONException("多态列的类型标记 " + typeName + " 不是声明类型 "
                     + (expectClass == null ? "?" : expectClass.getName()) + " 的子类");
+        }
+
+        private static boolean isJdkPackage(Class<?> clazz) {
+            String name = clazz.getName();
+            return name.startsWith("java.") || name.startsWith("javax.") || name.startsWith("jdk.")
+                    || name.startsWith("sun.") || name.startsWith("com.sun.");
         }
 
         private static boolean isContainer(Class<?> clazz) {

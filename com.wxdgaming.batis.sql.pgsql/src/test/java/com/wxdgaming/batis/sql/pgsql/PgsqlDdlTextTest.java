@@ -292,4 +292,25 @@ class PgsqlDdlTextTest {
         assertEquals("SELECT COUNT(*) FROM \"t_pg_account\"", handler.buildCountSql(tableInfo));
         assertEquals("SELECT * FROM \"t_pg_account\"", handler.buildSelectAllSql(tableInfo));
     }
+
+    /**
+     * 用例⑫：默认值比对的时间族折叠与回读侧同口径。
+     * <p>库端回读把 {@code now()}/{@code CURRENT_TIMESTAMP(6)} 统一折成 {@code CURRENT_TIMESTAMP}
+     * （见 {@link PgsqlDbMetaHandler}），实体侧写 {@code now()} 时若不跟着折，
+     * 每次启动都会白发一条 {@code SET DEFAULT} 且永不收敛。布尔同义写法（0/1↔false/true）
+     * 是既有口径，一并锁住防回归。</p>
+     */
+    @Test
+    void defaultValueComparisonFoldsTemporalSynonyms() {
+        PgsqlTableAlterHandler handler = PgsqlTableAlterHandler.INSTANCE;
+
+        assertTrue(handler.defaultValueEquals("now()", "CURRENT_TIMESTAMP"), "now() 与回读的 CURRENT_TIMESTAMP 必须视为一致");
+        assertTrue(handler.defaultValueEquals("CURRENT_TIMESTAMP", "now()"), "反方向同样折叠");
+        assertTrue(handler.defaultValueEquals("CURRENT_TIMESTAMP(6)", "now()"), "带精度尾巴的 CURRENT_TIMESTAMP 也要折平");
+        assertTrue(handler.defaultValueEquals("Now()", "CURRENT_TIMESTAMP"), "大小写不敏感");
+        assertTrue(handler.defaultValueEquals("0", "false"), "布尔同义写法保持既有口径");
+
+        assertFalse(handler.defaultValueEquals("now()", null), "有默认值与无默认值不能判等");
+        assertFalse(handler.defaultValueEquals("'2026-01-01'", "CURRENT_TIMESTAMP"), "字面量与时间函数不能判等");
+    }
 }

@@ -17,6 +17,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Bean CRUD 操作器，封装实体级别的插入、查询、更新、删除操作
@@ -143,7 +144,7 @@ public class BeanRunner implements AutoCloseable {
         BeanToInsertHandler handler = requireInsertHandler();
         ColumnInfo identityColumn = handler.getIdentityColumn(bean);
         Number genId = queryRunner.executeInsert(handler.buildInsertSql(bean), handler.buildInsertParams(bean),
-                identityColumn == null ? null : identityColumn.getColumnName().toLowerCase());
+                identityColumn == null ? null : identityColumn.getColumnName().toLowerCase(Locale.ROOT));
         handler.writeGeneratedKey(bean, genId);
         jdbcTemplate.getStats().recordInsert(System.currentTimeMillis() - start, 1);
         return genId;
@@ -267,7 +268,7 @@ public class BeanRunner implements AutoCloseable {
         ColumnInfo identityColumn = handler.getIdentityColumn(firstBean);
         // 按列名向驱动索取生成键：pgjdbc 会把通用形态实现成 RETURNING *，
         // 结果集首列就是表的第一个字段而不是自增列，批量按序 zip 回写时会整体拿错值
-        String identityColumnName = identityColumn == null ? null : identityColumn.getColumnName().toLowerCase();
+        String identityColumnName = identityColumn == null ? null : identityColumn.getColumnName().toLowerCase(Locale.ROOT);
 
         List<Object[]> batchArgs = new ArrayList<>(beans.size());
         for (Object bean : beans) {

@@ -153,6 +153,7 @@ public class PgsqlColumnTypeDefHandler implements ColumnTypeDefHandler {
     public String renderType(ColumnInfo col) {
         String explicit = col.getType();
         if (explicit != null && !explicit.isEmpty()) {
+            checkExplicitType(col, explicit);
             return explicit;
         }
         SqlType sqlType = col.getSqlType();
@@ -179,6 +180,22 @@ public class PgsqlColumnTypeDefHandler implements ColumnTypeDefHandler {
             case DATETIME, TIMESTAMP -> "TIMESTAMP";
             case JSON -> "TEXT";
         };
+    }
+
+    /**
+     * 显式 {@code @Column(type=...)} 逃生舱的最低安全检查：类型是直接拼进 CREATE/ALTER 的字面量，
+     * 带上语句截断字符（分号、注释、引号）就不是"物理类型"而是注入载荷了。
+     * <p>不校验类型名是否是合法 PG 类型——那会把这个逃生舱焊死（扩展类型、自定义 domain 都进不来）；
+     * 只拒绝能改变语句结构或越出类型位置的字符。</p>
+     */
+    private static void checkExplicitType(ColumnInfo col, String explicit) {
+        String lowered = explicit.toLowerCase(Locale.ROOT);
+        for (String banned : new String[]{";", "--", "/*", "'", "\""}) {
+            if (lowered.contains(banned)) {
+                throw new IllegalArgumentException("列 " + col.getColumnName()
+                        + " 的显式物理类型含有不被允许的字符 \"" + banned + "\": " + explicit);
+            }
+        }
     }
 
     /**

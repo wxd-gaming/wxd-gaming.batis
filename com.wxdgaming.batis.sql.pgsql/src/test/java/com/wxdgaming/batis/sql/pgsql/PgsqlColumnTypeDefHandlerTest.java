@@ -4,10 +4,13 @@ import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.SqlType;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * {@link PgsqlColumnTypeDefHandler} 单元测试。
@@ -98,6 +101,29 @@ class PgsqlColumnTypeDefHandlerTest {
         assertEquals("NUMERIC(12,2)", handler.renderType(explicit("NUMERIC(12,2)")));
         assertEquals("citext", handler.renderType(explicit("citext")));
         assertEquals("jsonb", handler.renderType(explicit("jsonb")));
+    }
+
+    /**
+     * 用例③b：显式物理类型里的语句截断字符当场拒绝。
+     * <p>逃生舱的字面量会被直接拼进 CREATE/ALTER，带分号、注释起始符或引号的
+     * "类型"就不再是类型而是注入载荷；扩展类型（citext）不在拒绝之列，校验只针对
+     * 能改变语句结构或越出类型位置的字符。</p>
+     */
+    @Test
+    void explicitTypeRejectsStatementBreakingCharacters() {
+        for (String payload : List.of(
+                "text; DROP TABLE x --",
+                "numeric(1) -- comment",
+                "text /* inline */",
+                "char(1)'",
+                "char(1)\"")) {
+            IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                    () -> handler.renderType(explicit(payload)),
+                    "含语句截断字符的显式类型必须被拒绝: " + payload);
+            assertTrue(ex.getMessage().contains("test_col"), "报错必须点名是哪一列: " + ex.getMessage());
+        }
+        // 合法的带参类型不受影响
+        assertEquals("numeric(1)", handler.renderType(explicit("numeric(1)")));
     }
 
     /** 用例④：既无逻辑类型又无物理类型的列当场失败，不默认给 VARCHAR 把表建错 */

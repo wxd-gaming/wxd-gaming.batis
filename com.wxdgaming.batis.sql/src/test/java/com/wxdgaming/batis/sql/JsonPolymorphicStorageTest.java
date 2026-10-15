@@ -9,8 +9,10 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -169,16 +171,32 @@ class JsonPolymorphicStorageTest {
         }
     }
 
+    /** 白名单类内声明宽泛 JDK 接口字段：expectClass 分支最容易从这里被绕出声明继承树 */
+    public static class WithResource implements Shape {
+        private AutoCloseable resource;
+
+        public AutoCloseable getResource() {
+            return resource;
+        }
+
+        public void setResource(AutoCloseable resource) {
+            this.resource = resource;
+        }
+    }
+
     /** 载体类：字段声明的泛型即 ColumnInfo.genericType 的来源，与 EntityParser 的取法一致 */
     public static class Carrier {
         List<Shape> shapes = new ArrayList<>();
         Map<String, Shape> shapeMap = new LinkedHashMap<>();
+        Set<Shape> shapeSet = new LinkedHashSet<>();
         Shape single = new Circle();
         Animal pet = new Dog();
         List<Animal> pets = new ArrayList<>();
         Shape[] arr = new Shape[0];
         Box box = new Box();
         Object any = new Circle();
+        Map<String, Object> anyMap = new LinkedHashMap<>();
+        Shape resource = new Circle();
     }
 
     private static ColumnInfo col(String fieldName, boolean polymorphic) {
@@ -367,9 +385,54 @@ class JsonPolymorphicStorageTest {
     }
 
     @Test
+    @DisplayName("Map<String,Object> 无界声明两侧 no-op：值里放业务对象也不写标记、读取不炸")
+    void mapOfStringObjectIsUnbounded() {
+        ColumnInfo anyMap = col("anyMap", true);
+        Map<String, Object> source = new LinkedHashMap<>();
+        source.put("c", circle(2));
+        String json = (String) CODEC.convertToDbValue(source, anyMap);
+        assertFalse(json.contains("@type"), "Map<String,Object> 不该写出自己读不回来的标记: " + json);
+
+        Map<?, ?> back = (Map<?, ?>) CODEC.convertFromDbValue(json, anyMap);
+        assertInstanceOf(Map.class, back.get("c"), "无界声明按 JSON 对象读回，不猜子类");
+    }
+
+    @Test
+    @DisplayName("Set 字段：元素运行时类型可还原；Set 容器标记冒充业务类型照样拒绝")
+    void setFieldRoundTripAndMarkerNormalization() {
+        ColumnInfo shapeSet = col("shapeSet", true);
+        Set<Shape> source = new LinkedHashSet<>();
+        source.add(circle(4));
+        String json = (String) CODEC.convertToDbValue(source, shapeSet);
+        Set<?> back = (Set<?>) CODEC.convertFromDbValue(json, shapeSet);
+        assertInstanceOf(Circle.class, back.iterator().next(), "Set 元素要读回实现类: " + json);
+        assertInstanceOf(Set.class, back, "读回必须保持 Set 语义，不能退化成 List: " + back.getClass());
+
+        // fastjson2 会把容器标记按元素声明类型分派（expectClass=Shape）：
+        // Set 冒充业务类型必须拒绝；归一成 LinkedHashSet 只发生在 expectClass 为 null/Object 或 Set 家族的位置
+        assertThrows(TypeMismatchDataAccessException.class,
+                () -> CODEC.convertFromDbValue(
+                        "{\"@type\":\"java.util.LinkedHashSet\",\"@value\":[{\"@type\":\""
+                                + Circle.class.getName() + "\",\"radius\":6}]}", shapeSet),
+                "Set 容器标记不能冒充声明类型");
+    }
+
+    @Test
+    @DisplayName("安全底线：白名单类内的宽泛 JDK 接口字段带不进 JDK gadget")
+    void wideJdkInterfaceFieldDoesNotAdmitJdkGadgets() {
+        // resource 字段声明为 AutoCloseable：fastjson2 会把 expectClass 带成该接口，
+        // JdbcRowSetImpl 恰好实现它——不加 JDK 前缀闸门，这就是绕出继承树的口子
+        String payload = "{\"@type\":\"" + WithResource.class.getName()
+                + "\",\"resource\":{\"@type\":\"com.sun.rowset.JdbcRowSetImpl\",\"dataSourceName\":\"ldap://x\"}}";
+        TypeMismatchDataAccessException ex = assertThrows(TypeMismatchDataAccessException.class,
+                () -> CODEC.convertFromDbValue(payload, col("resource", true)),
+                "宽泛 JDK 接口字段不能成为 gadget 入口");
+        assertTrue(ex.getMessage().contains("resource"), "报错必须点名是哪一列: " + ex.getMessage());
+    }
+
+    @Test
     @DisplayName("polymorphic 只影响序列化特性，不改变列的逻辑类型与空值路径")
-    void polymorphicKeepsColumnShape() {
-        ColumnInfo off = col("shapes", false);
+    void polymorphicKeepsColumnShape() {        ColumnInfo off = col("shapes", false);
         ColumnInfo on = col("shapes", true);
         assertEquals(off.getSqlType(), on.getSqlType());
         assertEquals(off.getType(), on.getType());

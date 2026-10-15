@@ -6,7 +6,7 @@
 
     <groupId>io.github.wxd-gaming</groupId>
     <artifactId>wxd-gaming.batis</artifactId>
-    <version>1.0.1</version>
+    <version>1.1.0</version>
     <packaging>pom</packaging>
 
 
@@ -38,17 +38,10 @@
         </developer>
     </developers>
 
-    <!-- 仓库中心地址 -->
-    <distributionManagement>
-        <snapshotRepository>
-            <id>s01</id>
-            <url>https://s01.oss.sonatype.org/content/repositories/snapshots</url>
-        </snapshotRepository>
-        <repository>
-            <id>s01</id>
-            <url>https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/</url>
-        </repository>
-    </distributionManagement>
+    <!--
+      发布走 central-publishing-maven-plugin（extensions=true 接管 deploy，不读 distributionManagement），
+      serverId 在 deploy profile 里配置（central），token 配在 settings.xml 的对应 server 上。
+    -->
 
 
 
@@ -77,6 +70,8 @@
         <project.build.sourceEncoding>${encoding}</project.build.sourceEncoding>
         <project.reporting.outputEncoding>${encoding}</project.reporting.outputEncoding>
         <maven.compiler.encoding>${encoding}</maven.compiler.encoding>
+        <!-- 可复现构建：固定 jar 内条目时间戳，两次构建产物字节一致 -->
+        <project.build.outputTimestamp>2026-10-15T00:00:00Z</project.build.outputTimestamp>
         <logback.version>1.5.36</logback.version>
         <slf4j.version>2.0.18</slf4j.version>
         <!-- 嵌入式 PostgreSQL 测试用发行包版本（zonky embedded-postgres 的默认版本，与驱动无关） -->
@@ -100,7 +95,7 @@
             <dependency>
                 <groupId>com.alibaba.fastjson2</groupId>
                 <artifactId>fastjson2</artifactId>
-                <version>2.0.60</version>
+                <version>2.0.65</version>
             </dependency>
 
             <dependency>
@@ -244,7 +239,7 @@
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-gpg-plugin</artifactId>
-                    <version>1.6</version>
+                    <version>3.2.8</version>
                     <executions>
                         <execution>
                             <id>sign-artifacts</id>
@@ -256,22 +251,14 @@
                     </executions>
                 </plugin>
 
-                <!-- Nexus Staging -->
-                <plugin>
-                    <groupId>org.sonatype.plugins</groupId>
-                    <artifactId>nexus-staging-maven-plugin</artifactId>
-                    <version>1.7.0</version>
-                    <extensions>true</extensions>
-                    <configuration>
-                        <serverId>s01</serverId>
-                        <nexusUrl>https://s01.oss.sonatype.org/</nexusUrl>
-                        <autoReleaseAfterClose>true</autoReleaseAfterClose>
-                    </configuration>
-                </plugin>
+                <!--
+                  Maven Central 发布（Central Portal）：extensions=true 接管 deploy 阶段，
+                  旧的 OSSRH s01 端点已于 2025-06 停服，不要再引入 nexus-staging 插件。
+                -->
                 <plugin>
                     <groupId>org.sonatype.central</groupId>
                     <artifactId>central-publishing-maven-plugin</artifactId>
-                    <version>0.9.0</version>
+                    <version>0.12.0</version>
                     <extensions>true</extensions>
                     <configuration>
                         <publishingServerId>central</publishingServerId>
@@ -364,46 +351,8 @@
                             </execution>
                         </executions>
                     </plugin>
-                    <plugin>
-                        <groupId>org.sonatype.central</groupId>
-                        <artifactId>central-publishing-maven-plugin</artifactId>
-                        <extensions>true</extensions>
-                        <configuration>
-                            <publishingServerId>s01</publishingServerId>
-                            <autoPublish>true</autoPublish>
-                        </configuration>
-                    </plugin>
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-clean-plugin</artifactId>
-                    </plugin>
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-enforcer-plugin</artifactId>
-                    </plugin>
-                    <!--            <plugin>-->
-                    <!--                <groupId>org.springframework.boot</groupId>-->
-                    <!--                <artifactId>spring-boot-maven-plugin</artifactId>-->
-                    <!--                <configuration>-->
-                    <!--                    &lt;!&ndash; 取消查找本项目下的Main方法：为了解决Unable to find main class的问题 &ndash;&gt;-->
-                    <!--                    <mainClass>none</mainClass>-->
-                    <!--                    &lt;!&ndash; 解决maven-plugin插件打的Jar包可以运行，但依赖方打包找不到此模块中的类或属性的问题(程序包xxx不存在) &ndash;&gt;-->
-                    <!--                    <classifier>execute</classifier>-->
-                    <!--                    <excludes>-->
-                    <!--                        <exclude>-->
-                    <!--                            <groupId>org.projectlombok</groupId>-->
-                    <!--                            <artifactId>lombok</artifactId>-->
-                    <!--                        </exclude>-->
-                    <!--                    </excludes>-->
-                    <!--                </configuration>-->
-                    <!--                <executions>-->
-                    <!--                    <execution>-->
-                    <!--                        <goals>-->
-                    <!--                            <goal>repackage</goal>-->
-                    <!--                        </goals>-->
-                    <!--                    </execution>-->
-                    <!--                </executions>-->
-                    <!--            </plugin>-->
+                    <!-- 发布本身由 pluginManagement 里的 central-publishing-maven-plugin（extensions=true）接管，
+                         serverId 统一为 central，token 配在 settings.xml 的 <server><id>central</id> 上 -->
                 </plugins>
             </build>
         </profile>

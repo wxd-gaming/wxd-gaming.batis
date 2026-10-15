@@ -316,19 +316,26 @@ public class PgsqlTableAlterHandler implements TableAlterHandler {
      *       {@code SET DEFAULT}，而它改的其实是同一个值</li>
      * </ul>
      */
-    private boolean defaultValueEquals(String entityDefault, String dbDefault) {
+    boolean defaultValueEquals(String entityDefault, String dbDefault) {
         String left = foldDefault(entityDefault);
         String right = foldDefault(dbDefault);
         return Objects.equals(left, right);
     }
 
-    /** 默认值比较用的归一形式：空串/"NULL" 都视作"无默认值"，布尔同义写法折叠 */
+    /** 默认值比较用的归一形式：空串/"NULL" 都视作"无默认值"，布尔同义写法、时间族函数写法折叠 */
     private static String foldDefault(String raw) {
         if (raw == null) return null;
         String value = raw.trim();
         if (value.isEmpty() || value.equalsIgnoreCase("NULL")) return null;
         String lowered = value.toLowerCase(Locale.ROOT);
-        return BOOLEAN_DEFAULT_SYNONYMS.getOrDefault(lowered, value);
+        String folded = BOOLEAN_DEFAULT_SYNONYMS.getOrDefault(lowered, value);
+        // 时间族与回读侧（PgsqlDbMetaHandler.normalizeDefaultValue）同一口径：
+        // 库端把 now()/CURRENT_TIMESTAMP(6) 回读成 CURRENT_TIMESTAMP，实体侧不跟着折的话，
+        // 写 now() 的列每次启动都会白发一条 SET DEFAULT 且永不收敛
+        if (folded.equalsIgnoreCase("now()") || lowered.startsWith("current_timestamp")) {
+            return "CURRENT_TIMESTAMP";
+        }
+        return folded;
     }
 
     private static boolean hasText(String value) {

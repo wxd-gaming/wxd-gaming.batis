@@ -5,9 +5,9 @@
 索引与主键策略，框架据此自动建表 / 对已有表做结构漂移比对，并提供查询 DSL、批量读写、
 编程式事务、分区表维护与 Write-Behind 缓存。
 
-- 版本：`1.0.1`
-- 构建坐标：`wxd-gaming:wxd-gaming.batis`（聚合 POM）
-- 许可：未声明（仓库内无 LICENSE 文件）
+- 版本：`1.1.0`
+- 构建坐标：`io.github.wxd-gaming:wxd-gaming.batis`（聚合 POM）
+- 许可：Apache License 2.0（仓库根目录 `LICENSE`）
 - 作者：wxd-gaming（無心道）
 
 > 说明：本 README 由代码阅读整理而成，覆盖当前仓库全部模块。文中所有类名、方法名、
@@ -77,12 +77,12 @@ com.wxdgaming.batis.sql.mysql    方言实现层
 | `com.wxdgaming.batis` | `com.wxdgaming.batis` | 元数据与通用模型：注解、`EntityParser`、`TableInfo/ColumnInfo/IndexInfo`、查询 DSL 模型、缓存抽象、类型转换、异常体系、性能统计 | caffeine |
 | `com.wxdgaming.batis.sql` | `com.wxdgaming.batis.sql` | 方言无关 JDBC 层：`JdbcTemplate`、`QueryRunner`、`BeanRunner`、`CachedBeanRunner`、SELECT DSL、事务、分区抽象、DDL handler SPI | core、HikariCP 7.1.0、caffeine |
 | `com.wxdgaming.batis.sql.mysql` | `com.wxdgaming.batis.sql.mysql` | MySQL/MariaDB 方言：`MysqlTemplate` 与全部 handler 实现 | sql、mysql-connector-j 9.5.0、（test）mariaDB4j 3.1.0 |
-| `com.wxdgaming.batis.sql.pgsql` | `com.wxdgaming.batis.sql.pgsql` | **占位模块**：只有 `pom.xml`，**连 `src/` 目录都没有**（零源码）；已从聚合 POM 的 `<modules>` 注释掉 | — |
-| `com.wxdgaming.batis.mongodb` | `com.wxdgaming.batis.mongodb` | **占位模块**：`pom.xml` + 一个空类 `MongodbTemplate`（无字段/构造/方法）；同样已注释掉 | — |
+| `com.wxdgaming.batis.sql.pgsql` | `com.wxdgaming.batis.sql.pgsql` | PostgreSQL 方言：`PgsqlTemplate` 与全部 handler 实现，JSON 列原生档位（`@Column(type="json"/"jsonb")`）与多态开关 | sql、postgresql 42.7.8、（test）embedded-postgres 2.2.2 |
+| `com.wxdgaming.batis.mongodb` | `com.wxdgaming.batis.mongodb` | **占位模块**：`pom.xml` + 一个空类 `MongodbTemplate`（无字段/构造/方法）；仍在聚合 POM 注释掉 | — |
 
-后两个模块被注释在聚合 POM 的 `<modules>` 之外（见根 `pom.xml` 第 15–20 行注释），
-原因是「零源码 / 仅一个空类」会打出空 jar 让使用方误引入；落地实现后再加回。
-因此当前 reactor 只有三个模块。
+最后一个模块被注释在聚合 POM 的 `<modules>` 之外，原因是「仅一个空类」会打出空 jar
+让使用方误引入；落地实现后再加回。
+因此当前 reactor 有四个模块（core、sql、mysql、pgsql）。
 
 第三方依赖（版本统一在根 POM 的 `<dependencyManagement>` 中锁定）：
 
@@ -92,11 +92,13 @@ com.wxdgaming.batis.sql.mysql    方言实现层
 | `com.mysql:mysql-connector-j` | 9.5.0 | MySQL 驱动（仅 mysql 层） |
 | `com.github.ben-manes.caffeine:caffeine` | 3.2.2 | 本地缓存实现 |
 | `io.protostuff:protostuff-core` / `-runtime` | 1.8.0 | BLOB 存储模式的二进制序列化 |
-| `com.alibaba.fastjson2:fastjson2` | 2.0.60 | JSON 存储模式序列化（多态列按需带类名） |
+| `com.alibaba.fastjson2:fastjson2` | 2.0.65 | JSON 存储模式序列化（多态列按需带类名） |
 | `org.projectlombok:lombok` | 1.18.46 | 实体 getter/setter 等样板代码 |
 | `org.slf4j:slf4j-api` + `logback-classic/core` | 2.0.18 / 1.5.36 | 日志 |
 | `org.apache.commons:commons-lang3` / `commons-text` | 3.18.0 / 1.10.0 | 工具类 |
 | `ch.vorburger.mariaDB4j:mariaDB4j` | 3.1.0（test） | 嵌入式 MariaDB，自包含集成测试 |
+| `org.postgresql:postgresql` | 42.7.8 | PG 驱动（仅 pgsql 层） |
+| `io.zonky.test:embedded-postgres` | 2.2.2（test） | 嵌入式 PostgreSQL，自包含集成测试（发行包版本由 `embedded-postgres-binaries-bom` 14.22.0 统一锁定） |
 | `org.junit.jupiter:junit-jupiter-api` | 5.11.4（test） | 单元/集成测试 |
 
 > 根 POM 把 `junit`、`lombok`、`fastjson2`、`commons-*`、`logback`、`slf4j`、`protostuff`
@@ -137,7 +139,16 @@ Windows 下把 `./mvnw` 换成 `mvnw.cmd`（`.\mvnw.cmd -q clean install`）。
 
 ### 依赖引入
 
-项目未配置 `distributionManagement` / 私服仓库，使用方需先把构件安装到本地仓库：
+发布到 Maven Central 走根 POM 的 `deploy` profile（Central Portal，`central-publishing-maven-plugin`，
+GPG 签名 + source/javadoc JAR）：
+
+```bash
+# 前置：settings.xml 配置 <server><id>central</id>（Central Portal 的 user token），
+#       以及可用的 GPG 签名密钥
+./mvnw clean deploy -Pdeploy
+```
+
+使用方等构件上线后可直接从 Central 引入；本地开发验证则先安装到本地仓库：
 
 ```bash
 ./mvnw clean install
@@ -147,7 +158,7 @@ Windows 下把 `./mvnw` 换成 `mvnw.cmd`（`.\mvnw.cmd -q clean install`）。
 <dependency>
     <groupId>io.github.wxd-gaming</groupId>
     <artifactId>com.wxdgaming.batis.sql.mysql</artifactId>
-    <version>1.0.1</version>
+    <version>1.1.0</version>
 </dependency>
 ```
 
@@ -1181,7 +1192,7 @@ MariaDB，测试结束后 `db.stop()`：
 
 ```
 wxd-gaming.batis/
-├── pom.xml                                  聚合 POM（版本 1.0.1，JDK 21，surefire 3.2.5）
+├── pom.xml                                  聚合 POM（版本 1.1.0，JDK 21，surefire 3.2.5）
 ├── README.md
 ├── .gitignore
 ├── mvnw / mvnw.cmd                          Maven wrapper 启动脚本（only-script 模式）
@@ -1223,7 +1234,17 @@ wxd-gaming.batis/
 │       │   ├── MysqlSqlCodes.java           错误码常量表
 │       │   └── partition/                   MysqlPartitionManager / MysqlPartitionExpr / MysqlPartitionMetaReader
 │       └── test/java/.../mysql/             集成测试 + 测试实体 + MariaDB4jExtension
-├── com.wxdgaming.batis.sql.pgsql/           占位（无源码，已从聚合摘除）
+├── com.wxdgaming.batis.sql.pgsql/           PostgreSQL 方言
+│   └── src/
+│       ├── main/java/.../pgsql/
+│       │   ├── PgsqlTemplate.java           装配全部 PG SPI + 自动建库
+│       │   ├── Pgsql*Handler.java           12 个方言实现
+│       │   ├── PgsqlIdentifier.java         标识符双引号引用（强制小写）
+│       │   ├── PgsqlSqlLiteral.java         字符串字面量转义 / DEFAULT 字面量
+│       │   ├── PgsqlSqlStates.java          SQLState 常量表
+│       │   ├── PgsqlJsonType.java           json/jsonb 档位与迁移方向
+│       │   └── PgsqlExtension.java          嵌入式 PG 测试扩展
+│       └── test/java/.../pgsql/             集成测试 + 单测 + 测试实体
 └── com.wxdgaming.batis.mongodb/             占位（仅空类 MongodbTemplate，已从聚合摘除）
 ```
 
@@ -1295,7 +1316,9 @@ wxd-gaming.batis/
     编译就会把字节码目标提到 25，新环境因此表现不一致。现在根 POM 只保留
     `<java.version>21</java.version>` 与 `<maven.compiler.release>${java.version}</maven.compiler.release>`：
     `release` 同时约束语法级别和可引用的 JDK API，无法再跟随构建机 JDK 漂移。
-28. **仓库仍无 LICENSE、无 `distributionManagement`**，构件需本地 `mvnw install` 后使用；
+28. **发布链路**：构件经 Central Portal 发布（根 POM `deploy` profile，GPG 签名，
+    `settings.xml` 需配置 id 为 `central` 的 server token）；旧 OSSRH `s01.oss.sonatype.org`
+    端点已停服，POM 中已清除相关死配置。仓库根目录已有 Apache-2.0 `LICENSE`。
     `mvnw` wrapper 已补齐（Maven 3.9.9，`only-script` 模式，含 SHA-256 校验）。
 29. **父 POM 把 `fastjson2` / `logback-classic` / `commons-*` / `protostuff` 作为 compile 依赖下发**，
     使用方会被传递引入这些库（含一个日志绑定）。若要嵌入宿主应用，建议按需 `optional`
