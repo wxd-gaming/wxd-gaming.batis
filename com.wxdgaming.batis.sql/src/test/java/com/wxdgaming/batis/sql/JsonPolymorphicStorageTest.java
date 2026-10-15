@@ -197,6 +197,7 @@ class JsonPolymorphicStorageTest {
         Object any = new Circle();
         Map<String, Object> anyMap = new LinkedHashMap<>();
         Shape resource = new Circle();
+        java.io.Serializable blob = "x";
     }
 
     private static ColumnInfo col(String fieldName, boolean polymorphic) {
@@ -428,6 +429,21 @@ class JsonPolymorphicStorageTest {
                 () -> CODEC.convertFromDbValue(payload, col("resource", true)),
                 "宽泛 JDK 接口字段不能成为 gadget 入口");
         assertTrue(ex.getMessage().contains("resource"), "报错必须点名是哪一列: " + ex.getMessage());
+    }
+
+    @Test
+    @DisplayName("安全底线：列自身声明为宽泛 JDK 接口（Serializable）时多态不生效，@type 不驱动实例化")
+    void jdkInterfaceColumnIsUnbounded() {
+        // 根位置声明成 JDK 宽泛接口：collectBounds 必须视同 Object，否则 Serializable 会把
+        // JdbcRowSetImpl 放进继承树白名单（经典 autoType RCE）
+        ColumnInfo blob = col("blob", true);
+        String json = (String) CODEC.convertToDbValue("abc", blob);
+        assertFalse(json.contains("@type"), "JDK 接口声明不该写出无人认领的标记: " + json);
+
+        Object back = CODEC.convertFromDbValue(
+                "{\"@type\":\"com.sun.rowset.JdbcRowSetImpl\",\"dataSourceName\":\"ldap://x\"}", blob);
+        assertFalse(back != null && "com.sun.rowset.JdbcRowSetImpl".equals(back.getClass().getName()),
+                "JDK 接口列不能把 @type 当成可实例化的类: " + back);
     }
 
     @Test

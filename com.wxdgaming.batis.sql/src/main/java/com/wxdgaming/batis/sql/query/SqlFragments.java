@@ -42,7 +42,7 @@ public final class SqlFragments {
      * 用一个语义明确、消息里写清"请改用查询 DSL"的语法错误最容易被排查，也无需为它再扩异常体系。
      * </p>
      * <p>
-     * 校验规则与带参重载<b>完全一致</b>（含"无参时不得出现字符串字面量"）。之所以强调这一点：
+     * 校验规则与带参重载<b>完全一致</b>（含"出现字符串字面量一律拒绝"）。之所以强调这一点：
      * 两个重载若各管一套规则，调用方写 {@code guardWhereSection(拼接串)} 就会绕过新校验——
      * 而"拼接串"恰恰是最需要拦的那一种。
      * </p>
@@ -90,9 +90,13 @@ public final class SqlFragments {
                     "whereSection 的占位符数量(" + placeholders + ")与参数数量(" + provided
                             + ")不一致，参数会绑到错误的位置: " + whereSection, null, null, 0, null, null);
         }
-        if (provided == 0 && whereSection.indexOf('\'') >= 0) {
+        // 只要有字符串字面量就拒绝，不看参数个数：值只能走参数绑定。
+        // 只拦"无参"会被 `name = 'x' OR '1'='1 AND id = ?` 这种「字面量 + 占位符」混搭绕过——
+        // 字面量里的引号是注入点，占位符个数再多也救不回来。常量写法（status = 'active'）
+        // 改写成 status = ? + 参数即可，属于废弃路径上可接受的代价。
+        if (whereSection.indexOf('\'') >= 0) {
             throw new BadSqlGrammarException(
-                    "whereSection 含字符串字面量却没有参数，请改写成占位符 + 参数的形式"
+                    "whereSection 含字符串字面量，请改写成占位符 + 参数的形式"
                             + "（例如 name = ? 然后传参）：把值拼进 SQL 就是注入的入口: " + whereSection,
                     null, null, 0, null, null);
         }
@@ -102,9 +106,10 @@ public final class SqlFragments {
     /**
      * 统计字符串字面量之外的 {@code ?} 个数（{@code ''} 转义按一个引号处理）。
      * <p>只用于数量校验，不做 SQL 解析：真正的安全性来自"值走参数绑定"，
-     * 这条校验的作用是尽早暴露"参数写少了/写多了"这类错位。</p>
+     * 这条校验的作用是尽早暴露"参数写少了/写多了"这类错位。包内可见，
+     * 供 {@link SelectSqlBuilder} 对 raw 逃生舱片段做同样的占位符/参数核对。</p>
      */
-    private static int countPlaceholders(String fragment) {
+    static int countPlaceholders(String fragment) {
         int count = 0;
         boolean inLiteral = false;
         for (int i = 0; i < fragment.length(); i++) {

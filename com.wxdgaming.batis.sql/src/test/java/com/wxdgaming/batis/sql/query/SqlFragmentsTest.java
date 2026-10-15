@@ -12,7 +12,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * <p>
  * 黑名单只能拦"特征明显"的注入（分号 / 注释 / UNION / 系统库），而最常见的拼接误用
  * {@code "name = '" + input + "'"} 结果形如 {@code name = '' OR '1'='1}——不含任何被禁 token。
- * 因此闸门补上两条硬规则：占位符数量必须与参数数量一致；没有参数时不允许出现字符串字面量。
+ * 因此闸门补上两条硬规则：占位符数量必须与参数数量一致；不允许出现字符串字面量（值只能走参数绑定）。
  * </p>
  *
  * @author wxd-gaming(無心道, 15388152619)
@@ -47,11 +47,12 @@ class SqlFragmentsTest {
     }
 
     @Test
-    void questionMarkInsideLiteralIsNotCountedAsPlaceholder() {
-        // 引号里的 ? 不是占位符：下面这条带字面量 + 占位符的片段只有 1 个占位符，配 1 个参数即通过
-        assertEquals("`remark` = 'a?b' AND `id` = ?",
-                SqlFragments.guardWhereSection("`remark` = 'a?b' AND `id` = ?", 7));
-        // 纯字面量、无参数的写法被"无参不得含字面量"规则拒绝（代价见 README 已知边界第 23 条）
+    void inlineLiteralIsRejectedEvenWithParams() {
+        // 引号里的 ? 不是占位符（这条片段只有 1 个占位符）：但只要出现字符串字面量，无论
+        // 占位符/参数是否匹配都一律拒绝——`name = 'x' OR '1'='1 AND id = ?` 正是靠字面量绕过
+        assertThrows(BadSqlGrammarException.class,
+                () -> SqlFragments.guardWhereSection("`remark` = 'a?b' AND `id` = ?", 7));
+        // 纯字面量、无参数的写法同样被拒（代价见 README 已知边界第 23 条）
         assertThrows(BadSqlGrammarException.class,
                 () -> SqlFragments.guardWhereSection("`remark` = 'why?'"));
     }

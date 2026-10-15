@@ -3,6 +3,8 @@ package com.wxdgaming.batis.sql.mysql.partition;
 import com.wxdgaming.batis.sql.partition.*;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.List;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -47,6 +49,25 @@ public class MysqlPartitionManager implements PartitionManager {
     public static final MysqlPartitionManager INSTANCE = new MysqlPartitionManager();
 
     /**
+     * 表名/分区名标识符白名单：DDL 无法参数化，这些名字是直接拼进语句的，
+     * 只收字母数字与 {@code _ $}（分区名按约定是 {@code p+数字}/{@code pmax}）。
+     * 反引号、分号、空白、引号等 DDL 逃逸字符一律在渲染前拒绝，而不是发到库端撞语法错。
+     */
+    private static final Pattern SAFE_IDENTIFIER = Pattern.compile("[A-Za-z0-9_$]+");
+
+    private static void requireIdentifier(String kind, String name) {
+        if (name == null || name.isEmpty() || !SAFE_IDENTIFIER.matcher(name).matches()) {
+            throw new IllegalArgumentException(kind + " 含非法字符（只允许字母数字与 _ $）: " + name);
+        }
+    }
+
+    private static void requirePartitionNames(String kind, List<PartitionDef> defs) {
+        for (PartitionDef def : defs) {
+            requireIdentifier(kind, def.getName());
+        }
+    }
+
+    /**
      * 渲染建分区 DDL，按"有没有边界值"分两个分支。
      * <p>判定条件是"分区数大于 0 且分区列表为空"，对应 HASH/KEY 一类
      * 只给个数、不给名字的形态；其余（包括给了分区列表的 RANGE/LIST）走逐个列名的一支。
@@ -55,6 +76,8 @@ public class MysqlPartitionManager implements PartitionManager {
      */
     @Override
     public String buildCreatePartition(PartitionConfig config) {
+        requireIdentifier("表名", config.getTableName());
+        requirePartitionNames("分区名", config.getPartitions());
         String tn = config.getTableName();
         StringBuilder sb = new StringBuilder(512);
 
@@ -91,6 +114,8 @@ public class MysqlPartitionManager implements PartitionManager {
      */
     @Override
     public String buildAddPartition(PartitionConfig config) {
+        requireIdentifier("表名", config.getTableName());
+        requirePartitionNames("分区名", config.getPartitions());
         String tn = config.getTableName();
         StringBuilder sb = new StringBuilder();
         sb.append("ALTER TABLE `").append(tn).append("` ADD PARTITION (\n");
@@ -110,6 +135,8 @@ public class MysqlPartitionManager implements PartitionManager {
      */
     @Override
     public String buildDropPartition(PartitionConfig config) {
+        requireIdentifier("表名", config.getTableName());
+        config.getDropNames().forEach(n -> requireIdentifier("分区名", n));
         String tn = config.getTableName();
         StringBuilder sb = new StringBuilder();
         sb.append("ALTER TABLE `").append(tn).append("` ");
@@ -127,6 +154,8 @@ public class MysqlPartitionManager implements PartitionManager {
      */
     @Override
     public String buildTruncatePartition(PartitionConfig config) {
+        requireIdentifier("表名", config.getTableName());
+        requireIdentifier("分区名", config.getTruncateName());
         return "ALTER TABLE `" + config.getTableName()
                 + "` TRUNCATE PARTITION `" + config.getTruncateName() + "`;";
     }
@@ -139,6 +168,9 @@ public class MysqlPartitionManager implements PartitionManager {
      */
     @Override
     public String buildReorganizePartition(PartitionConfig config) {
+        requireIdentifier("表名", config.getTableName());
+        requireIdentifier("原分区名", config.getReorganizeOldName());
+        requirePartitionNames("分区名", config.getReorganizeDefs());
         String tn = config.getTableName();
         StringBuilder sb = new StringBuilder();
         sb.append("ALTER TABLE `").append(tn).append("` REORGANIZE PARTITION ")

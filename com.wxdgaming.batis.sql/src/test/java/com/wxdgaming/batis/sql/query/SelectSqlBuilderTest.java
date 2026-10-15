@@ -129,6 +129,16 @@ class SelectSqlBuilderTest {
     }
 
     @Test
+    void rawFragmentPlaceholderMismatchIsRejected() {
+        // 逃生舱片段是受信输入，但占位符数与参数数不符会让后续所有参数整体错位一格，
+        // 属于静默错误：渲染期必须当场拒绝
+        assertThrows(IllegalArgumentException.class,
+                () -> render(Criteria.raw("`status` + ? > 0")));
+        assertThrows(IllegalArgumentException.class,
+                () -> render(Criteria.raw("`status` = 'a?b' AND `id` = ?", 1, 2)));
+    }
+
+    @Test
     void columnsProjectionAndOrderBy() {
         SelectSqlBuilder.Plan plan = SelectSqlBuilder.build(HANDLER, TABLE,
                 spec(null, List.of("id", "userName"), Sort.by("createTime").and(Sort.desc("id")), null, null));

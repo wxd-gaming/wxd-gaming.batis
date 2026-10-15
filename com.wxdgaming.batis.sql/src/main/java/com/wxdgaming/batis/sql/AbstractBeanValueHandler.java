@@ -268,17 +268,36 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
     }
 
     /**
+     * 是否 JDK 平台类：这类类型要么是"宽到猜不出合法子类"的接口/抽象类（Serializable、Comparable），
+     * 要么是众所周知的 gadget 载体（com.sun.rowset.*、org.w3c.* 等），都不该进入多态白名单。
+     * <p>数组先剥离到元素类型再判：{@code String[]} 的类名是 {@code [Ljava.lang.String;}，
+     * 不剥壳会绕过前缀判断。</p>
+     */
+    private static boolean isJdkPackage(Class<?> clazz) {
+        while (clazz.isArray()) {
+            clazz = clazz.getComponentType();
+        }
+        String name = clazz.getName();
+        return name.startsWith("java.") || name.startsWith("javax.") || name.startsWith("jdk.")
+                || name.startsWith("sun.") || name.startsWith("com.sun.")
+                || name.startsWith("org.omg.") || name.startsWith("org.w3c.") || name.startsWith("org.xml.");
+    }
+
+    /**
      * 由字段声明类型算出多态允许实例化的上界集合。
      * <p>{@code Object} 一律排除——它 assignable-from 一切，收下就等于开了全局 autoType。
-     * 容器（Collection/Map）的裸类型也不作为上界：写侧已经抑制了容器类名，列里不会出现
-     * {@code java.util.ArrayList} 这种标记；把 {@code List} 当成上界只会让"声明是 List&lt;Object&gt;
-     * 或 Map&lt;String,Object&gt;"这类无界字段被误判成可用（上界非空即启用多态）。</p>
+     * JDK 包类型（{@code Serializable}/{@code Comparable}/{@code Number} 这类）同样排除：
+     * 声明成它们和声明成 {@code Object} 一样"猜不出合法子类"，收下就是放行 classpath 上任意实现类
+     * （{@code JdbcRowSetImpl} 恰好 {@code Serializable}）。容器（Collection/Map）的裸类型也不作为上界：
+     * 写侧已经抑制了容器类名，列里不会出现 {@code java.util.ArrayList} 这种标记；把 {@code List} 当成上界
+     * 只会让"声明是 List&lt;Object&gt; 或 Map&lt;String,Object&gt;"这类无界字段被误判成可用
+     * （上界非空即启用多态）。</p>
      * <p>结果是空集时，这一列的多态不生效：写不带标记、读按声明类型，与 {@code polymorphic = false} 等价。
      * {@code List<Object>}、{@code Map<String,Object>} 正好落在这一档——别指望框架替你猜类型。</p>
      */
     private static void collectBounds(Type type, Set<Class<?>> out) {
         if (type instanceof Class<?> c) {
-            if (c == Object.class) {
+            if (c == Object.class || isJdkPackage(c)) {
                 return;
             }
             out.add(c);
@@ -288,7 +307,8 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
             }
         } else if (type instanceof ParameterizedType pt) {
             if (pt.getRawType() instanceof Class<?> raw
-                    && !Collection.class.isAssignableFrom(raw) && !Map.class.isAssignableFrom(raw)) {
+                    && !Collection.class.isAssignableFrom(raw) && !Map.class.isAssignableFrom(raw)
+                    && !isJdkPackage(raw)) {
                 out.add(raw);
             }
             Type[] args = pt.getActualTypeArguments();
@@ -313,9 +333,10 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
      * <p>三条规则，缺一不可：</p>
      * <ol>
      *   <li>业务类标记必须落在字段声明类型的继承树里（{@code bounds}），或者是该位置声明类型（{@code expectClass}，
-     *       由 fastjson2 从实体字段声明带出来）的子类——两者都来自编译期声明，不来自库里的字符串；
-     *       expectClass 分支只放行业务类：白名单类内声明宽泛 JDK 接口字段时，expectClass 会被带成
-     *       {@code AutoCloseable} 这类接口，不加 JDK 前缀闸门等于把 classpath 上任意实现类放进白名单；</li>
+     *       由 fastjson2 从实体字段声明带出来）的子类——两者都来自编译期声明，不来自库里的字符串。
+     *       bounds 与 expectClass 两条分支都带 JDK 前缀闸门：列自身声明成 {@code Serializable}/{@code AutoCloseable}
+     *       这类宽泛 JDK 接口时（上界由 {@link #collectBounds} 直接收进 bounds），{@code JdbcRowSetImpl} 恰好满足
+     *       isAssignableFrom，不加这道闸门就会从声明继承树里点出 JDK gadget；</li>
      *   <li>JDK 容器标记一律换成 {@code LinkedHashMap}/{@code ArrayList}：容器实现类本来就不在保证范围内，
      *       换成标准容器既能让 {@code TreeMap}/{@code Map.of} 这类嵌套容器读回来，也不把库里点名的实现类当真；
      *       出现在业务类型位置上的容器标记（比如 {@code List<Shape>} 的元素写着 PriorityQueue）照样拒绝。</li>
@@ -358,7 +379,9 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
                         + (expectClass == null ? "?" : expectClass.getName()));
             }
             for (Class<?> bound : bounds) {
-                if (bound.isAssignableFrom(clazz)) {
+                // 与 expectClass 分支同一道闸门：即使某条路径把 JDK 类型放进了 bounds，
+                // 也不能让 JDK gadget（JdbcRowSetImpl 等）从声明继承树里被点出来实例化
+                if (bound.isAssignableFrom(clazz) && !isJdkPackage(clazz)) {
                     return clazz;
                 }
             }
@@ -371,12 +394,6 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
             }
             throw new JSONException("多态列的类型标记 " + typeName + " 不是声明类型 "
                     + (expectClass == null ? "?" : expectClass.getName()) + " 的子类");
-        }
-
-        private static boolean isJdkPackage(Class<?> clazz) {
-            String name = clazz.getName();
-            return name.startsWith("java.") || name.startsWith("javax.") || name.startsWith("jdk.")
-                    || name.startsWith("sun.") || name.startsWith("com.sun.");
         }
 
         private static boolean isContainer(Class<?> clazz) {

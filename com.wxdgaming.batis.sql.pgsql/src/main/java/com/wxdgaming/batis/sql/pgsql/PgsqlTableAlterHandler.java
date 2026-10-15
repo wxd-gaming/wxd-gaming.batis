@@ -41,9 +41,15 @@ public class PgsqlTableAlterHandler implements TableAlterHandler {
     /** 无状态处理器，供测试与 template 复用同一实例 */
     public static final PgsqlTableAlterHandler INSTANCE = new PgsqlTableAlterHandler();
 
-    /** PG 把布尔默认值回读成 true/false，实体侧常按 MySQL 习惯写 0/1，比对前先折成同一种拼写 */
+    /**
+     * PG 把布尔默认值回读成 true/false，实体侧常按 MySQL 习惯写 0/1，比对前先折成同一种拼写。
+     * <p>带引号的形态（{@code 'false'}/{@code '0'}）也要收进来：布尔列的 {@code DEFAULT 'false'}
+     * 回读是<b>不带引号</b>的 {@code false}（字面量按列类型求值后展示），只折裸写法的话
+     * 两侧永远不等，每次启动都会白发一条 SET DEFAULT。</p>
+     */
     private static final Map<String, String> BOOLEAN_DEFAULT_SYNONYMS = Map.of(
-            "0", "false", "1", "true", "false", "false", "true", "true");
+            "0", "false", "1", "true", "false", "false", "true", "true",
+            "'0'", "false", "'1'", "true", "'false'", "false", "'true'", "true");
 
     /**
      * 结构 diff 主流程：实体侧 TableInfo 对比库端缓存 TableInfo，差异汇总后执行。
@@ -200,6 +206,10 @@ public class PgsqlTableAlterHandler implements TableAlterHandler {
      * 而 {@code text}/{@code varchar} ↔ {@code json}/{@code jsonb} 之间没有这种转换（必须走 {@code ::}
      * 显式 cast）。不补 USING，"把存量 JSON 字符串列改成原生 jsonb"这条路径会当场 42846；
      * 反向（jsonb 列改回 text）同理。</p>
+     * <p>统一经过 {@code ::text::} 中转而不是直连目标：pg_cast 里 json/jsonb 的显式 cast 只对接
+     * {@code text}，{@code character(n)}（bpchar）与 json 两族之间连直接 cast 都没有，直写
+     * {@code col::character(1)} 会 42846；而 bpchar→text 的中转对 text/varchar 是恒等
+     * （varchar 与 text 二进制兼容），对 bpchar 顺带丢掉补位空格——那正是转 JSON 该有的语义。</p>
      * <p>只在两族之间补：数字改宽、varchar 改长度这些 PG 自己会处理的转换不加猜测的表达式——
      * 多写一层 USING 等于换掉转换语义（例如把隐式舍入换成字符串 cast）。</p>
      * <p>cast 目标用比较键（{@code renderNormalized}）而不是渲染字面量：实体写 {@code JSONB} 时
@@ -210,11 +220,11 @@ public class PgsqlTableAlterHandler implements TableAlterHandler {
         String targetJson = PgsqlJsonType.of(entityCol);
         String currentJson = PgsqlJsonType.of(dbCol.getType());
         if (targetJson != null && PgsqlJsonType.isTextFamily(dbCol.getType())) {
-            return "USING " + quotedColumn + "::" + targetJson;
+            return "USING " + quotedColumn + "::text::" + targetJson;
         }
         String targetNormalized = typeDef.renderNormalized(entityCol);
         if (currentJson != null && targetJson == null && PgsqlJsonType.isTextFamily(targetNormalized)) {
-            return "USING " + quotedColumn + "::" + targetNormalized;
+            return "USING " + quotedColumn + "::text::" + targetNormalized;
         }
         return null;
     }

@@ -1299,8 +1299,9 @@ wxd-gaming.batis/
     字符串默认值必须自带引号（如 `defaultValue = "'unknown'"`），裸字面量（`0`、`CURRENT_TIMESTAMP`、
     `CURRENT_TIMESTAMP(3)`）走字符白名单；两者都不符合会抛 `IllegalArgumentException` 而不是拼出坏 DDL。
 23. **遗留的字符串 `whereSection` API 收紧了闸门**：除原有的分号/注释/UNION 黑名单外，
-    现在要求占位符数量与参数数量一致，且"没有参数却含字符串字面量"会被直接拒绝
-    （`' OR '1'='1` 这类绕过黑名单的经典注入正落在这条上）。迁移到查询 DSL 即可绕开。
+    现在要求占位符数量与参数数量一致，且**只要出现字符串字面量就会被直接拒绝**
+    （无论是否同时带有占位符——`name = 'x' OR '1'='1 AND id = ?` 这类「字面量 + 占位符」混搭
+    正是此前唯一能绕过闸门的形态）。常量写法改用 `status = ?` 传参即可；迁移到查询 DSL 彻底绕开。
 24. **批量执行的"部分失败"现在会中断本批**：驱动若用 `Statement.EXECUTE_FAILED(-3)` 返回失败
     而不抛异常，`QueryRunner#executeBatch` 与 `BeanRunner` 的批量插入旁路会在 `commit` 之前
     回滚并抛 `BatchUpdateFailedException`（带首个失败下标）；`BatchUpdateException` 的

@@ -168,10 +168,17 @@ public final class SelectSqlBuilder {
         public Frag visitLeaf(Criterion c) {
             if (c.op() == CriterionOperator.RAW) {
                 // raw 的 column 槽位存的是 SQL 片段本身：逃生舱，不引用、不校验、值仍走占位符绑定。
-                // 这里无法核验片段里的 ? 个数与参数个数（? 可能出现在字符串字面量里），
-                // 因此片段与参数的一致性由调用方负责。
+                // 片段是受信输入，这里只核对"占位符数 == 参数数"：数量不符会让后续所有条件整体错位一格，
+                // 属于静默错误而不是报错；? 在字符串字面量里的情况由 countPlaceholders 处理。
+                String fragment = c.column();
+                int placeholders = SqlFragments.countPlaceholders(fragment);
+                if (placeholders != c.values().size()) {
+                    throw new IllegalArgumentException(
+                            "raw 片段的占位符数量(" + placeholders + ")与参数数量(" + c.values().size()
+                                    + ")不一致，参数会错位绑定: " + fragment);
+                }
                 params.addAll(c.values());
-                return new Frag(c.column(), Criteria.Kind.LEAF);
+                return new Frag(fragment, Criteria.Kind.LEAF);
             }
             String qc = handler.quote(resolveColumn(table, c.column()).getColumnName());
             return switch (c.op()) {
