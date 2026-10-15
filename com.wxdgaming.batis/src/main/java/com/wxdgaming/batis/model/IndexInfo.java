@@ -43,7 +43,8 @@ public class IndexInfo {
         if (this == o) return true;
         if (!(o instanceof IndexInfo indexInfo)) return false;
         // 仅按索引名判等：实体解析末尾用 distinct() 去重，同名索引只保留一条
-        // （字段级索引与 @Column(unique) 自动派生的 uk_ 索引可能同名，靠名字收敛避免重复建索引）
+        // （索引名是"表+列+唯一性"的纯函数，同名即同定义——字段级索引与 @Column(unique)
+        // 自动派生的唯一索引会生成同一个名字，靠名字收敛避免重复建索引）
         return Objects.equals(name, indexInfo.name);
     }
 

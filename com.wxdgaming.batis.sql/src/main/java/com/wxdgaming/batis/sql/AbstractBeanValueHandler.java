@@ -4,6 +4,7 @@ import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONException;
 import com.alibaba.fastjson2.JSONReader;
 import com.alibaba.fastjson2.JSONWriter;
+import com.alibaba.fastjson2.filter.ValueFilter;
 import com.wxdgaming.batis.converter.TypeConverter;
 import com.wxdgaming.batis.exception.TypeMismatchDataAccessException;
 import com.wxdgaming.batis.model.ColumnInfo;
@@ -62,6 +63,20 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
 
     /** 普通 JSON 列的写特性：空数组即 fastjson2 默认（不写类名、不做引用探测） */
     private static final JSONWriter.Feature[] NO_WRITE_FEATURES = new JSONWriter.Feature[0];
+
+    /**
+     * JSON 列内 {@code java.util.Date} 一族（含 {@code java.sql.Date/Time/Timestamp}）落盘为 epoch 毫秒。
+     * <p>WHY 必须是毫秒而不是 fastjson2 默认的 {@code "yyyy-MM-dd HH:mm:ss"}：那个默认格式是
+     * <b>本地时区</b>字符串、不带偏移量——多时区部署写出不同文本，读回还依赖运行 JVM 的默认时区
+     * （fastjson2 首次使用后会把默认时区缓存住，运行中改时区不生效）；且 fastjson1 时代的
+     * 存量行本来就是毫秒数值，沿用它新旧行才是同一种格式。</p>
+     * <p>只折 Date 一族：{@code LocalDate}/{@code LocalDateTime} 保持 ISO 字符串——它们没有时区概念，
+     * 折成毫秒反而把"几号"变成依赖时区换算的瞬时值，跨时区读写会错位一天。</p>
+     * <p>读侧无需配套改动：fastjson2 反解 Date 字段同时认毫秒数值与存量字符串两种形态；
+     * 无类型的 Map 目标列里新旧行会分别是 Long 与 String，属已登记的已知边界。</p>
+     */
+    private static final ValueFilter DATE_AS_MILLIS = (object, name, value) ->
+            value instanceof java.util.Date d ? d.getTime() : value;
 
     /**
      * 多态列的写特性：写类型标记，但抑制 JDK 容器、数字与 Set 的类名。
@@ -145,12 +160,21 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
      * {@code TypeMismatchDataAccessException}。</p>
      */
     protected String toJsonString(Object value, ColumnInfo col) {
+        // 根值就是 Date 时 ValueFilter 管不到（过滤器只作用于属性/键值对），直接落毫秒
+        if (value instanceof java.util.Date d) {
+            return String.valueOf(d.getTime());
+        }
         JSONWriter.Feature[] features = col.isPolymorphic()
                 ? polymorphicCodec(col).writeFeatures()
                 : NO_WRITE_FEATURES;
         for (int i = 0; ; i++) {
             try {
-                return JSON.toJSONString(value, features);
+                return JSON.toJSONString(value, DATE_AS_MILLIS, features);
+            } catch (StackOverflowError e) {
+                // 循环引用导致的 SOE：catch (Exception) 捕不到 Error，且它不是并发修改引起的，
+                // 重试一万次也是同样的结果——必须单独接住并报出是哪一列的对象图有环
+                throw new TypeMismatchDataAccessException(
+                        "JSON序列化字段" + col.getFieldName() + "失败：对象图存在循环引用", e);
             } catch (Exception e) {
                 if (i >= MAX_SERIALIZE_RETRIES - 1) {
                     throw new TypeMismatchDataAccessException("JSON序列化字段" + col.getFieldName() + "失败，已重试" + MAX_SERIALIZE_RETRIES + "次", e);
@@ -172,6 +196,10 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
         for (int i = 0; ; i++) {
             try {
                 return ProtostuffUtil.encode(value);
+            } catch (StackOverflowError e) {
+                // 与 JSON 通道同一护栏：循环引用不是并发问题，重试无意义，报出列名
+                throw new TypeMismatchDataAccessException(
+                        "Protostuff序列化字段" + col.getFieldName() + "失败：对象图存在循环引用", e);
             } catch (Exception e) {
                 if (i >= MAX_SERIALIZE_RETRIES - 1) {
                     throw new TypeMismatchDataAccessException("Protostuff序列化字段" + col.getFieldName() + "失败，已重试" + MAX_SERIALIZE_RETRIES + "次", e);
@@ -334,9 +362,11 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
      * <ol>
      *   <li>业务类标记必须落在字段声明类型的继承树里（{@code bounds}），或者是该位置声明类型（{@code expectClass}，
      *       由 fastjson2 从实体字段声明带出来）的子类——两者都来自编译期声明，不来自库里的字符串。
-     *       bounds 与 expectClass 两条分支都带 JDK 前缀闸门：列自身声明成 {@code Serializable}/{@code AutoCloseable}
-     *       这类宽泛 JDK 接口时（上界由 {@link #collectBounds} 直接收进 bounds），{@code JdbcRowSetImpl} 恰好满足
-     *       isAssignableFrom，不加这道闸门就会从声明继承树里点出 JDK gadget；</li>
+     *       bounds 在收集阶段已排除 JDK 类型（{@link #collectBounds}），expectClass 分支则对
+     *       expectClass 与目标类双向施加 JDK 前缀闸门：字段声明成 {@code Serializable}/{@code AutoCloseable}
+     *       这类宽泛 JDK 接口时，不加双向闸门，{@code JdbcRowSetImpl}（JDK gadget）与 dbcp2 的
+     *       {@code BasicDataSource}（非 JDK 前缀第三方类）都恰好满足 isAssignableFrom，
+     *       会被从声明继承树外点名实例化；</li>
      *   <li>JDK 容器标记一律换成 {@code LinkedHashMap}/{@code ArrayList}：容器实现类本来就不在保证范围内，
      *       换成标准容器既能让 {@code TreeMap}/{@code Map.of} 这类嵌套容器读回来，也不把库里点名的实现类当真；
      *       出现在业务类型位置上的容器标记（比如 {@code List<Shape>} 的元素写着 PriorityQueue）照样拒绝。</li>
@@ -386,9 +416,13 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
                 }
             }
             // expectClass 分支只放行业务类：白名单类里若声明了 AutoCloseable/Serializable 这类宽泛 JDK 接口字段，
-            // fastjson2 会把 expectClass 带成该接口，JdbcRowSetImpl 这类 JDK gadget 实现
-            // 恰好满足 isAssignableFrom——不加前缀闸门，这一条就是绕出声明继承树的口子
+            // fastjson2 会把 expectClass 带成该接口——只闸目标类不够：dbcp2 的 BasicDataSource 这类
+            // 非 JDK 前缀的第三方实现类恰好满足 isAssignableFrom，照样能被点名实例化。
+            // 所以 expectClass 自身也要过 JDK 前缀闸门：声明成 JDK 宽接口的位置一律不接受 @type，
+            // 要还原子类请把字段声明成业务继承树内的类型（那时 bounds 分支自会放行）。
+            // 同一闸门顺带焊死第三方容器实现类（LazyMap 等）经 expectClass=Map 绕过容器归一的口子。
             if (expectClass != null && expectClass != Object.class
+                    && !isJdkPackage(expectClass)
                     && expectClass.isAssignableFrom(clazz) && !isJdkPackage(clazz)) {
                 return clazz;
             }

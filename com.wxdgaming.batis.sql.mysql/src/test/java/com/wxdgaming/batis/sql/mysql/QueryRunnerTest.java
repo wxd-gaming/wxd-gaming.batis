@@ -170,7 +170,7 @@ class QueryRunnerTest {
 
     /**
      * 用例⑤：索引随建表一起生成，且唯一性与复合列顺序都正确。
-     * <p>断言 uk_account 唯一且含 account 列；idx_level_score 非唯一且恰为 2 列（level + score）。
+     * <p>断言 t_role_account_uk 唯一且含 account 列；t_role_level_score_idx 非唯一且恰为 2 列（level + score）。
      * 复合索引要盯的是<b>列顺序</b>：(level, score) 与 (score, level) 是两个不同的索引，
      * 前者能服务"按等级过滤再按分数排序"，后者不能，
      * 顺序写反不会报错，只会让查询悄悄退化成全表扫描。</p>
@@ -184,25 +184,25 @@ class QueryRunnerTest {
 
         List<IndexInfo> indexes = tableInfo.getIndexes();
         Assertions.assertNotNull(indexes);
-        Assertions.assertTrue(indexes.size() >= 2, "至少应有 2 个索引（uk_account + idx_level_score）");
+        Assertions.assertTrue(indexes.size() >= 2, "至少应有 2 个索引（t_role_account_uk + t_role_level_score_idx）");
 
-        // 查找 uk_account
+        // 查找 t_role_account_uk
         IndexInfo ukAccount = indexes.stream()
-                .filter(idx -> "uk_account".equals(idx.getName()))
+                .filter(idx -> "t_role_account_uk".equals(idx.getName()))
                 .findFirst().orElse(null);
-        Assertions.assertNotNull(ukAccount, "应存在 uk_account 索引");
-        Assertions.assertTrue(ukAccount.isUnique(), "uk_account 应是唯一索引");
+        Assertions.assertNotNull(ukAccount, "应存在 t_role_account_uk 索引");
+        Assertions.assertTrue(ukAccount.isUnique(), "t_role_account_uk 应是唯一索引");
         Assertions.assertTrue(ukAccount.getColumns().contains("account"),
-                "uk_account 应包含 account 列");
+                "t_role_account_uk 应包含 account 列");
 
-        // 查找 idx_level_score
+        // 查找 t_role_level_score_idx
         IndexInfo idxLevelScore = indexes.stream()
-                .filter(idx -> "idx_level_score".equals(idx.getName()))
+                .filter(idx -> "t_role_level_score_idx".equals(idx.getName()))
                 .findFirst().orElse(null);
-        Assertions.assertNotNull(idxLevelScore, "应存在 idx_level_score 索引");
-        Assertions.assertFalse(idxLevelScore.isUnique(), "idx_level_score 应是非唯一索引");
+        Assertions.assertNotNull(idxLevelScore, "应存在 t_role_level_score_idx 索引");
+        Assertions.assertFalse(idxLevelScore.isUnique(), "t_role_level_score_idx 应是非唯一索引");
         Assertions.assertEquals(2, idxLevelScore.getColumns().size(),
-                "idx_level_score 应有 2 个列");
+                "t_role_level_score_idx 应有 2 个列");
     }
 
     /**

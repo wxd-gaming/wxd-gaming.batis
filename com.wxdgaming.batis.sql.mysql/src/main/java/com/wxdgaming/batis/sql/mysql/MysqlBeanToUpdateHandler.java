@@ -54,6 +54,11 @@ public class MysqlBeanToUpdateHandler implements BeanToUpdateHandler {
             throw new IllegalArgumentException(
                     "实体 " + bean.getClass().getSimpleName() + " 未定义主键，无法执行 update");
         }
+        // 仅主键列的实体拼出来是 "SET  WHERE ..."：空 SET 在 MySQL 同样是语法错误，快速失败
+        if (setCols.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "实体 " + bean.getClass().getSimpleName() + " 只有主键列，没有可更新的字段，update 无意义");
+        }
 
         String sql = "UPDATE `" + tableInfo.getTableName().toLowerCase() + "` SET "
                 + String.join(", ", setCols) + " WHERE " + String.join(" AND ", whereCols);

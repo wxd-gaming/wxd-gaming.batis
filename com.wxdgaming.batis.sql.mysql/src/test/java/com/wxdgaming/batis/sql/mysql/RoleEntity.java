@@ -17,7 +17,7 @@ import lombok.Setter;
 @Setter
 @Getter
 @Table(name = "t_role", comment = "角色表",
-       indexes = @Index(name = "idx_level_score", columnList = "level,score", unique = false))
+       indexes = @Index(columnList = "level,score"))
 public class RoleEntity {
 
     @Id

@@ -16,11 +16,21 @@ import java.lang.annotation.Target;
  *       {@link #columnList()} 指定多列
  *       <pre>
  *       &#64;Table(name = "t_player", comment = "玩家表",
- *              indexes = &#64;Index(name = "idx_srv_level", columnList = "server_id,level", unique = false))
+ *              indexes = &#64;Index(columnList = "server_id,level"))
  *       public class Player { ... }
  *       </pre>
  *   </li>
  * </ul>
+ * <p>
+ * <b>索引名不可自定义，统一生成为 {@code 表名_列名(多列按下划线组合)_类型后缀}</b>
+ * （唯一索引 {@code _uk}、普通索引 {@code _idx}），例如 {@code t_player_server_id_level_idx}。
+ * 名字是"表 + 列 + 唯一性"的纯函数：同样的定义在任何环境生成同一个名字——
+ * 它同时是去重依据（定义相同则名字相同，自然合并）与结构漂移比对的锚点，
+ * 并且自带表名前缀，在 PG 这种索引名 schema 级唯一的库上也不会跨表撞名。
+ * 自定义入口被刻意拿掉：名字一旦可以两写，"同一个索引两个名字"和
+ * "两个索引共用一个名字"都会变成运行期才能发现的配置错误。
+ * 名字超过 63 字符（PG/MySQL 双方便携上限）时截断中段并补稳定哈希，类型后缀始终保留。
+ * </p>
  * <p>
  * <b>解析位置</b>：EntityParser 的索引解析分三步，全部在本注解上——先扫字段级（含父类字段），
  * 再读 Table 的 indexes 数组，最后把 {@code Column.unique = true} 的列自动派生成唯一索引。
@@ -33,9 +43,9 @@ import java.lang.annotation.Target;
  * </p>
  * <p>
  * <b>与唯一约束的关系</b>：字段上同时写 {@code Column.unique = true} 和本注解的 {@code unique = true}
- * 不会生成两个索引——自动派生的唯一索引名与字段级默认名同为 "uk_" + 列名，而 IndexInfo 只按名字判等，
- * 去重后只剩一条。反过来说，两个语义不同的索引取了相同名字时，也会有一条被静默丢弃，
- * 命名冲突比缺索引更难查，建议显式指定 {@link #name()}。
+ * 不会生成两个索引——两者产出的是同一个名字（同列同唯一性），IndexInfo 按名字判等去重后只剩一条。
+ * 若同列只有普通索引（{@code unique = false}），{@code Column.unique = true} 会把它就地升级为唯一索引，
+ * 名字同步换成 {@code _uk} 后缀。
  * </p>
  *
  * @author wxd-gaming
@@ -43,14 +53,6 @@ import java.lang.annotation.Target;
 @Documented
 @Retention(RetentionPolicy.RUNTIME)
 public @interface Index {
-
-    /**
-     * 索引名，不填时自动生成。
-     * <p>字段级用：按 unique 取前缀，唯一是 "uk_" + 列名，普通是 "idx_" + 列名；
-     * Table 级用：固定 "idx_" + 列名列表（逗号换成下划线、空格去掉）。
-     * 名字是去重与漂移比对的依据，跨表保持稳定命名比省这几个字符更值钱。</p>
-     */
-    String name() default "";
 
     /**
      * 索引列名列表，多列用英文逗号分隔。字段级使用时可以留空，默认取当前标注字段的列名。
@@ -62,8 +64,8 @@ public @interface Index {
 
     /**
      * 是否唯一索引，默认 false（普通索引）。
-     * <p>字段级留空 {@link #name()} 时，本值决定自动命名的前缀（uk_ 还是 idx_），
-     * 所以改本值会连带改变索引名，进而影响与已有索引的去重结果。</p>
+     * <p>本值参与索引名生成（{@code _uk} 还是 {@code _idx} 后缀），
+     * 所以改本值会连带改变索引名，进而影响与库端已有索引的漂移比对结果。</p>
      */
     boolean unique() default false;
 }

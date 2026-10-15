@@ -45,11 +45,18 @@ public class PgsqlTableAlterHandler implements TableAlterHandler {
      * PG 把布尔默认值回读成 true/false，实体侧常按 MySQL 习惯写 0/1，比对前先折成同一种拼写。
      * <p>带引号的形态（{@code 'false'}/{@code '0'}）也要收进来：布尔列的 {@code DEFAULT 'false'}
      * 回读是<b>不带引号</b>的 {@code false}（字面量按列类型求值后展示），只折裸写法的话
-     * 两侧永远不等，每次启动都会白发一条 SET DEFAULT。</p>
+     * 两侧永远不等，每次启动都会白发一条 SET DEFAULT。
+     * 同理收齐 PG 接受的全部布尔字符串字面量（{@code 't'/'f'/'yes'/'no'/'on'/'off'}）——
+     * 写侧按字符串透传（见 {@code PgsqlTableCreateHandler#defaultLiteral}），回读同样是 true/false。</p>
      */
-    private static final Map<String, String> BOOLEAN_DEFAULT_SYNONYMS = Map.of(
-            "0", "false", "1", "true", "false", "false", "true", "true",
-            "'0'", "false", "'1'", "true", "'false'", "false", "'true'", "true");
+    private static final Map<String, String> BOOLEAN_DEFAULT_SYNONYMS = Map.ofEntries(
+            Map.entry("0", "false"), Map.entry("1", "true"),
+            Map.entry("false", "false"), Map.entry("true", "true"),
+            Map.entry("'0'", "false"), Map.entry("'1'", "true"),
+            Map.entry("'false'", "false"), Map.entry("'true'", "true"),
+            Map.entry("'t'", "true"), Map.entry("'f'", "false"),
+            Map.entry("'yes'", "true"), Map.entry("'no'", "false"),
+            Map.entry("'on'", "true"), Map.entry("'off'", "false"));
 
     /**
      * 结构 diff 主流程：实体侧 TableInfo 对比库端缓存 TableInfo，差异汇总后执行。
@@ -134,9 +141,14 @@ public class PgsqlTableAlterHandler implements TableAlterHandler {
                 deferredStatements.add(PgsqlTableCreateHandler
                         .buildColumnComment(tableName, colName, entityCol.getComment()));
             }
+
+            // 1f. 非默认 collation：实体注解表达不了排序规则，只能告警让人看见
+            // （与 MySQL 侧字符集漂移同一口径：不自动改、但必须可见）
+            warnNonDefaultCollation(tableName, colName, dbCol);
         }
 
         // ===== 2. 索引对比 =====
+        warnUnmanagedIndexes(jdbcTemplate, tableName);
         diffIndexes(jdbcTemplate, quotedTable, tableName, entityTable, dbTable, deferredStatements);
 
         // ===== 3. 执行 =====
@@ -161,6 +173,9 @@ public class PgsqlTableAlterHandler implements TableAlterHandler {
      * <p>变化判定按 {@code (唯一性, 列数量, 逐位列名)} 逐项比：复合索引 (a,b) 与 (b,a) 服务能力不同，
      * 顺序变了必须重建而不是放过。重建必须"先删后建"，因为 PG 的索引名是 schema 级唯一的，
      * 不删就建会撞 42P07。</p>
+     * <p>新增索引前先查同名对象的归属（{@link #findIndexOwner}）：{@code CREATE INDEX IF NOT EXISTS}
+     * 在名字被<b>别的表</b>占用时只发 NOTICE 静默跳过，本表索引永远建不上、每次启动重试、
+     * 还没有任何日志——必须在这里把冲突摆到 WARN 里。</p>
      */
     private void diffIndexes(JdbcTemplate jdbcTemplate, String quotedTable, String tableName,
                              TableInfo entityTable, TableInfo dbTable,
@@ -175,13 +190,29 @@ public class PgsqlTableAlterHandler implements TableAlterHandler {
             }
         }
 
+        // DROP INDEX 需要 schema 限定；只在真出现 DROP 时才解析一次（懒加载，避免每次 checkTable 多一次往返）
+        LazySchema dropSchema = new LazySchema();
+
         for (IndexInfo entityIdx : entityIndexes) {
             String idxName = entityIdx.getName().toLowerCase(Locale.ROOT);
             IndexInfo dbIdx = dbIndexMap.get(idxName);
             if (dbIdx == null) {
-                deferredStatements.add(PgsqlTableCreateHandler.buildCreateIndex(quotedTable, entityIdx));
+                String owner = findIndexOwner(jdbcTemplate, idxName);
+                if (owner == null) {
+                    deferredStatements.add(PgsqlTableCreateHandler.buildCreateIndex(quotedTable, entityIdx));
+                } else if (!owner.equalsIgnoreCase(tableName)) {
+                    log.warn("表 {} 声明的索引 {} 与表 {} 上的同名索引冲突：PG 的索引名是 schema 级唯一，"
+                                    + "CREATE INDEX IF NOT EXISTS 会被 PG 静默跳过，本表索引将永远建不上。"
+                                    + "请为本表索引改名，或先处理表 {} 上的同名索引",
+                            tableName, idxName, owner, owner);
+                } else {
+                    log.warn("表 {} 上已存在名为 {} 的索引，但它是表达式/部分索引或约束支撑索引"
+                                    + "（回读时被排除，见 PgsqlDbMetaHandler#indexListSql）：框架不会重建它，"
+                                    + "如需纳入管理请手工 DROP 后重启",
+                            tableName, idxName);
+                }
             } else if (hasIndexChanged(entityIdx, dbIdx)) {
-                deferredStatements.add(buildDropIndex(jdbcTemplate, dbIdx.getName()));
+                deferredStatements.add(buildDropIndex(jdbcTemplate, dropSchema, dbIdx.getName()));
                 deferredStatements.add(PgsqlTableCreateHandler.buildCreateIndex(quotedTable, entityIdx));
             }
             dbIndexMap.remove(idxName);
@@ -189,7 +220,7 @@ public class PgsqlTableAlterHandler implements TableAlterHandler {
 
         for (IndexInfo dropIdx : dbIndexMap.values()) {
             if (jdbcTemplate.isDropRedundantIndexes()) {
-                deferredStatements.add(buildDropIndex(jdbcTemplate, dropIdx.getName()));
+                deferredStatements.add(buildDropIndex(jdbcTemplate, dropSchema, dropIdx.getName()));
                 log.warn("表 {} 的索引 {} 在实体中没有声明，将被 DROP（需要保留请补上注解，"
                                 + "或设置 JdbcTemplate#setDropRedundantIndexes(false)）",
                         tableName, dropIdx.getName());
@@ -197,6 +228,56 @@ public class PgsqlTableAlterHandler implements TableAlterHandler {
                 log.warn("表 {} 的索引 {} 在实体中没有声明，按配置跳过删除（dropRedundantIndexes=false）",
                         tableName, dropIdx.getName());
             }
+        }
+    }
+
+    /**
+     * 查 schema 内同名索引的属主表：找不到返回 null。
+     * <p>PG 的索引名 schema 级唯一，{@code IF NOT EXISTS} 命中别表同名索引时只发 NOTICE——
+     * 本表索引建不上这件事没有任何信号，只能在 CREATE 之前自己查出来。</p>
+     */
+    private static String findIndexOwner(JdbcTemplate jdbcTemplate, String indexName) {
+        String sql = "SELECT t.relname FROM pg_index ix "
+                + "JOIN pg_class ic ON ic.oid = ix.indexrelid "
+                + "JOIN pg_class t ON t.oid = ix.indrelid "
+                + "JOIN pg_namespace n ON n.oid = ic.relnamespace "
+                + "WHERE n.nspname = current_schema() AND ic.relname = ?";
+        try (QueryRunner qr = new QueryRunner(jdbcTemplate)) {
+            return qr.query(sql, new Object[]{indexName}, rs -> rs.next() ? rs.getString(1) : null);
+        }
+    }
+
+    /**
+     * 表达式/部分索引与约束支撑索引被回读排除（没有可比的裸列清单），不参与 diff——
+     * 但"框架看不见它们"这件事本身必须可见，否则用户以为索引管理覆盖了全表。
+     */
+    private static void warnUnmanagedIndexes(JdbcTemplate jdbcTemplate, String tableName) {
+        String sql = "SELECT count(*) FROM pg_index ix "
+                + "JOIN pg_class t ON t.oid = ix.indrelid "
+                + "JOIN pg_namespace n ON n.oid = t.relnamespace "
+                + "WHERE n.nspname = current_schema() AND t.relname = ? AND NOT ix.indisprimary "
+                + "AND (ix.indexprs IS NOT NULL OR ix.indpred IS NOT NULL "
+                + "     OR EXISTS (SELECT 1 FROM pg_constraint con "
+                + "                 WHERE con.conrelid = t.oid AND con.conindid = ix.indexrelid))";
+        try (QueryRunner qr = new QueryRunner(jdbcTemplate)) {
+            Long count = qr.query(sql, new Object[]{tableName}, rs -> rs.next() ? rs.getLong(1) : 0L);
+            if (count != null && count > 0) {
+                log.warn("表 {} 有 {} 个表达式/部分索引或约束支撑索引不受框架管理"
+                        + "（不参与结构比对、不受 dropRedundantIndexes 控制），需要变更请手工处理", tableName, count);
+            }
+        }
+    }
+
+    /**
+     * 库端列使用非默认 collation 时告警（不改动结构）。
+     * <p>实体注解目前无法声明 collation，框架只能回读后让人看见：collation 影响排序与唯一判定，
+     * 静默漂移（比如建表时数据库默认是 C、实体期望语言学排序）查起来极其费劲。</p>
+     */
+    private static void warnNonDefaultCollation(String tableName, String colName, ColumnInfo dbCol) {
+        String collation = dbCol.getCollation();
+        if (collation != null && !collation.isEmpty()) {
+            log.warn("列 {}.{} 在库端使用非默认 collation '{}'，实体注解无法表达排序规则，"
+                    + "框架不参与比对与变更；如需调整请手工 ALTER", tableName, colName, collation);
         }
     }
 
@@ -226,6 +307,17 @@ public class PgsqlTableAlterHandler implements TableAlterHandler {
         if (currentJson != null && targetJson == null && PgsqlJsonType.isTextFamily(targetNormalized)) {
             return "USING " + quotedColumn + "::text::" + targetNormalized;
         }
+        // timestamp ↔ timestamptz：PG 的赋值转换能跑通，但存量值会按会话 TimeZone 被静默重解释。
+        // 把会话时区显式写进 USING——转换结果与隐式行为一致，但语义出现在 DDL 文本里
+        // （debug 日志可查），而不是藏在一句看不见的类型转换背后。
+        // 同一个表达式两个方向都成立：AT TIME ZONE 作用于 timestamp 得 timestamptz，
+        // 作用于 timestamptz 得 timestamp，结果类型天然匹配目标列。
+        String currentNormalized = typeDef.normalize(dbCol.getType());
+        boolean toTz = "timestamp with time zone".equals(targetNormalized) && "timestamp".equals(currentNormalized);
+        boolean fromTz = "timestamp".equals(targetNormalized) && "timestamp with time zone".equals(currentNormalized);
+        if (toTz || fromTz) {
+            return "USING " + quotedColumn + " AT TIME ZONE current_setting('TimeZone')";
+        }
         return null;
     }
 
@@ -251,20 +343,36 @@ public class PgsqlTableAlterHandler implements TableAlterHandler {
      * <p>WHY 限定 schema：MySQL 的索引名是表内唯一，{@code DROP INDEX x ON t} 天然指向本表；
      * PG 的索引是 schema 级对象，名字全局唯一，写法上也<b>不能</b>带表名。
      * 不限定就按 search_path 找第一个同名对象，万一别的表先占了这个名字，
-     * 删掉的就是别人的索引——这是不可逆的破坏，所以宁可多查一次 {@code current_schema()}。</p>
+     * 删掉的就是别人的索引——这是不可逆的破坏，所以 schema 解析不出时宁可失败也不降级。</p>
      */
-    private String buildDropIndex(JdbcTemplate jdbcTemplate, String indexName) {
-        String schema = resolveSchema(jdbcTemplate);
-        String quotedIndex = schema == null
-                ? PgsqlIdentifier.quote(indexName)
-                : PgsqlIdentifier.quote(schema, indexName);
-        return "DROP INDEX IF EXISTS " + quotedIndex;
+    private String buildDropIndex(JdbcTemplate jdbcTemplate, LazySchema dropSchema, String indexName) {
+        String schema = dropSchema.get(jdbcTemplate);
+        return "DROP INDEX IF EXISTS " + PgsqlIdentifier.quote(schema, indexName);
     }
 
-    /** 取当前 schema，供 DROP INDEX 限定；拿不到就退回不限定（与建表同样的解析路径） */
-    private static String resolveSchema(JdbcTemplate jdbcTemplate) {
-        DbMetaHandler metaProvider = jdbcTemplate.getDbMetaProvider();
-        return metaProvider == null ? null : metaProvider.getCatalog(jdbcTemplate);
+    /**
+     * 每次 checkTable 只解析一次 current_schema()：DROP INDEX 逐个调用，逐个解析就是 N 次往返。
+     * <p>解析不出（未注入 DbMetaProvider）时直接抛错：退回不限定 schema 的 DROP INDEX
+     * 可能删掉 search_path 上别表的同名索引，不可逆破坏不能用"兜底降级"来做。</p>
+     */
+    private static final class LazySchema {
+        private String schema;
+
+        String get(JdbcTemplate jdbcTemplate) {
+            if (schema == null) {
+                DbMetaHandler metaProvider = jdbcTemplate.getDbMetaProvider();
+                if (metaProvider == null) {
+                    throw new IllegalStateException(
+                            "未注入 DbMetaProvider，无法解析 current_schema()，拒绝执行不限定 schema 的 DROP INDEX");
+                }
+                schema = metaProvider.getCatalog(jdbcTemplate);
+                if (schema == null) {
+                    throw new IllegalStateException(
+                            "current_schema() 解析为 null，拒绝执行不限定 schema 的 DROP INDEX");
+                }
+            }
+            return schema;
+        }
     }
 
     /**

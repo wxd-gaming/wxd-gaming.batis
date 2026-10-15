@@ -11,6 +11,11 @@ import io.protostuff.runtime.RuntimeSchema;
  * 读回时 merge 回对象。用 {@code RuntimeSchema} 反射生成 schema 并内部缓存，故无需预注册 proto。
  * 注意 Protostuff 不编码 null 字段，反序列化会复用传入实例（{@link #decode(byte[], Object)} 原地填充），
  * 因此对"可能整体为 null"的列需在调用层自行判空，不能依赖此工具区分 null 与空对象。</p>
+ * <p><b>安全边界（无类白名单）</b>：{@code RuntimeSchema} 对 {@code Object}/接口/抽象类型的字段会把
+ * 实现类名嵌进字节流、解码时按名反射实例化，全程没有 JSON 多态列那样的继承树白名单。
+ * 因此 BLOB 列的实体图里<b>不要</b>声明多态字段（{@code EntityParser} 已拒绝根类型为
+ * Object/接口/抽象类的 BLOB 列，但嵌套在 POJO 内部的多态字段只能靠约定避免）——
+ * 能让攻击者写入该列的场景下，多态字段等于"库里的字节流决定实例化哪个类"。</p>
  *
  * @author wxd-gaming(無心道, 15388152619)
  * @version 2026-07-24 18:17

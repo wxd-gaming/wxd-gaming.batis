@@ -54,6 +54,12 @@ public class MysqlDbToBeanHandler implements SqlDbToBeanHandler {
             throw new IllegalArgumentException(
                     "实体 " + entityClass.getSimpleName() + " 未定义主键，无法执行 queryById");
         }
+        if (pks.size() > 1 && !(idValue instanceof Object[])) {
+            throw new IllegalArgumentException(
+                    "实体 " + entityClass.getSimpleName() + " 有 " + pks.size()
+                            + " 个主键列，queryById 需要传入 Object[]，实际传入: "
+                            + (idValue == null ? "null" : idValue.getClass().getSimpleName()));
+        }
         Object[] args = pks.size() == 1 ? new Object[]{idValue} : (Object[]) idValue;
         if (args.length != pks.size()) {
             throw new IllegalArgumentException(

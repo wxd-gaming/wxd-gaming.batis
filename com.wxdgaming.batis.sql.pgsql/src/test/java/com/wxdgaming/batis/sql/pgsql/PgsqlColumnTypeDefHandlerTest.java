@@ -267,6 +267,26 @@ class PgsqlColumnTypeDefHandlerTest {
     }
 
     /**
+     * 用例⑩·补：{@code timestamptz}/{@code timetz} 短写与库端 {@code format_type} 长写法是同一物理类型，
+     * 必须折到同一个比较键——否则实体写 {@code @Column(type="timestamptz")} 时实体侧键是
+     * "timestamptz"、库端键是 "timestamp with time zone"，两键永不相等，每次 checkTable 都会
+     * 虚发一条整表重写的 {@code ALTER COLUMN TYPE}（审核高项 H1 的回归锁）。
+     * 折叠后仍须与 {@code timestamp} 判不等（时区语义差异保持可见，见用例⑩）。
+     */
+    @Test
+    void timestamptzShortFormFoldsToDbReadbackKey() {
+        assertEquals(handler.normalize("timestamp with time zone"), handler.normalize("timestamptz"));
+        assertEquals(handler.normalize("timestamp with time zone"), handler.normalize("timestamptz(3)"));
+        assertEquals(handler.normalize("timestamp(3) with time zone"), handler.normalize("timestamptz"));
+        assertEquals(handler.normalize("time with time zone"), handler.normalize("timetz"));
+        // 实体侧逃生舱渲染结果与库端回读必须判等——这正是改表处理器 1a 分支的判据
+        assertEquals(handler.renderNormalized(explicit("timestamptz")),
+                handler.normalize("timestamp with time zone"));
+        // 折叠不等于混同：与无时区档仍是两个键
+        assertNotEquals(handler.normalize("timestamptz"), handler.normalize("timestamp"));
+    }
+
+    /**
      * 用例⑪：框架不认识的类型保持"可见的差异"，不被静默归一到某个已知档。
      * <p>取样 {@code geometry}（PostGIS，档位表里没有）与 {@code integer[]}（数组）：
      * 前者原样返回，后者带着尾部修饰返回，两者都与任何已知档不等。

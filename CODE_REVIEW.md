@@ -7,6 +7,86 @@
 
 ---
 
+## 零·续、2026-10-15 复审（HEAD = `408f95c`，pgsql 模块纳入范围）
+
+> 本轮为复盘性质：核对上轮遗留项在当前代码的状态 + 对 pgsql 模块与 fastjson2 链路做增量深审 + 全量重跑测试。未修改任何源文件。
+
+**测试验证（真跑，非纸面）**：`mvnw test` 全反应堆 `BUILD SUCCESS`，共 **337 个用例、0 失败**
+（core 60 + sql 64 + mysql 101〔嵌入式 MariaDB 真库〕+ pgsql 112〔嵌入式 PG 真库〕）。
+上轮"target/ 写入受限、0 测试报 SUCCESS"的环境问题本轮不存在。
+
+**上轮遗留项复盘结论**
+
+| 遗留项 | 状态 | 证据 |
+| --- | --- | --- |
+| 高：expectClass 宽接口旁路 | **仍未修** | `AbstractBeanValueHandler.java:391-394`：expectClass 分支只闸 `!isJdkPackage(clazz)`，不闸 expectClass 自身；业务类字段声明为 `Serializable`/`AutoCloseable` 等 JDK 宽接口时，第三方实现类（非 JDK 前缀）可经嵌套 `@type` 实例化 |
+| 中：Date 落盘格式漂移 | **仍未修**（本轮实测） | fastjson2 2.0.65 默认把 `Date` 落盘为本地时区字符串 `"yyyy-MM-dd HH:mm:ss"`（无 `WriteDateUseDateFormat` 配置），fastjson1 时代的 epoch 毫秒存量行读回为 `Long`，两格式共存；且默认时区被 fastjson2 首次使用后缓存，运行中切 TZ 不生效 |
+| 中：PG 跨表同名索引静默吞 | **仍未修** | `PgsqlTableCreateHandler.java:204` `CREATE INDEX IF NOT EXISTS` + `PgsqlDbMetaHandler.java:172` 只回本表索引：同名索引属于别的表时 PG 仅 NOTICE 跳过，本表索引永远建不上、每次启动重试、零日志 |
+| 构建：依赖卫生 | **仍未修** | 父 POM 仍以 compile 下发 `commons-lang3`/`commons-text`（全仓零引用，已 grep 核实）、`logback-classic/core`（应为 test）、`protostuff`（仅 core 用，全员继承） |
+| 轻微项 | 部分仍在 | 循环引用裸 SOE（`toJSONString` 的 `catch (Exception)` 捕不到 `StackOverflowError`，重试不生效）、每行解码重算白名单（`polymorphicCodec` 无缓存，代码注释自述有意为之）仍在；IDENTITY+defaultValue、timestamptz USING 见下方新发现归并 |
+
+**本轮新发现（pgsql 模块为主）**
+
+| 级别 | 发现 | 落点 |
+| --- | --- | --- |
+| 高 | **`@Column(type="timestamptz")` 永不收敛，每次启动整表重写**：实体侧 `normalize("timestamptz")` 原样返回，库端 `format_type` 回读 `"timestamp with time zone"` 折成另一个键，两键永不相等 → 每次 `checkTable` 发 `ALTER COLUMN TYPE`（PG 整表重写 relfilenode 变更），且该分支无 USING | `PgsqlColumnTypeDefHandler.java:125-127,228-265` + `PgsqlTableAlterHandler.java:109-113` |
+| 中 | **Protostuff BLOB 通道反序列化零白名单**：`RuntimeSchema` 对 Object/接口字段把类名嵌进字节流按名反射实例化，无 allowlist；JSON 列有继承树白名单、BLOB 列没有任何等价护栏 | `ProtostuffUtil.java:91-92` + `AbstractBeanValueHandler.java:424-430` |
+| 中 | 第三方容器实现类绕过容器归一：归一只置换 `java.` 前缀类，`Map` 字段位置的 commons-collections `LazyMap` 等经 expectClass 分支放行（与 expectClass 旁路同根因） | `AbstractBeanValueHandler.java:364-380,391-394` |
+| 中 | timestamp↔timestamptz 漂移 ALTER 无 USING：`typeUsingClause` 只覆盖 json↔text，时区族互转按会话 TimeZone 静默重解释存量值 | `PgsqlTableAlterHandler.java:218-230` |
+| 中 | 列级 collation 不回读：未查 `attcollation`/`pg_collation`，MySQL 侧 M4 已有等价护栏，pgsql 侧缺失 | `PgsqlDbMetaHandler.java:106-123` |
+| 低 | 布尔默认值同义词表不全：只折 0/1/true/false，PG 还接受 `'t'/'f'/'yes'/'no'/'on'/'off'`，实体写这些写法时永不收敛、每次启动白发 SET DEFAULT | `PgsqlTableAlterHandler.java:50-52` |
+| 低 | 表达式/部分索引被静默排除：`indexprs/indpred` 非空的索引不参与 diff、不受 dropRedundantIndexes 管理、无日志 | `PgsqlDbMetaHandler.java:173-175` |
+| 低 | DROP INDEX 每索引一次 `SELECT current_schema()` 往返；metaProvider 缺失时降级为不限定 schema 的 DROP（其 javadoc 自述"可能删到别人的索引"） | `PgsqlTableAlterHandler.java:256-268` |
+| 低 | 退化 SQL 无护栏：全 IDENTITY 列实体生成 `INSERT INTO "t" () VALUES ()`（PG 语法错误，应为 `DEFAULT VALUES`）；仅主键实体 UPDATE 生成空 SET | `PgsqlBeanToInsertHandler.java:49-55`、`PgsqlBeanToStatementHandler.java:65-66` |
+| 低 | 复合主键强转 `(Object[]) idValue` 抛裸 ClassCastException，无列名上下文 | `PgsqlDbToBeanHandler.java:57` |
+| 低 | 自动建库并发撞 42P04 时被外层 catch 误记为"无法连接 postgres 库" | `PgsqlTemplate.java:95-115` |
+
+**已验证无问题的面**：fastjson2 版本全模块一致 2.0.65；JSON 反序列化入口收敛于基类 `fromJsonText`，两方言均委托；非多态列不开 `SupportAutoType`（fail-closed）；UNBOUNDED 列不写标记不注入 filter；pgsql 标识符/字面量/显式 type 注入闸门有真库测试覆盖（`PgsqlIdentifierTest`/`PgsqlSqlLiteralTest`/`PgsqlDdlTextTest`/`PgSchemaDriftIT` 等）；共享层 M1/M10-M12 修复 pgsql 自动继承。
+
+**测试缺口**：timestamptz 收敛、跨表同名索引、排除索引告警、pgjdbc 下批量部分失败、`bpchar→json` 的 `::text` 中转分支均无回归用例。
+
+---
+
+## 零·续二、2026-10-15 修复实施记录（对应「零·续」复审结论）
+
+> 本节由修复实施阶段追加。「零·续」的复审结论保留原样，便于对照"当初判断 → 实际改动 → 验证结果"。
+
+**实施范围**：「零·续」两张表的全部条目——上轮遗留 4 项（expectClass 旁路、Date 格式漂移、PG 同名索引、依赖卫生）+ 本轮新发现 2 高 5 中 6 低，除"每行解码重算白名单"外全部修复；该项维持有意为之（`SubtypeFilter` 无状态、单行构造开销可忽略，代码注释已自述），不另设缓存。
+
+**验证方式（真跑，非纸面）**：`mvnw test` 全反应堆 `BUILD SUCCESS`，共 **360 个用例、0 失败**（复审基线 337 → 新增 23 个回归用例）：
+
+| 模块 | 用例数 | 新增回归 |
+| --- | --- | --- |
+| `com.wxdgaming.batis` | 64（+4） | BLOB 通道解析期闸门（`EntityParserTest`） |
+| `com.wxdgaming.batis.sql` | 70（+6） | Date 毫秒落盘/双格式读回/循环引用包装（`JsonDateStorageTest` 新文件）、expectClass 双向闸门与第三方容器旁路（`JsonPolymorphicStorageTest`） |
+| `com.wxdgaming.batis.sql.mysql` | 102（+1） | 复合主键标量主键值快速失败（`MysqlDbToBeanHandlerTest`） |
+| `com.wxdgaming.batis.sql.pgsql` | 124（+12） | timestamptz 折叠（`PgsqlColumnTypeDefHandlerTest`）、布尔同义词全量/DEFAULT VALUES/空 SET/复合主键（`PgsqlDdlTextTest`）、**真库守护**（`PgDriftGuardsIT` 新文件：relfilenode 零重写、USING 迁移保真、跨表索引冲突、部分索引存活、collation 收敛） |
+
+| 编号 | 问题 | 修复方式 | 主要落点 |
+| --- | --- | --- | --- |
+| 高·续1 | `@Column(type="timestamptz")` 永不收敛 | `normalize` 把 `timestamptz`/`timetz` 短写折到 format_type 长写键（`"timestamp with time zone"`/`"time with time zone"`），精度参数与库端同口径丢弃 | `PgsqlColumnTypeDefHandler` |
+| 高·续2 | expectClass 宽接口旁路 + 第三方容器绕过 | expectClass 分支改为**双向闸门**：expectClass 自身是 JDK 包（`Serializable`/`AutoCloseable` 等宽接口）直接拒绝，候选类是 JDK 包同样拒绝——`WithResource` 字段带不进 `JdbcRowSetImpl`，commons-collections 容器实现也进不来 | `AbstractBeanValueHandler.SubtypeFilter` |
+| 中·续3 | Protostuff BLOB 零白名单 | 解析期快速失败：BLOB 族列根类型为 `Object`/接口/抽象类（`byte[]` 原样落库除外）→ `IllegalStateException`；BLOB + `polymorphic=true` → `IllegalStateException`（该开关只在 JSON 路径生效）。`ProtostuffUtil` 类文档补"无类白名单"安全边界自述 | `EntityParser` / `ProtostuffUtil` |
+| 中·续4 | Date 落盘格式漂移 | 新增 `DATE_AS_MILLIS`（`ValueFilter`，只命中 `java.util.Date` 族）：Date/Timestamp 一律写 epoch 毫秒，LocalDate/LocalDateTime 保持 ISO 字符串（实测 fastjson2 `"millis"` format 会误伤时间族，故用 ValueFilter 精确制导）；根位置 Date 特判为毫秒字符串。读侧 fastjson2 原生兼容毫秒与旧格式字符串，存量行免迁移 | `AbstractBeanValueHandler` |
+| 中·续5 | PG 跨表同名索引静默吞 + 排除索引无提示 | `diffIndexes` 新增 `findIndexOwner`：CREATE 前查同名对象归属——无归属→建；属别表→WARN 冲突并跳过（不抢名不抛错）；属本表但是排除索引→WARN 不受管理。新增 `warnUnmanagedIndexes`：表达式/部分/约束支撑索引存在即 WARN 计数 | `PgsqlTableAlterHandler` |
+| 中·续6 | timestamp↔timestamptz ALTER 无 USING | `typeUsingClause` 补时区族分支：两个方向都生成 `USING "col" AT TIME ZONE current_setting('TimeZone')`（对该类型对两侧均合法），存量值按会话时区解释而非静默重解释 | `PgsqlTableAlterHandler` |
+| 中·续7 | 列级 collation 不回读 | `columnListSql` 关联 `pg_type`/`pg_collation`，回读 `attcollation <> typcollation` 时的非默认 collation 入 `ColumnInfo.collation`；比对侧只 WARN 不变更（实体注解表达不了排序规则） | `PgsqlDbMetaHandler` / `PgsqlTableAlterHandler` |
+| 构建·续8 | 依赖卫生 | 父 POM 移除 `commons-lang3`/`commons-text`（全仓零引用，grep 核实）；`logback-classic/core` 降 test scope；`fastjson2` 下沉到 `.sql`（compile）、`protostuff` 下沉到 core（compile），父 POM 只在 dependencyManagement 留版本 | 三个 POM |
+| 低·续9 | 布尔默认值同义词不全 | `BOOLEAN_DEFAULT_SYNONYMS` 收齐 PG 全部布尔字面量写法（`'t'/'f'/'yes'/'no'/'on'/'off'`），全部折到 `true`/`false` | `PgsqlTableAlterHandler` |
+| 低·续10 | DROP INDEX schema 解析 | `buildDropIndex` 改 `LazySchema`：每次 diff 只解析一次 `current_schema()`，metaProvider 缺失/返回 null 时抛 `IllegalStateException`（删掉"降级为不限定 schema 的 DROP"分支——那一支可能删到别人的索引） | `PgsqlTableAlterHandler` |
+| 低·续11 | 退化 SQL 无护栏 | 全 IDENTITY 列实体 INSERT 改发 `INSERT INTO "t" DEFAULT VALUES`；仅主键实体 UPDATE 空 SET 快速失败（`IllegalArgumentException`） | `PgsqlBeanToInsertHandler` / `PgsqlBeanToStatementHandler` / `MysqlBeanToUpdateHandler` |
+| 低·续12 | 复合主键裸 CCE | `queryById` 在强转前校验：复合主键收到非 `Object[]` → 带列数与实际类型的 `IllegalArgumentException`（两方言同修） | `PgsqlDbToBeanHandler` / `MysqlDbToBeanHandler` |
+| 低·续13 | 自动建库 42P04 误报 | `createDatabaseIfAbsent` 捕获 SQLState `42P04`（并发创建撞车）记 INFO 并返回，其余异常照旧抛出 | `PgsqlTemplate` |
+| 低·续14 | 循环引用裸 SOE | `toJsonString`/`toBlobBytes` 增捕 `StackOverflowError`，包装为带列名与"对象图存在循环引用"提示的 `TypeMismatchDataAccessException`——SOE 是 Error 不被 `catch (Exception)` 接住，重试链因此失效 | `AbstractBeanValueHandler` |
+
+**行为变更（使用方可见，已登记 README「已知边界」第 30-34 条）**
+
+1. JSON 列里 `Date` 族落盘形态由本地时区字符串变为 epoch 毫秒（读侧双格式兼容，存量行免迁移）；
+2. BLOB 列的两类非法声明从"静默放行"变为解析期异常（原本就是配置错误，无合法存量）；
+3. `timestamptz` 短写实体首次同步后不再每次启动整表重写（修复前每次启动都在复制全表）。
+
+---
+
 ## 零、修复实施记录（后续提交，与上文审核结论对应）
 
 > 本节由修复实施阶段追加。审核结论保留原样，便于对照"当初判断 → 实际改动 → 验证结果"。

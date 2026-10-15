@@ -21,7 +21,7 @@ import java.math.BigDecimal;
 @Setter
 @Getter
 @Table(name = "t_pg_order_item", comment = "PG 订单明细",
-        indexes = @Index(name = "idx_pg_item_order_sku", columnList = "order_id, sku_code"))
+        indexes = @Index(columnList = "order_id, sku_code"))
 public class PgOrderItemEntity {
 
     @Id

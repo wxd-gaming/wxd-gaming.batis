@@ -1,5 +1,9 @@
 package com.wxdgaming.batis.sql.pgsql;
 
+import com.wxdgaming.batis.annotation.GeneratedValue;
+import com.wxdgaming.batis.annotation.GenerationType;
+import com.wxdgaming.batis.annotation.Id;
+import com.wxdgaming.batis.annotation.Table;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.TableInfo;
 import com.wxdgaming.batis.parser.EntityParser;
@@ -69,7 +73,7 @@ class PgsqlDdlTextTest {
         assertTrue(create.contains("PRIMARY KEY (\"id\")"), create);
 
         // 索引与注释各自成语句
-        assertEquals("CREATE UNIQUE INDEX IF NOT EXISTS \"idx_pg_account_name\" "
+        assertEquals("CREATE UNIQUE INDEX IF NOT EXISTS \"t_pg_account_account_name_uk\" "
                 + "ON \"t_pg_account\" (\"account_name\")", statements.get(1));
         assertEquals("COMMENT ON TABLE \"t_pg_account\" IS 'PG 账号表'", statements.get(2));
         assertEquals(1 + 1 + 1 + 8, statements.size(), "8 个字段都声明了注释");
@@ -312,5 +316,85 @@ class PgsqlDdlTextTest {
 
         assertFalse(handler.defaultValueEquals("now()", null), "有默认值与无默认值不能判等");
         assertFalse(handler.defaultValueEquals("'2026-01-01'", "CURRENT_TIMESTAMP"), "字面量与时间函数不能判等");
+    }
+
+    /**
+     * 用例⑬：布尔默认值的全部 PG 字面量同义词都折叠到 true/false。
+     * <p>PG 接受的布尔字符串写法远不止 0/1：{@code 't'/'f'/'yes'/'no'/'on'/'off'} 都是合法输入，
+     * 而库端回读一律是裸的 {@code true}/{@code false}。写侧按字符串透传（defaultLiteral），
+     * 比对侧少折任何一个，每次启动就会对该列白发一条 SET DEFAULT 且永不收敛——
+     * 与时间族折叠是同一类"同义词没折到同一个键"的虚假漂移。</p>
+     */
+    @Test
+    void defaultValueComparisonFoldsAllBooleanSynonyms() {
+        PgsqlTableAlterHandler handler = PgsqlTableAlterHandler.INSTANCE;
+
+        for (String truthy : List.of("1", "'1'", "'true'", "'t'", "'yes'", "'on'")) {
+            assertTrue(handler.defaultValueEquals(truthy, "true"), truthy + " 必须折叠到回读的 true");
+        }
+        for (String falsy : List.of("0", "'0'", "'false'", "'f'", "'no'", "'off'")) {
+            assertTrue(handler.defaultValueEquals(falsy, "false"), falsy + " 必须折叠到回读的 false");
+        }
+        assertFalse(handler.defaultValueEquals("'t'", "false"), "真假两侧不能判等");
+        assertFalse(handler.defaultValueEquals("'off'", "true"), "真假两侧不能判等");
+    }
+
+    /**
+     * 用例⑭：全部列都是自增主键时，INSERT 走 DEFAULT VALUES 而不是拼出 "() VALUES ()"。
+     * <p>{@code INSERT INTO t () VALUES ()} 在 PG 是语法错误；日志/序列表这类
+     * "只有一行自增 ID"的实体是真实存在的用法，必须在文本层面锁住标准写法。</p>
+     */
+    @Test
+    void insertWithOnlyIdentityColumnUsesDefaultValues() {
+        PgsqlBeanToInsertHandler handler = new PgsqlBeanToInsertHandler(valueHandler);
+        PgIdentityOnlyEntity bean = new PgIdentityOnlyEntity();
+
+        assertEquals("INSERT INTO \"t_pg_identity_only\" DEFAULT VALUES", handler.buildInsertSql(bean));
+        assertEquals(0, handler.buildInsertParams(bean).length, "DEFAULT VALUES 没有可绑定参数");
+        assertEquals("id", handler.getIdentityColumn(bean).getColumnName(), "生成键仍要按列名取回");
+    }
+
+    /**
+     * 用例⑮：只有主键列的实体拒绝生成 UPDATE，绝不退化成 "SET  WHERE id = ?" 的半截 SQL。
+     * <p>空 SET 段在 PG 是语法错误，而"无列可更"本身就是配置或使用错误——
+     * 快速失败比把语法错误交给库端更能指出问题在哪。</p>
+     */
+    @Test
+    void updateWithOnlyPkColumnFailsFast() {
+        PgsqlBeanToStatementHandler handler = new PgsqlBeanToStatementHandler(valueHandler);
+
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> handler.buildUpdateSql(new PgIdentityOnlyEntity()));
+        assertTrue(ex.getMessage().contains("没有可更新的字段"), ex.getMessage());
+    }
+
+    /**
+     * 用例⑯：复合主键实体的 queryById 收到标量主键值时快速失败，不做强转。
+     * <p>旧实现直接 {@code (Object[]) idValue}：传单个 Long 会炸出 ClassCastException，
+     * 调用方看到的错因（"Long cannot be cast"）与真实错误（主键个数不对）毫无关系。
+     * 守卫在执行查询之前触发，因此 template 传 null 即可验证。</p>
+     */
+    @Test
+    void compositeKeyQueryByIdRejectsScalarIdValue() {
+        PgsqlDbToBeanHandler handler = new PgsqlDbToBeanHandler(valueHandler);
+
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> handler.queryById(null, PgOrderItemEntity.class, 1L));
+        assertTrue(ex.getMessage().contains("Object[]"), ex.getMessage());
+
+        IllegalArgumentException tooFew = assertThrows(IllegalArgumentException.class,
+                () -> handler.queryById(null, PgOrderItemEntity.class, new Object[]{1L}));
+        assertTrue(tooFew.getMessage().contains("2 个主键列"), tooFew.getMessage());
+    }
+
+    /** 只有一行自增 ID 的实体（日志/序列表形态）：INSERT 走 DEFAULT VALUES、UPDATE 无列可更 */
+    @Table(name = "t_pg_identity_only")
+    public static class PgIdentityOnlyEntity {
+        @Id
+        @GeneratedValue(strategy = GenerationType.IDENTITY)
+        private long id;
+
+        public long getId() { return id; }
+        public void setId(long id) { this.id = id; }
     }
 }

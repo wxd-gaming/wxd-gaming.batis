@@ -46,6 +46,14 @@ public class PgsqlBeanToInsertHandler implements BeanToInsertHandler {
             colNames.add(PgsqlIdentifier.quote(col.getColumnName()));
         }
 
+        // 全部列都是自增主键（或只有一列 IDENTITY）时没有可绑定列：
+        // "() VALUES ()" 在 PG 是语法错误，标准写法是 DEFAULT VALUES
+        if (colNames.isEmpty()) {
+            String sql = "INSERT INTO " + PgsqlIdentifier.quote(tableInfo.getTableName()) + " DEFAULT VALUES";
+            log.debug("构建 INSERT sql:\n{}", sql);
+            return sql;
+        }
+
         String cols = String.join(", ", colNames);
         String placeholders = colNames.stream()
                 .map(c -> "?")

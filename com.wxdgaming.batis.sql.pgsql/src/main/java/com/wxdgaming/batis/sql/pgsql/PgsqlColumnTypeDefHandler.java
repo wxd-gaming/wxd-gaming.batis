@@ -122,8 +122,10 @@ public class PgsqlColumnTypeDefHandler implements ColumnTypeDefHandler {
         BASE_TYPE_MAP.put("timestamp", SqlType.DATETIME);
         BASE_TYPE_MAP.put("timestamp without time zone", SqlType.DATETIME);
         BASE_TYPE_MAP.put("datetime", SqlType.DATETIME);
-        // timestamptz 不进气泡表：它必须被判成与 timestamp 不同的类型（见 normalize 的保留原样分支），
-        // 否则存量带时区列会被框架认为"一致"而永远不提示，写入时的时区换算行为却和实体预期不符
+        // timestamptz/timetz 不进同义词表：它们必须被判成与 timestamp/time 不同的类型，
+        // 否则存量带时区列会被框架认为"一致"而永远不提示，写入时的时区换算行为却和实体预期不符。
+        // 但短写与库端 format_type 的长写法（"timestamp with time zone"）是同一物理类型，
+        // 这对同义写法由 normalize 显式折叠（见下方 sqlType == null 分支）
     }
 
     /**
@@ -235,7 +237,15 @@ public class PgsqlColumnTypeDefHandler implements ColumnTypeDefHandler {
         String suffix = m.group(3) == null ? "" : m.group(3).trim();
 
         SqlType sqlType = BASE_TYPE_MAP.get(base);
-        if (sqlType == null) return t;
+        if (sqlType == null) {
+            // timestamptz/timetz 是 "with time zone" 的短写，而 format_type 回读只给长写法：
+            // 短写不折到长写法的键上，实体写 @Column(type="timestamptz") 时实体侧键是 "timestamptz"、
+            // 库端键是 "timestamp with time zone"，两键永不相等——每次 checkTable 都会虚发一条
+            // 整表重写的 ALTER COLUMN TYPE。精度参数与库端同口径丢弃（时间族不保留参数）。
+            if (base.equals("timestamptz")) return "timestamp with time zone";
+            if (base.equals("timetz")) return "time with time zone";
+            return t;
+        }
 
         // without time zone 是 PG 对 timestamp/time 的默认拼写，不是列契约的一部分：
         // format_type 只在列显式写了精度时才给出 "timestamp(3) without time zone"，

@@ -49,4 +49,23 @@ class MysqlDbToBeanHandlerTest {
             assertEquals("acc-1", bean.getAccount(), "大写别名 ACCOUNT 应映射到 account 字段");
         }
     }
+
+    /**
+     * 复合主键实体的 queryById 收到标量主键值时快速失败，不做强转。
+     * <p>旧实现直接 {@code (Object[]) idValue}：传单个 Long 会炸出 ClassCastException，
+     * 调用方看到的错因（"Long cannot be cast"）与真实错误（主键个数不对）毫无关系。
+     * 守卫在执行查询之前触发，因此 template 传 null 即可验证，不依赖库。</p>
+     */
+    @Test
+    void compositeKeyQueryByIdRejectsScalarIdValue() {
+        MysqlDbToBeanHandler handler = new MysqlDbToBeanHandler(new MysqlBeanValueHandler());
+
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> handler.queryById(null, DailyLogEntity.class, 1L));
+        assertTrue(ex.getMessage().contains("Object[]"), ex.getMessage());
+
+        IllegalArgumentException tooFew = assertThrows(IllegalArgumentException.class,
+                () -> handler.queryById(null, DailyLogEntity.class, new Object[]{1L}));
+        assertTrue(tooFew.getMessage().contains("2 个主键列"), tooFew.getMessage());
+    }
 }

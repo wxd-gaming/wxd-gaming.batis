@@ -104,6 +104,8 @@ public class PgsqlDbMetaHandler implements DbMetaHandler {
      */
     @Override
     public String columnListSql() {
+        // collation 只在"列上显式指定、与类型默认不同"时才回读（attcollation <> typcollation）：
+        // 默认 collation 的列回读 NULL，漂移告警只对真正手工指定过排序规则的列发声
         return "SELECT a.attname AS column_name, "
                 + "format_type(a.atttypid, a.atttypmod) AS physical_type, "
                 + "NOT a.attnotnull AS is_nullable, "
@@ -111,12 +113,15 @@ public class PgsqlDbMetaHandler implements DbMetaHandler {
                 + "col_description(c.oid, a.attnum) AS column_comment, "
                 + "(a.attidentity <> '') AS is_identity, "
                 + "(a.attgenerated <> '') AS is_generated, "
+                + "CASE WHEN a.attcollation <> t.typcollation THEN co.collname ELSE NULL END AS column_collation, "
                 + "EXISTS (SELECT 1 FROM pg_constraint con "
                 + "        WHERE con.conrelid = c.oid AND con.contype = 'p' "
                 + "          AND con.conkey @> ARRAY[a.attnum]::smallint[]) AS is_primary_key "
                 + "FROM pg_attribute a "
                 + "JOIN pg_class c ON c.oid = a.attrelid "
                 + "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                + "JOIN pg_type t ON t.oid = a.atttypid "
+                + "LEFT JOIN pg_collation co ON co.oid = a.attcollation "
                 + "LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum "
                 + "WHERE n.nspname = ? AND c.relname = ? AND a.attnum > 0 AND NOT a.attisdropped "
                 + "ORDER BY a.attnum";
@@ -144,6 +149,7 @@ public class PgsqlDbMetaHandler implements DbMetaHandler {
                 col.setPrimaryKey(rs.getBoolean("is_primary_key"));
                 col.setExtra(buildExtra(rs.getBoolean("is_identity"), rs.getBoolean("is_generated"),
                         rs.getString("column_default")));
+                col.setCollation(rs.getString("column_collation"));
                 col.setDefaultValue(normalizeDefaultValue(rs.getString("column_default"),
                         rs.getBoolean("is_identity")));
                 columns.add(col);

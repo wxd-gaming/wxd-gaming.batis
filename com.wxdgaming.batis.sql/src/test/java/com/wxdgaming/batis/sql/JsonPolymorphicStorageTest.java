@@ -184,6 +184,34 @@ class JsonPolymorphicStorageTest {
         }
     }
 
+    /**
+     * 非 JDK 前缀的第三方 AutoCloseable 实现：站在"宽泛 JDK 接口字段"位置上时，
+     * 旧代码只闸目标类的 JDK 前缀，拦不住它（dbcp2 BasicDataSource 就是这类角色）。
+     */
+    public static class ThirdPartyCloser implements AutoCloseable {
+        /** 计数证明"被拒绝"是真的没被实例化 */
+        static final java.util.concurrent.atomic.AtomicInteger CREATED =
+                new java.util.concurrent.atomic.AtomicInteger();
+
+        public ThirdPartyCloser() {
+            CREATED.incrementAndGet();
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    /** 非 JDK 前缀的第三方容器实现：容器归一只置换 java. 前缀类，这类实现曾能经 expectClass=Map 绕过 */
+    public static class SneakyMap extends LinkedHashMap<String, Shape> {
+        static final java.util.concurrent.atomic.AtomicInteger CREATED =
+                new java.util.concurrent.atomic.AtomicInteger();
+
+        public SneakyMap() {
+            CREATED.incrementAndGet();
+        }
+    }
+
     /** 载体类：字段声明的泛型即 ColumnInfo.genericType 的来源，与 EntityParser 的取法一致 */
     public static class Carrier {
         List<Shape> shapes = new ArrayList<>();
@@ -429,6 +457,33 @@ class JsonPolymorphicStorageTest {
                 () -> CODEC.convertFromDbValue(payload, col("resource", true)),
                 "宽泛 JDK 接口字段不能成为 gadget 入口");
         assertTrue(ex.getMessage().contains("resource"), "报错必须点名是哪一列: " + ex.getMessage());
+    }
+
+    @Test
+    @DisplayName("安全底线：宽泛 JDK 接口字段也带不进非 JDK 前缀的第三方实现类（expectClass 双向闸门）")
+    void wideJdkInterfaceFieldDoesNotAdmitThirdPartyImpls() {
+        // 与上一条同根因但角色不同：ThirdPartyCloser 不是 JDK 类，只闸目标类前缀拦不住它——
+        // expectClass（AutoCloseable）自身也必须过 JDK 闸门，否则这就是 dbcp2 BasicDataSource 的入口
+        String payload = "{\"@type\":\"" + WithResource.class.getName()
+                + "\",\"resource\":{\"@type\":\"" + ThirdPartyCloser.class.getName() + "\"}}";
+        int before = ThirdPartyCloser.CREATED.get();
+        assertThrows(TypeMismatchDataAccessException.class,
+                () -> CODEC.convertFromDbValue(payload, col("resource", true)),
+                "expectClass 是 JDK 宽接口时，第三方实现类同样必须被拒绝");
+        assertEquals(before, ThirdPartyCloser.CREATED.get(), "被拒绝的标记不能发生实例化");
+    }
+
+    @Test
+    @DisplayName("安全底线：第三方容器实现类不能经 expectClass=Map 绕过容器归一")
+    void thirdPartyContainerDoesNotBypassNormalization() {
+        // 容器归一只置换 java. 前缀类；SneakyMap 不是 JDK 类，旧代码会经 expectClass 分支放行
+        String payload = "{\"@type\":\"" + SneakyMap.class.getName()
+                + "\",\"c\":{\"@type\":\"" + Circle.class.getName() + "\",\"radius\":1}}";
+        int before = SneakyMap.CREATED.get();
+        assertThrows(TypeMismatchDataAccessException.class,
+                () -> CODEC.convertFromDbValue(payload, col("shapeMap", true)),
+                "第三方容器实现类必须被拒绝，而不是被当成合法容器实例化");
+        assertEquals(before, SneakyMap.CREATED.get(), "被拒绝的容器标记不能发生实例化");
     }
 
     @Test

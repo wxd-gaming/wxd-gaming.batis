@@ -11,7 +11,7 @@ import com.wxdgaming.batis.annotation.Table;
  * 玩家表 —— 完整注解实体，用于测试
  */
 @Table(name = "t_player", comment = "玩家表",
-       indexes = @Index(name = "idx_srv_level", columnList = "server_id,level", unique = false))
+       indexes = @Index(columnList = "server_id,level"))
 public class PlayerEntity {
 
     @Id

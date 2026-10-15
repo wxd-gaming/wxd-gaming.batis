@@ -16,6 +16,7 @@ import com.wxdgaming.batis.model.TableInfo;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.time.Instant;
@@ -255,6 +256,33 @@ public class EntityParser {
                     + "要去掉其中一个；需要自定义多态格式请只保留 converter，并在其中自行写入判别字段。");
         }
 
+        // BLOB 通道走 Protostuff RuntimeSchema：它对 Object/接口/抽象字段会把类名嵌进字节流、
+        // 按名反射实例化，全程没有任何类白名单（与 JSON 列的继承树白名单不同源）。
+        // 两类配置错误必须在解析期拦住，否则"库里写什么类就实例化什么类"：
+        //   1. 根类型就声明成 Object/接口/抽象类的 BLOB 列（byte[] 原样落库、不过 Protostuff，不在此列）；
+        //   2. BLOB 列声明 polymorphic = true——该开关只在 JSON 编码路径生效，写在这里会被静默忽略。
+        StorageMode storageMode = columnInfo.getStorageMode();
+        boolean blobMode = storageMode == StorageMode.BLOB
+                || storageMode == StorageMode.MEDIUMBLOB
+                || storageMode == StorageMode.LONGBLOB;
+        if (blobMode) {
+            Class<?> javaType = columnInfo.getJavaType();
+            if (javaType != byte[].class
+                    && (javaType == Object.class || javaType.isInterface()
+                    || Modifier.isAbstract(javaType.getModifiers()))) {
+                throw new IllegalStateException("字段 " + field.getName()
+                        + " 声明了 BLOB 存储模式，但类型 " + javaType.getName()
+                        + " 是 Object/接口/抽象类：Protostuff 通道没有反序列化白名单，"
+                        + "多态根类型会让库里的字节流决定实例化哪个类。"
+                        + "请改用具体类型字段，或改用 JSON 存储模式并配合 polymorphic = true（有继承树白名单）。");
+            }
+            if (columnInfo.isPolymorphic()) {
+                throw new IllegalStateException("字段 " + field.getName()
+                        + " 是 BLOB 存储模式，polymorphic = true 只在 JSON 编码路径生效，写在这里会被静默忽略。"
+                        + "BLOB 通道不支持多态还原（Protostuff 没有类白名单），请去掉该声明。");
+            }
+        }
+
         // 主键列强制非空：主键注解的存在本身就是 NOT NULL 语义，覆盖注解里的 nullable
         if (field.getAnnotation(Id.class) != null) {
             columnInfo.setPrimaryKey(true);
@@ -329,11 +357,29 @@ public class EntityParser {
                 || javaType == byte[].class;
     }
 
+    /**
+     * 索引名统一生成：{@code 表名_列名(多列按下划线组合)_类型后缀}（唯一 {@code _uk}、普通 {@code _idx}）。
+     * <p>名字是"表 + 列 + 唯一性"的纯函数：同样的定义在任何环境生成同一个名字——
+     * 它同时是去重依据（定义相同则名字相同，{@code distinct} 自然合并）与结构漂移比对的锚点，
+     * 自带表名前缀也让 PG（索引名 schema 级唯一）不会跨表撞名。</p>
+     * <p>63 是 PG 与 MySQL 双方便携的标识符上限（PG 63 字节、MySQL 64 字符）：超长时截断中段、
+     * 补 8 位稳定哈希并保留类型后缀，避免两条不同的长索引撞名。</p>
+     */
+    static String indexName(String tableName, boolean unique, List<String> columns) {
+        String suffix = unique ? "_uk" : "_idx";
+        String base = tableName + "_" + String.join("_", columns);
+        String name = base + suffix;
+        if (name.length() <= 63) return name;
+        String hash = String.format("%08x", name.hashCode());
+        return base.substring(0, 63 - suffix.length() - hash.length() - 1) + "_" + hash + suffix;
+    }
+
     /** 解析索引：字段级 + 表级复合索引 + @Column(unique=true) 自动生成 */
     private static List<IndexInfo> resolveIndexes(Class<?> entityClass,
                                                    LinkedHashMap<String, ColumnInfo> columns,
                                                    TableInfo tableInfo) {
         List<IndexInfo> indexes = new ArrayList<>();
+        String tableName = tableInfo.getTableName();
 
         // 1. 字段级索引
         Class<?> currentClass = entityClass;
@@ -348,23 +394,17 @@ public class EntityParser {
                         .findFirst().orElse(null);
                 if (colInfo == null) continue;
 
-                IndexInfo indexInfo = new IndexInfo();
-                String colName = colInfo.getColumnName();
-                String name = indexAnn.name();
-                // 无显式 name 时：唯一索引用 uk_ 前缀，非唯一用 idx_ 前缀，与 @Column(unique=true) 自动生成保持一致
-                indexInfo.setName(name.isEmpty()
-                        ? (indexAnn.unique() ? "uk_" + colName : "idx_" + colName)
-                        : name);
-
+                List<String> idxColumns;
                 String columnList = indexAnn.columnList();
                 if (!columnList.isEmpty()) {
-                    indexInfo.setColumns(
-                            Arrays.stream(columnList.split(","))
-                                    .map(String::trim).collect(Collectors.toList())
-                    );
+                    idxColumns = Arrays.stream(columnList.split(","))
+                            .map(String::trim).collect(Collectors.toList());
                 } else {
-                    indexInfo.setColumns(List.of(colName));
+                    idxColumns = List.of(colInfo.getColumnName());
                 }
+                IndexInfo indexInfo = new IndexInfo();
+                indexInfo.setName(indexName(tableName, indexAnn.unique(), idxColumns));
+                indexInfo.setColumns(idxColumns);
                 indexInfo.setUnique(indexAnn.unique());
                 indexes.add(indexInfo);
             }
@@ -375,16 +415,11 @@ public class EntityParser {
         Table tableAnn = entityClass.getAnnotation(Table.class);
         if (tableAnn != null) {
             for (Index indexAnn : tableAnn.indexes()) {
+                List<String> idxColumns = Arrays.stream(indexAnn.columnList().split(","))
+                        .map(String::trim).collect(Collectors.toList());
                 IndexInfo indexInfo = new IndexInfo();
-                String name = indexAnn.name();
-                if (name.isEmpty()) {
-                    name = "idx_" + indexAnn.columnList().replace(",", "_").replace(" ", "");
-                }
-                indexInfo.setName(name);
-                indexInfo.setColumns(
-                        Arrays.stream(indexAnn.columnList().split(","))
-                                .map(String::trim).collect(Collectors.toList())
-                );
+                indexInfo.setName(indexName(tableName, indexAnn.unique(), idxColumns));
+                indexInfo.setColumns(idxColumns);
                 indexInfo.setUnique(indexAnn.unique());
                 indexes.add(indexInfo);
             }
@@ -400,23 +435,14 @@ public class EntityParser {
                     .filter(idx -> idx.getColumns() != null && idx.getColumns().size() == 1
                             && idx.getColumns().get(0).equals(col.getColumnName()))
                     .findFirst().orElse(null);
-            if (sameColumn != null && sameColumn.isUnique()) continue;
-
-            String ukName = "uk_" + col.getColumnName();
-            IndexInfo sameName = indexes.stream()
-                    .filter(idx -> ukName.equals(idx.getName()))
-                    .findFirst().orElse(null);
-            if (sameName != null) {
-                boolean sameSingleColumn = sameName.getColumns() != null && sameName.getColumns().size() == 1
-                        && sameName.getColumns().get(0).equals(col.getColumnName());
-                if (sameSingleColumn) {
-                    // 用户手写的同名索引正好覆盖这一列：就地升级为唯一索引，名字不用改
-                    sameName.setUnique(true);
-                    continue;
-                }
-                // 名字被别的定义占用：既不静默丢弃唯一约束，也不擅自改动别人索引的语义
-                throw new IllegalStateException("@Column(unique=true) 需要生成索引 " + ukName
-                        + "，但实体上已存在同名索引（列: " + sameName.getColumns() + "），请为该索引改名");
+            String ukName = indexName(tableName, true, List.of(col.getColumnName()));
+            if (sameColumn != null) {
+                if (sameColumn.isUnique()) continue;
+                // 同列只有普通索引：就地升级为唯一（唯一约束含普通索引的查询能力，两条都建是纯冗余）；
+                // 名字是"列+唯一性"的纯函数，升级唯一性必须同步换名，否则与库端比对会对不上
+                sameColumn.setUnique(true);
+                sameColumn.setName(ukName);
+                continue;
             }
             IndexInfo indexInfo = new IndexInfo();
             indexInfo.setName(ukName);

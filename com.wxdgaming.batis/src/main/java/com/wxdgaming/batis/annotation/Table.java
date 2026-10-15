@@ -21,7 +21,7 @@ import java.lang.annotation.Target;
  * <p>使用形态（复合索引必须走这里，索引注解本身没有类的目标限制）：</p>
  * <pre>
  * &#64;Table(name = "t_player", comment = "玩家表",
- *        indexes = &#64;Index(name = "idx_srv_level", columnList = "server_id,level"))
+ *        indexes = &#64;Index(columnList = "server_id,level"))
  * public class Player { ... }
  * </pre>
  *
@@ -41,7 +41,7 @@ public @interface Table {
     /**
      * 复合索引列表。
      * <p>EntityParser 只在找到 Table 注解时才解析这一项，用 {@link Entity} 声明实体会丢掉这段配置。
-     * 解析时若 {@link Index#name()} 为空，按 "idx_" + 列名（逗号换成下划线、去空格）自动生成。</p>
+     * 索引名不可自定义，按 {@code 表名_列名(多列组合)_类型后缀} 自动生成（见 {@link Index}）。</p>
      */
     Index[] indexes() default {};
 }

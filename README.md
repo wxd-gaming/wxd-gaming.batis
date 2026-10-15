@@ -175,7 +175,7 @@ GPG 签名 + source/javadoc JAR）：
 @Setter
 @Getter
 @Table(name = "t_account", comment = "账号表",
-       indexes = @Index(name = "idx_account_name", columnList = "account_name", unique = true))
+       indexes = @Index(columnList = "account_name", unique = true))
 public class AccountEntity {
 
     @Id
@@ -267,10 +267,16 @@ try (BeanRunner br = template.beanRunner()) {
 - 表名：`@Table(name=...)` 非空则**原样使用**（不再做命名转换）；否则类简单名驼峰转下划线。
 - 列名：`@Column(name=...)` 非空则原样使用；否则字段名驼峰转下划线。
   查询 DSL 里传**列名或 Java 字段名都能被解析**。
-- 索引名：字段级唯一索引自动命名 `uk_<列名>`（普通索引 `idx_<列名>`）；
-  `@Table` 级复合索引自动命名 `idx_<列名列表，逗号换下划线、去空格>`。
-  三步索引解析（字段级 → `Table#indexes` → `Column#unique` 自动派生）合并后**按名字去重**、
-  按名字排序。因此**命名冲突会静默丢弃一条索引**，建议显式指定 `@Index#name`。
+- 索引名：**不可自定义**，统一生成为 `表名_列名(多列按下划线组合)_类型后缀`
+  （唯一索引 `_uk`、普通索引 `_idx`），例如 `t_account_account_name_uk`、
+  `t_player_server_id_level_idx`。名字是"表 + 列 + 唯一性"的纯函数：同样的定义在任何环境
+  生成同一个名字，既是去重依据（同名即同定义，`distinct` 自然合并）也是漂移比对的锚点；
+  自带表名前缀，在 PG（索引名 schema 级唯一）上也不会跨表撞名。超过 63 字符
+  （PG/MySQL 便携上限）时截断中段并补稳定哈希，类型后缀保留。
+  三步索引解析（字段级 → `Table#indexes` → `Column#unique` 自动派生）合并后按名字去重、排序。
+  **迁移注意**：本口径替代了旧的 `uk_<列名>`/`idx_<列名>` 命名——存量表上的旧名索引
+  在下次 `checkTable` 时会被判为"实体未声明的索引"：默认 DROP（有 WARN 日志），
+  想保留可 `setDropRedundantIndexes(false)`，新名索引会同步补建。
 
 ### 类型推断（`@Column#type` 为空时）
 
@@ -1171,7 +1177,7 @@ MariaDB，测试结束后 `db.stop()`：
 | --- | --- |
 | `BeanRunnerTest` | 自增主键回写到 bean、类型化映射无损（重点 BigDecimal 精度与 boolean）、批量插入后 `queryAll` 顺序与条数、完整 insert→query→update→query→delete 生命周期 |
 | `CachedBeanRunnerTest` | Write-Behind 全语义（19 个有序用例）：读写不对称、脏表按操作类型分三张并合并、Tombstone、三种 flush、事务边界与刷盘；含 **30 秒随机长跑**（3 秒 TTL 缓存 + 强制淘汰睡眠）与 **12 线程 × 40 轮多表并发**（共用同一 runner，约 10% 并发 flush），两者都带 `@Timeout(120, SECONDS)` |
-| `QueryRunnerTest` | DDL/元数据管线（10 个有序且有依赖的用例）：`loadAllTables`、`checkTable` 建表、`information_schema` 回读（列数与 NOT NULL/主键）、索引 `uk_account`（唯一）与 `idx_level_score`（恰好 2 列）、`checkTable` 幂等、缓存清理、原生 SQL、`ResultSetHandlers` 各工厂、`DROP TABLE` |
+| `QueryRunnerTest` | DDL/元数据管线（10 个有序且有依赖的用例）：`loadAllTables`、`checkTable` 建表、`information_schema` 回读（列数与 NOT NULL/主键）、索引 `t_role_account_uk`（唯一）与 `t_role_level_score_idx`（恰好 2 列）、`checkTable` 幂等、缓存清理、原生 SQL、`ResultSetHandlers` 各工厂、`DROP TABLE` |
 | `QueryRunnerCloseTest` | `close()` 幂等、`isCloseConnection()`、事务内外 `isInTransaction()` 的状态切换 |
 | `SelectQueryIT` | 查询 DSL（13 个用例）：条件、`in`/`between`/`like`、**OR 嵌套在 AND 下的括号化并与手写 SQL 交叉验证**、4 页翻页且用 `Set` 检测重复、`count`/`exists`、`one()` 的实体/null/`TooManyResultsException` 三态、投影列、未知列在任何 SQL 发出前就抛、`toSql()`/`toParams()` 文本与参数顺序、DSL 复用事务连接、已废弃 `whereSection` 的注入拦截 |
 | `TransactionTemplateIT` | 12 个用例：提交可见性、异常回滚、`setRollbackOnly`、事务内 Runner 共用同一连接（用 Hikari `activeConnections` 计数与 `TxContext` 解绑验证）、**事务内批量不会提前提交**（3 行 → 回滚后为 0）、`REQUIRES_NEW` 用不同连接且不被外层回滚、只读事务拒写、回滚后的**缓存幽灵读防护**、事务内 `flushAll` 回滚后脏快照恢复、`executeAndFlush` 提交后刷盘、**并发转账后 `SUM(balance)` 守恒且失败事务为 0** |
@@ -1262,7 +1268,8 @@ wxd-gaming.batis/
 6. **`@Entity` 与 `@Table` 不可互补**：`@Table` 存在时 `@Entity` 被完全忽略，
    所以用 `@Entity` 就没法配复合索引（只能靠字段级 `@Index`）。
 7. **主键回写不保证成功**：表无自增列、驱动未回传或回传值非数值时取到 `null` 而非异常。
-8. **索引按名字去重**，同名索引会被静默丢弃——命名冲突比缺索引更难查，建议显式命名。
+8. **索引名不可自定义**：一律按 `表名_列名_类型后缀` 生成（见「命名规则」），同名即同定义，
+   去重天然成立；改列组合或唯一性会改变索引名，对存量表表现为"删旧建新"（见命名规则的迁移注意）。
 9. **`@Column#converter` 在解析期实例化**，缺无参构造会让整个实体解析失败，
    报错是实例化异常而非数据访问异常，排查时容易误认为 SQL 问题。
 10. **`JSON` 存储模式在 MySQL 侧渲染为 `LONGTEXT`**，不是原生 `json` 列，无法用 JSON 函数查询。
@@ -1321,6 +1328,29 @@ wxd-gaming.batis/
     `settings.xml` 需配置 id 为 `central` 的 server token）；旧 OSSRH `s01.oss.sonatype.org`
     端点已停服，POM 中已清除相关死配置。仓库根目录已有 Apache-2.0 `LICENSE`。
     `mvnw` wrapper 已补齐（Maven 3.9.9，`only-script` 模式，含 SHA-256 校验）。
-29. **父 POM 把 `fastjson2` / `logback-classic` / `commons-*` / `protostuff` 作为 compile 依赖下发**，
-    使用方会被传递引入这些库（含一个日志绑定）。若要嵌入宿主应用，建议按需 `optional`
-    或在自己的 POM 里排除。
+29. ~~**父 POM 把 `fastjson2` / `logback-classic` / `commons-*` / `protostuff` 作为 compile 依赖下发**~~
+    **已修复**：`commons-lang3`/`commons-text`（全仓零引用）已移除，`logback-classic/core`
+    降为 test scope（不再向使用方传递日志绑定），`fastjson2` 只在 `com.wxdgaming.batis.sql`
+    （JSON 列编解码）以 compile 声明、`protostuff` 只在 `com.wxdgaming.batis`（BLOB 通道）
+    以 compile 声明——这两个是功能本体，仍会传递引入，属预期；父 POM 仅在
+    `dependencyManagement` 里统一版本。
+30. **JSON 列里 `java.util.Date` 族（含 `java.sql.Timestamp`）落盘为 epoch 毫秒**：
+    序列化经 `ValueFilter` 统一转毫秒（根位置是 Date 时整个值就是毫秒数字符串），
+    `LocalDate`/`LocalDateTime` 保持 ISO 字符串不变。读取两侧兼容：毫秒与历史版本写出的
+    本地时区字符串 `"yyyy-MM-dd HH:mm:ss"` 都能读回 `Date`——存量行无需迁移，但新旧行在
+    库里形态不同，直接以人读/SQL 函数消费 JSON 文本的场景要注意。
+31. **BLOB 通道（Protostuff）没有反序列化白名单**，与 JSON 列的继承树白名单不同源：
+    根类型声明为 `Object`/接口/抽象类的 BLOB 列、以及 BLOB 列上声明 `polymorphic = true`，
+    都会在实体解析期抛 `IllegalStateException`（配置错误快速失败）。多态需求请改用
+    JSON 存储模式 + `polymorphic = true`。
+32. **PG 时区族类型已可收敛**：`@Column(type = "timestamptz"/"timetz")` 短写与库端
+    `format_type` 回读的长写（`timestamp with time zone`）折叠到同一比较键，重复
+    `checkTable` 不再整表重写；`timestamp` ↔ `timestamptz` 互转的 ALTER 自动补
+    `USING 列 AT TIME ZONE current_setting('TimeZone')`，存量值按会话时区解释——
+    漂移修复前请确认会话 `TimeZone` 与数据写入口径一致。
+33. **PG 索引名是 schema 级唯一**：实体声明的索引名被**别的表**占用时，`checkTable`
+    告警并跳过创建（不抢名、不抛错）；本表上已存在的表达式/部分索引与约束支撑索引
+    不受框架管理（不参与比对、不受 `dropRedundantIndexes` 控制），存在时启动会 WARN 计数。
+34. **PG 列级 collation 只回读告警、不参与变更**：实体注解无法表达排序规则，
+    库端列使用非默认 collation（如 `COLLATE "C"`）时启动 WARN 指出列名，框架绝不
+    自动 ALTER——需要变更请手工 DDL。

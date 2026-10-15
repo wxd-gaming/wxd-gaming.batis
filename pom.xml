@@ -97,17 +97,6 @@
                 <artifactId>fastjson2</artifactId>
                 <version>2.0.65</version>
             </dependency>
-
-            <dependency>
-                <groupId>org.apache.commons</groupId>
-                <artifactId>commons-lang3</artifactId>
-                <version>3.18.0</version>
-            </dependency>
-            <dependency>
-                <groupId>org.apache.commons</groupId>
-                <artifactId>commons-text</artifactId>
-                <version>1.10.0</version>
-            </dependency>
             <dependency>
                 <groupId>ch.qos.logback</groupId>
                 <artifactId>logback-classic</artifactId>
@@ -153,6 +142,12 @@
         </dependencies>
     </dependencyManagement>
 
+    <!--
+      共享依赖只放"每个模块都真实需要"的：
+      slf4j-api（全模块日志门面）、lombok、junit、logback（仅测试）。
+      fastjson2/protostuff 这类单模块依赖在各模块 pom 里自行声明（版本仍由上面 dependencyManagement 管），
+      避免使用方引入某个方言模块时被塞一堆用不上的传递依赖。
+    -->
     <dependencies>
         <dependency>
             <groupId>org.junit.jupiter</groupId>
@@ -163,36 +158,18 @@
             <artifactId>lombok</artifactId>
         </dependency>
         <dependency>
-            <groupId>com.alibaba.fastjson2</groupId>
-            <artifactId>fastjson2</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.commons</groupId>
-            <artifactId>commons-lang3</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.commons</groupId>
-            <artifactId>commons-text</artifactId>
-        </dependency>
-        <dependency>
             <groupId>ch.qos.logback</groupId>
             <artifactId>logback-classic</artifactId>
+            <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>ch.qos.logback</groupId>
             <artifactId>logback-core</artifactId>
+            <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>io.protostuff</groupId>
-            <artifactId>protostuff-core</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>io.protostuff</groupId>
-            <artifactId>protostuff-runtime</artifactId>
         </dependency>
     </dependencies>
 

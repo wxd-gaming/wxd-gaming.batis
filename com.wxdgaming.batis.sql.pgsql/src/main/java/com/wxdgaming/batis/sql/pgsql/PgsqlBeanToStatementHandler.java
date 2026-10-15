@@ -61,6 +61,12 @@ public class PgsqlBeanToStatementHandler implements BeanToUpdateHandler, BeanToD
             throw new IllegalArgumentException(
                     "实体 " + bean.getClass().getSimpleName() + " 未定义主键，无法执行 update");
         }
+        // 仅主键列的实体拼出来是 "SET  WHERE ..." 这种语法错误 SQL：空 SET 在 PG 没有合法写法，
+        // 快速失败比把语法错误抛给驱动更定位得到原因
+        if (setCols.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "实体 " + bean.getClass().getSimpleName() + " 只有主键列，没有可更新的字段，update 无意义");
+        }
 
         String sql = "UPDATE " + PgsqlIdentifier.quote(tableInfo.getTableName()) + " SET "
                 + String.join(", ", setCols) + " WHERE " + String.join(" AND ", whereCols);

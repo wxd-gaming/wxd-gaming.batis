@@ -134,6 +134,15 @@ public class PgsqlTemplate extends JdbcTemplate {
         if (exists) return;
         try (Statement stmt = conn.createStatement()) {
             stmt.execute("CREATE DATABASE \"" + dbName + "\" WITH ENCODING 'UTF8' TEMPLATE template0");
+        } catch (SQLException e) {
+            // 42P04 = duplicate_database：两个实例并发启动时都会走到这里，后到的那个撞上的
+            // 不是错误而是"别人已经建好了"。不拦这条，外层 catch 会把它记成
+            // "无法连接 postgres 库"这种与真实原因完全不符的日志
+            if ("42P04".equals(e.getSQLState())) {
+                log.info("数据库 '{}' 已被并发实例创建（42P04），无需重复建库", dbName);
+                return;
+            }
+            throw e;
         }
         log.info("自动创建数据库 '{}'（ENCODING UTF8, TEMPLATE template0）", dbName);
     }

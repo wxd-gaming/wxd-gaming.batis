@@ -20,7 +20,7 @@ import java.util.Date;
 @Setter
 @Getter
 @Table(name = "t_account", comment = "账号表",
-       indexes = @Index(name = "idx_account_name", columnList = "account_name", unique = true))
+       indexes = @Index(columnList = "account_name", unique = true))
 public class AccountEntity {
 
     @Id

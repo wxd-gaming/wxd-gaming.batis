@@ -26,7 +26,7 @@ import java.util.List;
 @Setter
 @Getter
 @Table(name = "t_pg_account", comment = "PG 账号表",
-        indexes = @Index(name = "idx_pg_account_name", columnList = "account_name", unique = true))
+        indexes = @Index(columnList = "account_name", unique = true))
 public class PgAccountEntity {
 
     @Column(length = 64, comment = "账号名", nullable = false)

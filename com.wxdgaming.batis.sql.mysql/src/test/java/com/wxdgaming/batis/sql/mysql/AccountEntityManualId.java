@@ -18,7 +18,7 @@ import java.util.Date;
 @Setter
 @Getter
 @Table(name = "t_account_manual", comment = "账号表(手动ID)",
-       indexes = @Index(name = "idx_manual_account_name", columnList = "account_name", unique = true))
+       indexes = @Index(columnList = "account_name", unique = true))
 public class AccountEntityManualId {
 
     @Id
