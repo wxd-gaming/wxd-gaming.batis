@@ -9,7 +9,9 @@
         <version>1.1.0</version>
     </parent>
 
+    <name>com.wxdgaming.batis.sql</name>
     <artifactId>com.wxdgaming.batis.sql</artifactId>
+    <description>com.wxdgaming.batis.sql</description>
 
     <dependencies>
         <dependency>

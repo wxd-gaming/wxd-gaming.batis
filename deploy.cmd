@@ -1,0 +1,1 @@
+mvnw.cmd clean deploy -Dmaven.test.skip=true -Pdeploy

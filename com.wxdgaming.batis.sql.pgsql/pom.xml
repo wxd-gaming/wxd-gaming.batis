@@ -9,7 +9,9 @@
         <version>1.1.0</version>
     </parent>
 
+    <name>com.wxdgaming.batis.sql.pgsql</name>
     <artifactId>com.wxdgaming.batis.sql.pgsql</artifactId>
+    <description>com.wxdgaming.batis.sql.pgsql</description>
 
     <dependencies>
         <dependency>

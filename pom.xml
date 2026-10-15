@@ -43,7 +43,17 @@
       serverId 在 deploy profile 里配置（central），token 配在 settings.xml 的对应 server 上。
     -->
 
-
+    <!-- 仓库中心地址 -->
+    <distributionManagement>
+        <snapshotRepository>
+            <id>s01</id>
+            <url>https://s01.oss.sonatype.org/content/repositories/snapshots</url>
+        </snapshotRepository>
+        <repository>
+            <id>s01</id>
+            <url>https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/</url>
+        </repository>
+    </distributionManagement>
 
     <modules>
         <module>com.wxdgaming.batis</module>
@@ -270,6 +280,7 @@
             </resource>
         </resources>
     </build>
+
     <profiles>
         <profile>
             <id>deploy</id>
@@ -328,8 +339,23 @@
                             </execution>
                         </executions>
                     </plugin>
-                    <!-- 发布本身由 pluginManagement 里的 central-publishing-maven-plugin（extensions=true）接管，
-                         serverId 统一为 central，token 配在 settings.xml 的 <server><id>central</id> 上 -->
+                    <plugin>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <extensions>true</extensions>
+                        <configuration>
+                            <publishingServerId>s01</publishingServerId>
+                            <autoPublish>true</autoPublish>
+                        </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-clean-plugin</artifactId>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-enforcer-plugin</artifactId>
+                    </plugin>
                 </plugins>
             </build>
         </profile>
