@@ -6,12 +6,32 @@
     <parent>
         <groupId>io.github.wxd-gaming</groupId>
         <artifactId>wxd-gaming.batis</artifactId>
-        <version>1.1.0</version>
+        <version>1.1.1</version>
     </parent>
 
     <name>com.wxdgaming.batis.sql</name>
     <artifactId>com.wxdgaming.batis.sql</artifactId>
-    <description>com.wxdgaming.batis.sql</description>
+    <description>
+        Database-neutral JDBC engine of wxd-gaming.batis, a lightweight JDBC-first ORM for Java 21.
+        JdbcTemplate creates tables from entity metadata and compares them against the live schema
+        (checkTable) so only the necessary ALTER statements are issued, and exposes QueryRunner for raw SQL,
+        the fluent SelectQuery DSL, BeanRunner for entity read/write, CachedBeanRunner for write-behind
+        batching with single-flight loading, bounded expiry and delete tombstones, TransactionTemplate with
+        propagation and isolation levels, and batch operations with per-row results. The module also declares
+        the dialect SPI a database implementation must fill in - column type rendering, table
+        create/alter/drop/truncate, metadata readers, bean-value handlers and partition manager - and holds
+        no database-specific literals itself. Add com.wxdgaming.batis.sql.mysql or
+        com.wxdgaming.batis.sql.pgsql to talk to a real database. Connection pooling uses HikariCP.
+
+        wxd-gaming.batis 方言无关的 JDBC 引擎层（Java 21 轻量级 JDBC ORM）。JdbcTemplate 按实体元数据自动建表，
+        并用 checkTable 把实体侧渲染结果与库端真实结构比对，只下发必要的 ALTER 语句。对外还提供裸 SQL 的
+        QueryRunner、链式 SelectQuery 查询 DSL、实体读写的 BeanRunner、支持 Write-Behind 延迟批刷的
+        CachedBeanRunner（单飞加载防击穿、固定过期防雪崩、删除墓碑防穿透）、带传播行为与隔离级别的
+        TransactionTemplate，以及带逐行结果的批量操作与 SQL 异常翻译。本模块同时声明了方言必须实现的
+        SPI——列类型渲染、建表/改表/删表/清空、元数据读取、Bean 取值处理与分区管理——自身不含任何数据库
+        专有字面量，必须配合 com.wxdgaming.batis.sql.mysql 或 com.wxdgaming.batis.sql.pgsql 才能连上真实数据库。
+        连接池由 HikariCP 提供。
+    </description>
 
     <dependencies>
         <dependency>

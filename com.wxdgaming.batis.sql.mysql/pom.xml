@@ -6,12 +6,31 @@
     <parent>
         <groupId>io.github.wxd-gaming</groupId>
         <artifactId>wxd-gaming.batis</artifactId>
-        <version>1.1.0</version>
+        <version>1.1.1</version>
     </parent>
 
     <name>com.wxdgaming.batis.sql.mysql</name>
     <artifactId>com.wxdgaming.batis.sql.mysql</artifactId>
-    <description>com.wxdgaming.batis.sql.mysql</description>
+    <description>
+        MySQL / MariaDB dialect of wxd-gaming.batis, a lightweight JDBC-first ORM for Java 21.
+        Constructing a MysqlTemplate injects every SPI of com.wxdgaming.batis.sql with a MySQL implementation:
+        physical column type rendering (VARCHAR, TINYINT, INT, BIGINT, DECIMAL, LONGTEXT, MEDIUMBLOB and
+        friends), CREATE / ALTER / DROP / TRUNCATE DDL, backticked identifiers, MySQL error-code translation,
+        and information_schema readers for tables, columns and indexes that drive the zero-drift schema
+        comparison. It is the only dialect that also implements partitioned-table maintenance, generating
+        RANGE / RANGE COLUMNS / LIST / LIST COLUMNS / HASH / KEY / LINEAR HASH / LINEAR KEY partition DDL and
+        reading back the existing partition layout. Ships the mysql-connector-j driver; its integration tests
+        start an embedded MariaDB, so no external server is needed to build them. Depend on this artifact for
+        any MySQL or MariaDB target - it brings the SQL layer and core metadata with it.
+
+        wxd-gaming.batis 的 MySQL / MariaDB 方言实现。构造 MysqlTemplate 会把 com.wxdgaming.batis.sql 的全部
+        SPI 注入为 MySQL 版本：物理列类型渲染（VARCHAR、TINYINT、INT、BIGINT、DECIMAL、LONGTEXT、MEDIUMBLOB
+        等）、CREATE / ALTER / DROP / TRUNCATE 语句、反引号标识符、MySQL 错误码翻译，以及供零漂移结构比对
+        使用的 information_schema 表/列/索引读取。分区表维护目前只有本方言落地：按 PartitionConfig 生成
+        RANGE / RANGE COLUMNS / LIST / LIST COLUMNS / HASH / KEY / LINEAR HASH / LINEAR KEY 分区 DDL，
+        并读回库端已有的分区布局。产物内含 mysql-connector-j 驱动，集成测试自行拉起嵌入式 MariaDB，
+        无需外部数据库。连 MySQL 或 MariaDB 就依赖本模块，它会带入 SQL 层与元数据核心层。
+    </description>
 
     <dependencies>
         <dependency>

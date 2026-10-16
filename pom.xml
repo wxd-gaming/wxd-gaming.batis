@@ -6,13 +6,35 @@
 
     <groupId>io.github.wxd-gaming</groupId>
     <artifactId>wxd-gaming.batis</artifactId>
-    <version>1.1.0</version>
+    <version>1.1.1</version>
     <packaging>pom</packaging>
 
 
-    <!-- 项目信息 -->
-    <name>com.wxdgaming.batis</name>
-    <description>db orm engine mysql, pgsql</description>
+    <!--
+      项目信息：name 与聚合 artifactId 对齐。
+      description 采用「英文段落在前、中文段落在后」的双语写法，两段描述的是同一批事实，
+      改动任一段时必须同步另一段，否则中文读者与英文读者会看到两套互相矛盾的说明。
+      每段都要点明「这是什么 + 别人该依赖哪个模块」，方便 Maven Central 检索。
+    -->
+    <name>wxd-gaming.batis</name>
+    <description>
+        wxd-gaming.batis is a lightweight JDBC-first ORM for Java 21, built for game-server data access.
+        Annotations on the entity class describe the whole table at once - name, columns, indexes and
+        primary-key strategy - and the framework turns them into DDL, then diffs the same rendering against
+        the live schema so existing tables converge with zero drift. On top of that it offers a type-safe
+        query DSL, batch read/write, programmatic transactions, partitioned-table maintenance and
+        write-behind caching. It talks plain JDBC through HikariCP; no Spring or MyBatis is involved.
+        This is the aggregator POM. Depend on com.wxdgaming.batis.sql.mysql or
+        com.wxdgaming.batis.sql.pgsql instead - each brings the core metadata layer and the
+        dialect-neutral SQL engine with it.
+
+        wxd-gaming.batis 是面向游戏服务端数据访问场景的轻量级 JDBC ORM（Java 21）。实体类上的注解
+        一次性描述表名、列、索引与主键策略，框架据此生成 DDL，并把同一份渲染结果与库端结构比对，
+        让存量表零漂移收敛；在此之上提供类型安全查询 DSL、批量读写、编程式事务、分区表维护与
+        Write-Behind 缓存。全程走原生 JDBC（HikariCP 连接池），不依赖 Spring 与 MyBatis。
+        本 POM 只是聚合工程，请依赖 com.wxdgaming.batis.sql.mysql 或 com.wxdgaming.batis.sql.pgsql，
+        它们会自动带入元数据层与方言无关的 SQL 层。
+    </description>
     <url>https://github.com/wxd-gaming/wxd-gaming.batis</url>
 
     <!-- SCM 信息 -->

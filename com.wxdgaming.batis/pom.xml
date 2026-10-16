@@ -6,12 +6,30 @@
     <parent>
         <groupId>io.github.wxd-gaming</groupId>
         <artifactId>wxd-gaming.batis</artifactId>
-        <version>1.1.0</version>
+        <version>1.1.1</version>
     </parent>
 
     <name>com.wxdgaming.batis</name>
     <artifactId>com.wxdgaming.batis</artifactId>
-    <description>com.wxdgaming.batis</description>
+    <description>
+        Core metadata and shared model layer of wxd-gaming.batis, a lightweight JDBC-first ORM for Java 21.
+        Contains no JDBC or SQL-string code. It defines the entity annotations (Entity / Table / Column / Id /
+        Index / GeneratedValue), the EntityParser that translates annotations plus Java types into
+        TableInfo, ColumnInfo and IndexInfo using dialect-neutral logical SqlType values, the StorageMode
+        write-side strategies (auto mapping, explicit primitives, JSON, and Protostuff-encoded BLOB columns),
+        the Criteria / Sort / Pageable query model, the EntityCache abstraction with its Caffeine-backed
+        local implementation, the DataAccessException hierarchy, and DbStats latency histograms.
+        Applications normally get this artifact transitively from com.wxdgaming.batis.sql; depend on it
+        directly only when you read entity metadata without executing SQL.
+
+        wxd-gaming.batis 元数据与通用模型层（Java 21 轻量级 JDBC ORM），不含任何 JDBC 调用或 SQL 拼接代码。
+        本模块提供：实体注解（Entity / Table / Column / Id / Index / GeneratedValue）、把注解与 Java 类型
+        翻译成 TableInfo / ColumnInfo / IndexInfo 的 EntityParser（只产出与方言无关的逻辑 SqlType，
+        不产出任何数据库字面量）、写入侧的 StorageMode 策略（自动映射、显式基础类型、JSON、
+        Protostuff 二进制的 BLOB）、Criteria / Sort / Pageable 查询模型、基于 Caffeine 的 EntityCache 抽象、
+        DataAccessException 异常体系与 DbStats 耗时分档统计。
+        通常由 com.wxdgaming.batis.sql 传递引入；只有在「只解析实体元数据、不执行 SQL」时才直接依赖本模块。
+    </description>
 
     <dependencies>
         <dependency>

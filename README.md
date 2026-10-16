@@ -4,8 +4,9 @@
 以「**注解即表结构**」+「**实体即 API**」为核心：实体类上的注解一次性描述表名、列、
 索引与主键策略，框架据此自动建表 / 对已有表做结构漂移比对，并提供查询 DSL、批量读写、
 编程式事务、分区表维护与 Write-Behind 缓存。
+方言目前有 **MySQL/MariaDB** 与 **PostgreSQL** 两套实现（分区表维护目前只有 MySQL 侧落地）。
 
-- 版本：`1.1.0`
+- 版本：`1.1.1`
 - 构建坐标：`io.github.wxd-gaming:wxd-gaming.batis`（聚合 POM）
 - 许可：Apache License 2.0（仓库根目录 `LICENSE`）
 - 作者：wxd-gaming（無心道）
@@ -29,6 +30,7 @@
 - [分区表维护](#分区表维护)
 - [异常体系](#异常体系)
 - [MySQL 方言内部](#mysql-方言内部)
+- [PostgreSQL 方言内部](#postgresql-方言内部)
 - [类型映射](#类型映射)
 - [性能统计](#性能统计)
 - [测试](#测试)
@@ -39,7 +41,7 @@
 
 ## 设计目标与整体结构
 
-框架的骨架可以用三层来概括，依赖方向严格单向（`core ← sql ← sql.mysql`）：
+框架的骨架可以用三层来概括，依赖方向严格单向（`core ← sql ← sql.mysql / sql.pgsql`）：
 
 ```
 业务代码
@@ -51,22 +53,28 @@ com.wxdgaming.batis.sql          方言无关的 JDBC 层
 com.wxdgaming.batis              元数据与通用模型层
    │  EntityParser 把「注解 + Java 类型」翻译成 TableInfo / ColumnInfo / IndexInfo
    ▼
-com.wxdgaming.batis.sql.mysql    方言实现层
-   MysqlTemplate 在构造时用 setter 把全部 SPI 注入核心层
+com.wxdgaming.batis.sql.mysql    方言实现层（二选一，互不依赖）
+com.wxdgaming.batis.sql.pgsql
+   MysqlTemplate / PgsqlTemplate 在构造时用 setter 把全部 SPI 注入核心层
 ```
 
 三条贯穿全项目的设计约定：
 
 1. **逻辑类型与物理类型解耦**。`EntityParser` 只产出逻辑类型 `SqlType`（加长度/精度），
    绝不产出方言字面量；「这一列写成 `VARCHAR(64)` 还是 `TINYINT(1)`」由 sql 层的
-   `ColumnTypeDefHandler` SPI 按方言渲染。MySQL 侧实现见 `MysqlColumnTypeDefHandler`。
+   `ColumnTypeDefHandler` SPI 按方言渲染。MySQL 侧实现见 `MysqlColumnTypeDefHandler`，
+   PG 侧见 `PgsqlColumnTypeDefHandler`（同一批逻辑档在 PG 上收敛到 `SMALLINT`/`TEXT`/`BYTEA`）。
 2. **核心层不反向依赖方言**。`JdbcTemplate` 只声明一组可空的 handler 字段
    （`dbMetaProvider`、`tableCreateHandler`、`beanToInsertHandler`……），
-   由 `MysqlTemplate#initDefaults()` 一次性注入。换方言只换注入，上层 Runner / DSL / 事务代码一行不动。
+   由 `MysqlTemplate#initDefaults()` / `PgsqlTemplate#initDefaults()` 一次性注入。
+   换方言只换注入，上层 Runner / DSL / 事务代码一行不动。
 3. **结构比对必须零漂移**。`checkTable()` 会把「实体侧渲染再规格化」与「库端元数据规格化」
    做 diff；任何渲染字面量的改动都可能让存量表被判成漂移并对全表刷 `MODIFY`
    （大表上等于锁表事故）。因此 `MysqlColumnTypeDefHandler#renderType` 的分支看似可"美化"，
    实际上是历史行为的锁定，改动必须同步验证 `SchemaDriftIT` 的零漂移不变式。
+   PG 侧这条更硬：`ALTER TABLE ... ALTER COLUMN ... TYPE` 会**整表重写**，
+   虚发一次的代价比 MySQL 的 `MODIFY` 更大，护栏是 `PgSchemaDriftIT` 与
+   `PgsqlColumnTypeDefHandlerTest`。
 
 ---
 
@@ -77,7 +85,7 @@ com.wxdgaming.batis.sql.mysql    方言实现层
 | `com.wxdgaming.batis` | `com.wxdgaming.batis` | 元数据与通用模型：注解、`EntityParser`、`TableInfo/ColumnInfo/IndexInfo`、查询 DSL 模型、缓存抽象、类型转换、异常体系、性能统计 | caffeine |
 | `com.wxdgaming.batis.sql` | `com.wxdgaming.batis.sql` | 方言无关 JDBC 层：`JdbcTemplate`、`QueryRunner`、`BeanRunner`、`CachedBeanRunner`、SELECT DSL、事务、分区抽象、DDL handler SPI | core、HikariCP 7.1.0、caffeine |
 | `com.wxdgaming.batis.sql.mysql` | `com.wxdgaming.batis.sql.mysql` | MySQL/MariaDB 方言：`MysqlTemplate` 与全部 handler 实现 | sql、mysql-connector-j 9.5.0、（test）mariaDB4j 3.1.0 |
-| `com.wxdgaming.batis.sql.pgsql` | `com.wxdgaming.batis.sql.pgsql` | PostgreSQL 方言：`PgsqlTemplate` 与全部 handler 实现，JSON 列原生档位（`@Column(type="json"/"jsonb")`）与多态开关 | sql、postgresql 42.7.8、（test）embedded-postgres 2.2.2 |
+| `com.wxdgaming.batis.sql.pgsql` | `com.wxdgaming.batis.sql.pgsql` | PostgreSQL 方言：`PgsqlTemplate` 与全部 handler 实现，JSON 列原生档位（`@Column(type="json"/"jsonb")`）与多态开关。**分区表维护未落地**（无 `partition` 包） | sql、postgresql 42.7.8、（test）embedded-postgres 2.2.2 |
 | `com.wxdgaming.batis.mongodb` | `com.wxdgaming.batis.mongodb` | **占位模块**：`pom.xml` + 一个空类 `MongodbTemplate`（无字段/构造/方法）；仍在聚合 POM 注释掉 | — |
 
 最后一个模块被注释在聚合 POM 的 `<modules>` 之外，原因是「仅一个空类」会打出空 jar
@@ -117,11 +125,13 @@ com.wxdgaming.batis.sql.mysql    方言实现层
 预装 Maven，也不会因为某台机器装了 3.8/4.x 而出现构建差异：
 
 ```bash
-# 全量构建 + 跑测试（mysql 模块的集成测试需要本地能拉起嵌入式 MariaDB）
+# 全量构建 + 跑测试（mysql 模块会拉起嵌入式 MariaDB，pgsql 模块会拉起嵌入式 PostgreSQL，
+# 两者的首次构建都要联网下载对应平台的数据库发行包）
 ./mvnw -q clean install
 
 # 只跑某个模块的测试
 ./mvnw -q -pl com.wxdgaming.batis.sql.mysql -am test
+./mvnw -q -pl com.wxdgaming.batis.sql.pgsql -am test
 
 # 跳过测试构建
 ./mvnw -q clean install -DskipTests
@@ -136,17 +146,30 @@ Windows 下把 `./mvnw` 换成 `mvnw.cmd`（`.\mvnw.cmd -q clean install`）。
 - 本项目使用 **wrapper 的 `only-script` 模式**：仓库里没有 `maven-wrapper.jar`，
   只有 `mvnw` / `mvnw.cmd` 两个脚本 + `.mvn/wrapper/maven-wrapper.properties`，
   由脚本负责下载并解包发行版。
+- 根 POM 设了 `project.build.outputTimestamp`（可复现构建）：jar 内条目时间戳被固定，
+  同一份源码两次构建产物字节一致，便于比对与校验签名。
 
-### 依赖引入
+### 发布与依赖引入
 
-发布到 Maven Central 走根 POM 的 `deploy` profile（Central Portal，`central-publishing-maven-plugin`，
-GPG 签名 + source/javadoc JAR）：
+发布走根 POM 的 `deploy` profile：`central-publishing-maven-plugin`（`extensions=true` 接管
+deploy 阶段）+ GPG 签名 + source/javadoc JAR（javadoc 侧 `failOnError=false`、`doclint=none`）。
+**profile 里把插件的 `publishingServerId` 覆盖成了 `s01`**（`pluginManagement` 里的默认值是
+`central`，`-Pdeploy` 时以 profile 为准），所以 `settings.xml` 必须把 Central Portal 的
+user token 配在 **`<server><id>s01</id>`** 上：
 
 ```bash
-# 前置：settings.xml 配置 <server><id>central</id>（Central Portal 的 user token），
+# 前置：settings.xml 的 <server><id>s01</id> 配 Central Portal 的 token，
 #       以及可用的 GPG 签名密钥
 ./mvnw clean deploy -Pdeploy
+
+# 仓库根目录的等价一键脚本（跳过测试）
+.\deploy.cmd
 ```
+
+根 POM 同时保留了一段 `distributionManagement`（id `s01`，指向 `s01.oss.sonatype.org`）。
+它只是 Maven 原生 deploy 插件读取的位置，而 deploy 阶段已被 central-publishing 插件接管，
+因此**发布实际不走这两个 URL**；两处 id 需要保持一致（`publishingServerId` 与 `settings.xml`
+的 server id），改回 `central` 时同步改 profile 里的这一个值即可。
 
 使用方等构件上线后可直接从 Central 引入；本地开发验证则先安装到本地仓库：
 
@@ -155,10 +178,18 @@ GPG 签名 + source/javadoc JAR）：
 ```
 
 ```xml
+<!-- MySQL / MariaDB 方言 -->
 <dependency>
     <groupId>io.github.wxd-gaming</groupId>
     <artifactId>com.wxdgaming.batis.sql.mysql</artifactId>
-    <version>1.1.0</version>
+    <version>1.1.1</version>
+</dependency>
+
+<!-- PostgreSQL 方言 -->
+<dependency>
+    <groupId>io.github.wxd-gaming</groupId>
+    <artifactId>com.wxdgaming.batis.sql.pgsql</artifactId>
+    <version>1.1.1</version>
 </dependency>
 ```
 
@@ -216,6 +247,24 @@ MysqlTemplate template = new MysqlTemplate(config);
 改连 `mysql` 系统库执行 `CREATE DATABASE IF NOT EXISTS ... CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`，
 再创建 `HikariDataSource`。若连不上系统库（权限不足等），只打 `warn` 日志并跳过自动建库，
 后续由连接池抛出原始异常。已持有连接池时改用 `MysqlTemplate(HikariDataSource)`，跳过自动建库。
+
+换 PostgreSQL 只需把模板换成 `PgsqlTemplate`，实体、DSL、事务与缓存代码一行不动：
+
+```java
+HikariConfig config = new HikariConfig();
+config.setJdbcUrl("jdbc:postgresql://localhost:5432/test?sslmode=disable");
+config.setUsername("postgres");
+config.setPassword("");
+config.setDriverClassName("org.postgresql.Driver");
+
+PgsqlTemplate template = new PgsqlTemplate(config);   // 其余用法与 MysqlTemplate 完全一致
+```
+
+`PgsqlTemplate(HikariConfig)` 同样自动建库，但写法必须不同（PG 没有
+`CREATE DATABASE IF NOT EXISTS`，也不能在事务块里建库）：先连 maintenance 库 `postgres`，
+参数化查 `pg_database`，缺库才发
+`CREATE DATABASE "xxx" WITH ENCODING 'UTF8' TEMPLATE template0`；撞上并发建库的 `42P04`
+按 `info` 记账而不是报错。细节见 [PostgreSQL 方言内部](#postgresql-方言内部)。
 
 ### 3）建表 / 结构同步
 
@@ -547,7 +596,7 @@ void deleteAll(Class<?> cls) / deleteAll(TableInfo);    // DELETE 全表（非 T
 
 ### `CachedBeanRunner`——带缓存与 Write-Behind
 
-见 [缓存与 Write-Behind](#缓存与-Write-Behind)。
+见 [缓存与 Write-Behind](#缓存与-write-behind)。
 
 ---
 
@@ -763,7 +812,9 @@ public interface EntityCache<K, V> {
 
 ## 分区表维护
 
-分区能力是一套**独立的附加模块**（不改动任何既有代码），分四层：
+分区能力是一套**独立的附加模块**（不改动任何既有代码），分四层。
+**当前只有 MySQL 侧有方言实现**（`MysqlPartitionManager` / `MysqlPartitionExpr` /
+`MysqlPartitionMetaReader`），pgsql 模块没有 `partition` 包，PG 分区表需手工 DDL。
 
 | 层 | 类型 | 职责 |
 | --- | --- | --- |
@@ -846,7 +897,8 @@ PartitionBuilder.of(MysqlPartitionManager.INSTANCE, cache)
 `PartitionType#RANGE_COLUMNS` / `LIST_COLUMNS` 是 MySQL 独有写法（RANGE 只接受整数表达式，
 RANGE COLUMNS 才接受日期/字符串列），严格说属方言概念却放进了方言无关的枚举。
 另外分区**边界子句文本**（`"VALUES LESS THAN (n)"`、`"VALUES LESS THAN MAXVALUE"`）
-是在方言无关的 `PartitionBuilder` 里拼出来的。换 pgsql 时这两处需要下沉或参数化。
+是在方言无关的 `PartitionBuilder` 里拼出来的。换 pgsql 时这两处需要下沉或参数化
+——这一支尚未发生，pgsql 模块目前不含分区实现。
 
 ---
 
@@ -884,6 +936,11 @@ MySQL 翻译策略：**优先用服务端数字错误码**（稳定、语义唯�
 未命中时委托 `DefaultSqlExceptionHandler` 按 SQLState / 关键字兜底，**绝不抛「翻译失败」**。
 码表集中在 `MysqlSqlCodes`。调用方据返回的具体子类决定「可重试（死锁、锁超时）还是直接失败
 （重复键、语法错误）」。
+
+PostgreSQL 则**只能按 SQLState 分派**：pgjdbc 的 `getErrorCode()` 恒为 0，稳定信号只有
+5 字符的 SQLSTATE，码表集中在 `PgsqlSqlStates`（字符串常量而非整数）。
+映射表见 [PostgreSQL 方言内部](#postgresql-方言内部)，两侧的异常子类是同一套，
+调用方的「可重试 / 直接失败」判别在两个方言上口径一致。
 
 > 注意：MariaDB 对无默认值的 NOT NULL 列报 **1364**，MySQL 报 **1048**，两者同归
 > `NotNullConstraintViolationException`，调用方无需感知这个方言差异。
@@ -1033,6 +1090,242 @@ PARTITIONS 8;
 
 ---
 
+## PostgreSQL 方言内部
+
+`PgsqlTemplate#initDefaults()` 填满核心层**同样那 12 个 SPI 字段**，但只用 **11 个 handler 类**：
+UPDATE / DELETE / SELECT 三方合并成一个 `PgsqlBeanToStatementHandler`——三处方言差异只剩
+标识符引号与分页写法，拆成三个文件后每个类体仍不到三十行、也没有独立演化点，拆分成本大于收益。
+`PgsqlBeanValueHandler` 与 MySQL 侧同名协作者一样，**不是 SPI 字段**，而是被写读四类 handler
+共享的实例（PG 尤其需要：时间族一侧转 `java.sql.Date`、另一侧转 `Timestamp` 就会 42804）。
+装配完整性由 `PgSchemaDriftIT#templateWiresEveryDialectSpi` 钉住（断言 12 个字段全部非空）。
+
+| SPI 字段 | PG 实现 | 职责 |
+| --- | --- | --- |
+| `dbMetaProvider` | `PgsqlDbMetaHandler` | pg_catalog 回读表/列/索引 |
+| `columnTypeDefHandler` | `PgsqlColumnTypeDefHandler.INSTANCE` | 逻辑类型 → PG 物理类型渲染与规格化 |
+| `tableCreateHandler` | `PgsqlTableCreateHandler.INSTANCE` | 建表（**多条语句**） |
+| `tableAlterHandler` | `PgsqlTableAlterHandler.INSTANCE` | 漂移比对与**按属性拆开**的 ALTER |
+| `tableDropHandler` / `tableTruncateHandler` | `PgsqlTableDropHandler` / `PgsqlTableTruncateHandler` | `DROP TABLE IF EXISTS` / `TRUNCATE ... RESTART IDENTITY` |
+| `sqlDbToBeanHandler` | `PgsqlDbToBeanHandler` | 结果集 → 实体 |
+| `beanToInsertHandler` | `PgsqlBeanToInsertHandler` | 实体 → INSERT（跳过 IDENTITY 主键、按列名取回生成键） |
+| `beanToUpdateHandler` / `beanToDeleteHandler` / `beanToSelectHandler` | `PgsqlBeanToStatementHandler`（**同一个实例填三个字段**） | UPDATE / DELETE / SELECT 与分页子句 |
+| `sqlExceptionHandler` | `PgsqlSqlExceptionHandler` | 按 SQLState 翻译异常 |
+
+另有四个不进 SPI 的支撑类：`PgsqlIdentifier`（标识符唯一出口）、`PgsqlSqlLiteral`
+（字面量与 `DEFAULT` 唯一出口）、`PgsqlSqlStates`（SQLState 常量表）、`PgsqlJsonType`
+（json/jsonb 档位判定，**包私有**）。
+
+### 标识符与字面量：两个唯一出口
+
+MySQL 侧的反引号散在建表/改表/元数据二十多个点上；PG 改用 `PgsqlIdentifier.quote()` 收口，
+策略是**双引号 + 强制小写**（`Locale.ROOT`）。这两件是一套的：框架的表结构缓存键、列名查找
+全按小写口径运作，`pg_catalog` 回读到的也是小写名；若改成"双引号保留原大小写"，
+建表写出 `"tRole"` 而查询按缓存用小写名，每次访问都是 42P01。用 `Locale.ROOT` 而不是默认
+`Locale` 是因为土耳其语 JVM 会把大写 `I` 折成 dotless `ı`，`ID` 写成 `"ıd"` 后只报一句
+"column does not exist"。强制加引号的附带收益：保留字列名（`order`、`state`、`user`）不需特殊处理。
+内部双引号按标准写法双写；`quote(first, second)` 供 `"schema"."index"` 这类限定名使用。
+
+`PgsqlSqlLiteral` **不做反斜杠转义**：PG 默认 `standard_conforming_strings=on`，反斜杠就是普通字符，
+照抄 MySQL 的 `\n` 会把两个字符 `\n` 存进注释里（而不是换行）。转义只有一种——单引号双写，
+NUL 一律拒绝（PG 的 text 存不下 `0x00`，报错里还不会提是哪一列）。
+`DEFAULT` 按设计就是"SQL 字面量"，因此**注解里写什么就是什么**：带引号的形态只校验、不再二次转义
+（`'O''Brien'` 就是 `O'Brien`；早期实现剥引号再转义一遍，`''` 变 `''''`，于是两侧永远不等、
+每次启动白发一条 `SET DEFAULT`），裸写法（`0`、`CURRENT_TIMESTAMP`）走白名单
+`[A-Za-z0-9_$+.\-:()]+`，两者都不符合就当场抛异常而不是拼半截 DDL 发给库端。
+时间族默认值写成带引号的 `'2026-01-01'` 即可，**不要**写 `'...'::timestamp`（混合引号与裸字符，
+两条分支都判不过，而回读侧折回来的也是带引号那个）。
+
+显式 `@Column(type = ...)` 逃生舱在 PG 侧多一道闸：`checkExplicitType` 拒绝 `;` `--` `/*` `'` `"`
+五个能改变语句结构的字符，但**不校验类型名是否合法**——扩展类型和自定义 domain 必须进得来。
+
+### 建表：一次建表对应多条语句
+
+PG 的 `CREATE TABLE` 不能内联索引，注释也是独立对象，所以产出的是
+**`CREATE TABLE` → N 条 `CREATE INDEX` → 表/列 `COMMENT ON`**，由 `buildStatements` 统一给出、
+`doAction` 逐条执行。逐条而非拼一串的原因很硬：pgjdbc 走 prepared 协议时不接受多语句。
+顺序固定且不做"前面失败也继续"的容错——表都没建起来时后面的报错只是噪音。
+
+```sql
+CREATE TABLE IF NOT EXISTS "t_account" (
+  "id" BIGINT GENERATED BY DEFAULT AS IDENTITY,
+  "account_name" VARCHAR(64) NOT NULL,
+  "frozen" BOOLEAN DEFAULT false,
+  PRIMARY KEY ("id")
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "t_account_account_name_uk" ON "t_account" ("account_name");
+COMMENT ON TABLE "t_account" IS '账号表';
+COMMENT ON COLUMN "t_account"."account_name" IS '账号名';
+```
+
+要点：
+
+- 没有 `ENGINE` / `DEFAULT CHARSET` 尾巴（PG 的存储与编码在集群/库级别决定，见自动建库时的
+  `ENCODING 'UTF8'`），列定义里也没有 `COMMENT` 子句。
+- 列片段顺序 `"col" 类型 [NOT NULL] [DEFAULT x] [GENERATED BY DEFAULT AS IDENTITY]` 与改表侧
+  的 `ADD COLUMN` **复用同一个 `columnDefinition` 方法**，两条路径不可能写出两种字面量。
+- 自增写 `GENERATED BY DEFAULT AS IDENTITY`：`ALWAYS` 会拒绝显式赋值（框架插入路径与数据迁移
+  都可能需要手工指定主键，这也是与 MySQL `AUTO_INCREMENT` 的行为对齐），`serial` 是老式默认值
+  语法、与 IDENTITY 的元数据回读口径不一致。只在「是主键且策略为 `IDENTITY`」时追加。
+- **布尔列默认值的特例**：实体沿用 MySQL 习惯写 `0`/`1`，而 PG 不会把整数默认值隐式降格成布尔
+  （`DEFAULT 0` 落在 boolean 列上就是 42804，整条建表语句失败）。`defaultLiteral` 因此折成
+  `false`/`true`；`'false'` 这种带引号形态**刻意不折**（它本身就是合法的 boolean 字面量）。
+- 实体没写注释时**不发** `COMMENT ON`，避免存量表接入框架时把 DBA 手工写的注释抹掉。
+- `buildSql(TableInfo)` 返回分号分隔的完整脚本（可直接粘进 psql），逐条执行请用包可见的
+  `buildStatements`。
+
+### 元数据回读：直查 pg_catalog
+
+`PgsqlDbMetaHandler` 既不用 `DatabaseMetaData` 也不用 `information_schema`，三条理由：
+`format_type()` 给出 PG 官方规范拼写（`character varying(255)`、`double precision`）与 `\d` 所见一致，
+比较键因此可预测（`information_schema` 把同一列拆成 DATA_TYPE + 长度/精度三列，要自己拼回去）；
+注释只有 `col_description` / `obj_description` 拿得到；
+**`information_schema.columns` 会按当前用户权限过滤，权限不足时列会静默消失**，
+漂移比对就把"读不到"当成"库里没有"而反复 `ADD COLUMN`——`pg_class`/`pg_attribute` 不受此限。
+
+- `getCatalog()` 返回 `SELECT current_schema()`。PG 的 JDBC catalog 是**数据库名**，而表实际归属
+  `search_path` 里的 schema；建表也落在 `current_schema`，两侧同一口径才不会读到别的 schema 的同名表。
+- 表清单：`relkind IN ('r','p')`（普通表 + 分区父表）且 `NOT relispartition`——分区叶子、视图、
+  物化视图、TOAST 表都不入选，当成独立表比对会凭空多出结构差异。
+- 列查询：`format_type` 原样存进 `ColumnInfo#type`（**逻辑类型 `sqlType` 在库端一侧故意留空**，
+  比对全走 `normalize`，与 MySQL 侧同策略）；主键判定用 `conkey @> ARRAY[attnum]`，否则复合主键
+  的第二列会被当成普通列、按 id 定位时走错条件；`attnum > 0` 过滤系统列，`attisdropped` 过滤
+  `DROP COLUMN` 留下的墓碑列；按 `attnum` 排序（漂移比对是逐行按序对拍的）。
+- `attidentity` / `attgenerated` 折进 `ColumnInfo#extra`（形如 `identity` / `generated`），
+  与 MySQL 把 `auto_increment` 写进 EXTRA 同一约定，改表处理器因此读同一个字段判自增。
+  老式 `serial` 列两个标记都为空，靠默认值里的 `nextval(` 认出来——不认的话存量 serial 表
+  接入框架时会被认为"缺自增"而反复发 ALTER。
+- 索引查询用 `unnest(ix.indkey::int[]) WITH ORDINALITY` 把"一行的列号数组"炸开并带出列内序号，
+  才能还原复合索引的列顺序（`(a,b)` 与 `(b,a)` 服务能力不同）。排除主键、表达式索引（`indexprs`）、
+  部分索引（`indpred`）与约束支撑索引（`conindid`）——它们没有可比的裸列清单，报出来只会生成跑不通的重建语句。
+- 默认值回读折成可比较形式：`NULL::xxx` 与字面 `NULL` → `"NULL"` 哨兵；`nextval(...)` → null
+  （属于自增机制而不是列默认值）；`now()` 与 `CURRENT_TIMESTAMP(n)` → `CURRENT_TIMESTAMP`
+  （不折的话实体写 `CURRENT_TIMESTAMP` 每次启动白发一条 `SET DEFAULT` 且永不收敛）；
+  `'x'::数值档` 剥掉引号（实体侧数字是裸写法），text/date/timestamp 保留引号（实体侧字符串本来就带）。
+
+### 结构漂移比对：ALTER 按属性拆开
+
+**与 MySQL 的实质差别**：MySQL 用一条 `MODIFY COLUMN <完整列定义>` 覆盖一切，
+PG 的 ALTER 是按属性拆开的（`ALTER COLUMN ... TYPE` / `SET NOT NULL` / `SET DEFAULT`），
+所以逐项判定、只发真正变化的那几项。这不是啰嗦：`ALTER COLUMN ... TYPE` 会**整表重写**，
+照 MySQL 的习惯"有一项不同就重写列定义"，改一个可空性就要复制一遍全表。
+执行形状固定为**一条多子句 ALTER**（列级变更合并，只取一次锁）+ 各索引语句 + 各注释语句
+（索引与注释是独立对象，并入不了那条 ALTER）。
+
+> ⚠️ 和 MySQL 侧一样，**`PgsqlTableAlterHandler` 从不生成 `DROP COLUMN`**：实体里删掉的字段，
+> 库端的列永久保留（索引会被删）。PG 的 `DROP COLUMN` 还会连带丢掉该列上的索引与统计，
+> 风险高于 MySQL，需要清列时必须手工 DDL。
+
+- **类型**：只有 `renderNormalized(实体列) != normalize(库端 format_type)` 才发 `TYPE`，这一句绝不能虚发。
+- **可空性** → `SET NOT NULL` / `DROP NOT NULL`；**默认值** → `SET DEFAULT` / `DROP DEFAULT`，
+  等价判定见下；**自增** → 实体要而库端没有才发 `ADD GENERATED BY DEFAULT AS IDENTITY`
+  （若库端是 `nextval` 默认值，先 `DROP DEFAULT` 才能加 IDENTITY），反方向只 `warn`；
+  **注释** → 独立 `COMMENT ON`，且只在实体写了注释时才发。
+- **默认值等价**（`defaultValueEquals`）：实体端 null/空串与库端 `NULL` 都算"无默认值"；
+  布尔档折叠 `0/1/false/true` 以及**带引号的全部同义写法**（`'0'` `'1'` `'t'` `'f'` `'yes'`
+  `'no'` `'on'` `'off'`）——布尔列的 `DEFAULT 'false'` 回读是**不带引号**的 `false`，
+  只折裸写法就会每次启动白发一条 `SET DEFAULT`；时间族与回读侧同一口径折成 `CURRENT_TIMESTAMP`。
+- **需要 `USING` 的三族互转**（`typeUsingClause`）：文本族 ↔ JSON 族走 `::text` 中转
+  （PG 对这两族没有隐式转换，直写会 42846；且 `character(n)`（bpchar）与 json 之间连直接 cast 都没有，
+  直写 `col::character(1)` 同样 42846）；`timestamp` ↔ `timestamptz` 走
+  `USING "col" AT TIME ZONE current_setting('TimeZone')`——转换结果与 PG 的隐式行为一致，
+  但语义出现在 DDL 文本里而不是藏在看不见的转换背后。数字改宽、varchar 改长度这些 PG 自己会处理的
+  转换**不加** `USING`（多写一层等于换掉转换语义）。
+- **索引**：判定按 `(唯一性, 列数量, 逐位列名)`，变了必须"先 DROP 再 CREATE"（PG 索引名 schema 级
+  唯一，不删就建会撞 42P07）；库端有、实体没声明的索引按 `dropRedundantIndexes` 决定 DROP 或只告警，
+  两种都逐条 `warn` 点名。`DROP INDEX` **必须带 schema 限定**且解析不出时直接抛
+  `IllegalStateException`——不限定就按 `search_path` 找第一个同名对象，万一别表先占了这个名字，
+  删掉的就是别人的索引，这种不可逆破坏不用"降级兜底"来做。
+- **两处只告警、不改动**：实体声明的索引名被**别的表**占用时（`CREATE INDEX IF NOT EXISTS` 在 PG
+  只发 NOTICE 静默跳过，本表索引永远建不上且毫无日志），先查 `findIndexOwner` 把冲突摆进 WARN；
+  表达式/部分/约束支撑索引不受框架管理，启动时 `warnUnmanagedIndexes` 计数告警；
+  列使用非默认 collation（`attcollation <> typcollation`）时逐列点名告警——实体注解表达不了排序规则。
+
+### 自增主键取回：PG 上必须按列名
+
+`PgsqlBeanToInsertHandler#getIdentityColumn` 在 PG 上是**必需**而不是便利：pgjdbc 把
+`RETURN_GENERATED_KEYS` 实现成 `RETURNING *`，结果集第一列是**表的第一个字段**，
+主键不在首列的实体若照"取第一列"就会把别的列的值当成 ID 回写。
+`DEFAULT VALUES` 分支同理——全部列都是 IDENTITY 主键时没有可绑定列，`() VALUES ()` 在 PG 是语法错误。
+无主键实体在 UPDATE / DELETE / `queryById` 三处都直接抛异常拒绝，绝不退化成无 WHERE 的全表操作；
+只有主键列的实体做 UPDATE 也快速失败（`SET  WHERE ...` 是没有合法写法的语法错误）。
+
+### 值转换与 PG 原生 JSON 列
+
+`PgsqlBeanValueHandler` 继承 `AbstractBeanValueHandler`（JSON/Protostuff 编解码、重试、基础类型派发
+都在基类），只实现方言差异点。**唯一实质差别的档位是 `LocalDate`**：PG 有真正的 `DATE` 列，
+所以它转成 `java.sql.Date` 而不是 MySQL 侧的零点 `Timestamp`（把 Timestamp 绑进 DATE 列直接 42804）。
+`Timestamp` / `java.sql.Date` / `java.sql.Time` 先短路原样传递（否则 `new Timestamp(long)` 会丢掉
+亚毫秒位，而 PG 的 TIMESTAMP 存到微秒）。其余与 MySQL 一致：`LocalDateTime`/`Instant`/`Offset`/`Zoned`
+归一到 `Timestamp`，枚举存 `name()`，`UUID`/`Character` 转 String，`BigInteger` 转 BigDecimal。
+
+`@Column(type = "json"/"jsonb")` 选中的原生 JSON 列，写端要把字符串包成 `PGobject`（带类型名）：
+`BeanRunner` 统一用 `setObject(idx, value)`，pgjdbc 对 `String` 走 `setString`、参数按 `varchar` 送出，
+而 PG **没有** varchar→json/jsonb 的隐式赋值转换，于是每次写入都 42804。
+刻意不改成"在占位符后面拼 `?::jsonb`"——那要动 INSERT/UPDATE/批量三条渲染路径，
+还会把 `toSql()` 的产物写成方言腔；包装点只有这一个。只包文本：数字/时间落进 JSON 列属于实体写错，
+让它带着 42804 原样失败比在这里悄悄 `toJSONString` 一层更好查。
+读端不需要特判（pgjdbc 回读 json/jsonb 成 `PGobject`，`toString()` 就是列里的 JSON 文本）。
+
+两个设计决定值得单独记一笔：
+
+1. **选型走 `@Column(type=...)` 而不是新增 `StorageMode` 档位**：`StorageMode` 是**写入侧策略**
+   （这个字段怎么变成列值），而"这一列在库里是什么类型"是物理描述，仓库里早已为此准备了逃生舱。
+   用现成通道表达选型，方言不必新增枚举，MySQL 侧一行都不用改。
+2. **`json`/`jsonb` 不注册进 `BASE_TYPE_MAP`**：注册等于把它们折到 `SqlType.JSON`，
+   而 `CANONICAL` 把 JSON 折成比较键 `text`——于是"实体声明 jsonb、库里还是 text"这种**真实**漂移
+   会被判成相等而永远不修，恰好把用户显式选型的意义丢掉。留在表外走"未识别基名原样返回"，
+   `jsonb` 与 `text` 是两个不同的键，漂移可见并由 ALTER 带 `USING` 修回。
+
+多态 JSON 列（`@Column(polymorphic = true)`）走的是 sql 层的继承树白名单，与方言无关，PG 侧同样适用。
+
+### 分页与查询 DSL
+
+`PgsqlBeanToStatementHandler#appendPaging` 按需追加子句：只有 limit → `LIMIT ?`，
+只有 offset → `OFFSET ?`，两者都有 → `LIMIT ? OFFSET ?`。接口默认实现是 MySQL 语义
+（只有偏移时补一个 `LIMIT 18446744073709551615`），这个数字在 PG 直接 22001 out of range
+（PG 的 LIMIT 是 bigint），而 PG 本来就允许只写 `OFFSET`。
+`quote()` 是查询 DSL 唯一的标识符出口，所以方言只需覆盖这一处就能把整条链式查询的引号口径换掉。
+行映射的列标签匹配是"小写优先、大小写不敏感兜底"，兜底索引**按需惰性构建一次**，
+不把 O(cols²) 的线性回退摊到每一行。
+
+### SQLState 映射（`PgsqlSqlStates` + `PgsqlSqlExceptionHandler`）
+
+PG 驱动给出的 `getErrorCode()` 恒为 0，照抄 `switch (getErrorCode())` 会一个 case 都不命中。
+只收录默认兜底会**判错或判粗**的码：
+
+| SQLState | 常量 | 框架异常 |
+| --- | --- | --- |
+| 23505 | `UNIQUE_VIOLATION` | `DuplicateKeyException` |
+| 23502 | `NOT_NULL_VIOLATION` | `NotNullConstraintViolationException` |
+| 23503 | `FOREIGN_KEY_VIOLATION` | `ForeignKeyConstraintViolationException` |
+| 23514 | `CHECK_VIOLATION` | `DataIntegrityViolationException`（MySQL 老版本没有真正的 CHECK，PG 独立报这档） |
+| 22001 | `STRING_DATA_RIGHT_TRUNCATION` | `DataTruncationException` |
+| 22003 | `NUMERIC_VALUE_OUT_OF_RANGE` | `DataTruncationException` |
+| 40P01 | `DEADLOCK_DETECTED` | `DeadlockLoserDataAccessException`（可重试） |
+| 40001 | `SERIALIZATION_FAILURE` | `DeadlockLoserDataAccessException`（可重试） |
+| 55P03 | `LOCK_NOT_AVAILABLE` | `CannotAcquireLockException`（可重试） |
+| 57014 | `QUERY_CANCELED` | `QueryTimeoutException` |
+| 42703 | `UNDEFINED_COLUMN` | `UnknownColumnException` |
+| 42P01 / 42601 / 42P07 / 42710 | `UNDEFINED_TABLE` / `SYNTAX_ERROR` / `DUPLICATE_TABLE` / `DUPLICATE_OBJECT` | `BadSqlGrammarException` |
+| 53300 / 53400 / 57P03 / 08000 | `TOO_MANY_CONNECTIONS` / `CONFIGURATION_LIMIT_EXCEEDED` / `CANNOT_CONNECT_NOW` / `CONNECTION_EXCEPTION` | `CannotGetJdbcConnectionException` |
+| 57P01 / 57P02 / 08006 / 58000 | `ADMIN_SHUTDOWN` / `CRASH_SHUTDOWN` / `CONNECTION_FAILURE` / `SYSTEM_ERROR` | `RecoverableDataAccessException`（可重试） |
+
+未收录（如 22 类各细分、`08S01`）与 state 为空 → 委托 `DefaultSqlExceptionHandler` 兜底，绝不抛"翻译失败"。
+默认类已知的问题被本类逐条修掉：它靠消息关键字细分完整性违反，而 PG 的消息是
+`violates not-null constraint`（带连字符）匹配不上 `"not null"`；`column "x" does not exist`
+匹配不上 `"unknown column"`，被当成语法错误而不是未知列；它把 57 类一律判成查询超时，
+而 57P01/P02 实际是"重连即可"；53300 与 55P03 落在默认分支只会得到无法分类。
+`42P04`（并发建库撞名）在 `PgsqlTemplate` 建库处单独处理，不进翻译路径。
+
+### 分区缺席
+
+pgsql 模块**没有** `partition` 包，也没有 `PgsqlPartitionManager` / `PgsqlPartitionExpr` /
+`PgsqlPartitionMetaReader`：分区表维护当前只有 MySQL 侧落地，PG 分区需手工 DDL。
+除此之外，通用层 `PartitionBuilder` 里拼的边界子句文本（`VALUES LESS THAN (n)`）与
+`PartitionType` 的 `RANGE_COLUMNS` / `LIST_COLUMNS` 两个 MySQL 特化常量也都还没下沉。
+
+---
+
 ## 类型映射
 
 ### `StorageMode`（写入侧策略）
@@ -1077,8 +1370,46 @@ PARTITIONS 8;
   反复发 `MODIFY` 的根因）。
 - `FLOAT` / `DOUBLE` 的显示宽度按旧语义丢弃；`VARCHAR` / `CHAR` / `DECIMAL` 的长度/精度是列契约，予以保留。
 
+### PostgreSQL 渲染（`PgsqlColumnTypeDefHandler#renderType`）
+
+| SqlType | PG 物理类型 |
+| --- | --- |
+| `BOOLEAN` | `BOOLEAN`（原生布尔，不是 MySQL 的 `TINYINT(1)` 约定） |
+| `BYTE` / `SHORT` | `SMALLINT`（PG 没有更小的整数档，容量只放大不缩小） |
+| `MEDIUMINT` / `INT` | `INTEGER`（PG 没有 mediumint） |
+| `BIGINT` | `BIGINT` |
+| `FLOAT` | `REAL` |
+| `DOUBLE` | `DOUBLE PRECISION` |
+| `DECIMAL` | `NUMERIC(len,scale)`，`len` 缺省 20、`scale` 取 `max(scale,0)` |
+| `VARCHAR` | `VARCHAR(max(len,1))` |
+| `CHAR` | `CHAR(len)`，`len` 缺省 1 |
+| `TEXT` / `MEDIUMTEXT` / `LONGTEXT` | `TEXT`（PG 按 TOAST 自动扩展，没有分档必要） |
+| `BLOB` / `MEDIUMBLOB` / `LONGBLOB` | `BYTEA`（同上，三档收敛） |
+| `DATE` / `TIME` | 同名 |
+| `DATETIME` / `TIMESTAMP` | `TIMESTAMP` |
+| `JSON` | **`TEXT`**（与 MySQL 侧落 `LONGTEXT` 同一口径：读写都按字符串走 fastjson，不引入 PGobject 绑定）。需要原生列时显式写 `@Column(type = "json")` / `"jsonb"`，走字面量透传，见 [PG 原生 JSON 列](#值转换与-pg-原生-json-列) |
+
+优先级与 MySQL 相同：显式 `@Column(type=...)` 字面量原样透传（多一道 `checkExplicitType` 字符闸门），
+`sqlType` 与 `type` 皆空时抛 `IllegalArgumentException`。
+
+**规格化**（`normalize`）在 PG 侧是"零虚假 ALTER"的核心，与 MySQL 的两点不同：
+不存在"整数显示宽度"要剥，但存在**多词基名**（`character varying`、`double precision`、
+`timestamp without time zone`），解析要先容忍空格；`BYTE` 与 `SHORT` 折到同一个键
+（PG 没有 tinyint，坚持区分会让每个 `byte` 字段每次启动都判成漂移）。其余规则：
+
+- `VARCHAR` / `CHAR` / `NUMERIC` 的长度与精度是列契约，保留并把 `(20, 6)` 折紧；
+  其余档位（含 `FLOAT` / `DOUBLE`，PG 不接受其精度参数）丢弃参数。
+- `without time zone` 是 PG 对 `timestamp`/`time` 的默认拼写，剥掉；
+  `with time zone` **必须保留**（语义不同，要让存量带时区列暴露成真实差异）。
+  `timestamptz` / `timetz` 短写折到 `format_type` 回读的长写法键上——不折的话
+  `@Column(type = "timestamptz")` 的实体侧键与库端键永不相等，每次 `checkTable` 虚发一条整表重写。
+- 裸写的 `character` 补成 `character(1)`（PG 的默认语义），否则手工建的定长列反复判漂移。
+- **未识别基名原样返回**（小写、折空白）：让"库里存了个框架不认识的类型"表现为可见的差异，
+  而不是被静默归一到某个已知档——`json` / `jsonb` 正是靠这条保持可见（刻意不注册进同义词表）。
+
 ### 键映射（库端 → 逻辑类型）
 
+MySQL（`MysqlColumnTypeDefHandler`）：
 `tinyint→BYTE`、`smallint→SHORT`、`mediumint→MEDIUMINT`、`int/integer→INT`、`bigint→BIGINT`、
 `float→FLOAT`、`double→DOUBLE`、`decimal/numeric→DECIMAL`、`varchar→VARCHAR`、`char→CHAR`、
 `tinytext/text→TEXT`、`mediumtext→MEDIUMTEXT`、`longtext→LONGTEXT`、`json→JSON`、
@@ -1086,8 +1417,20 @@ PARTITIONS 8;
 `datetime/timestamp→DATETIME`、`year→SHORT`、`bit→BYTE`、`binary/varbinary→BLOB`、
 `enum/set→VARCHAR`。
 
+PostgreSQL（`PgsqlColumnTypeDefHandler.BASE_TYPE_MAP`，实体侧简写与库端内部名**两侧都收录**、
+折到同一个逻辑档）：
+`boolean/bool→BOOLEAN`、`smallint/int2→SHORT`、`mediumint→MEDIUMINT`、`integer/int/int4/serial/serial4→INT`、
+`bigint/int8/bigserial→BIGINT`、`real/float4→FLOAT`、`double precision/float8/float→DOUBLE`、
+`numeric/decimal→DECIMAL`、`character varying/varchar→VARCHAR`、`character/bpchar/char→CHAR`、
+`text/citext→TEXT`、`bytea/blob→BLOB`、`date→DATE`、`time/time without time zone→TIME`、
+`timestamp/timestamp without time zone/datetime→DATETIME`。
+`timestamptz` / `timetz` / `json` / `jsonb` **刻意不收录**：前两个必须与不带时区的同族判成不同，
+后两个必须与 `text` 判成不同（否则显式选型的列得不到任何结构保障）。
+
 > `SqlType.TIMESTAMP` 是**预留档**：目前没有任何路径产出它——`EntityParser` 不推断时间戳
-> （`Date`/`LocalDateTime` 统一 `DATETIME`），MySQL 侧也把库端的 `timestamp` 读回成 `DATETIME`。
+> （`Date`/`LocalDateTime` 统一 `DATETIME`），MySQL 侧把库端的 `timestamp` 读回成 `DATETIME`，
+> PG 侧的 `timestamp` 同归 `DATETIME`（渲染时 `DATETIME` 与 `TIMESTAMP` 都是 `TIMESTAMP`，
+> 所以这一档即使被手写 `sqlType` 指到也不会产出与 `DATETIME` 不同的列）。
 
 ### JSON 与 BLOB 的取舍
 
@@ -1095,6 +1438,10 @@ PARTITIONS 8;
   写入用 `JSON.toJSONString(value)`，读取用
   `JSON.parseObject(json, genericType != null ? genericType : javaType)`——
   即**按字段声明的泛型/类型反解**。
+  > 默认的 `JSON` 存储模式在两个方言上**都不**落原生 JSON 列（MySQL → `LONGTEXT`、PG → `TEXT`），
+  > 所以"可被数据库函数查询"这一条要另外选型：PG 侧显式写 `@Column(type = "json"/"jsonb")`
+  > 就得到原生列，绑定（`PGobject`）与结构比对（带 `USING` 的 `text` ↔ `jsonb` 互转）
+  > 都有专门实现和用例（`PgsqlJsonType`、`PgJsonTypeIT`）。
   > 默认档**刻意不带类型标记**（非多态列不注入任何 autoType 特性）：按 JSON 里的 `@type`
   > 实例化任意类，等于凡能写该 JSON 列者都能发起反序列化攻击。因此多态子元素会静默退化
   > （`List<接口>` 读回来是 JDK 代理，父类字段读回来是父类且丢子类独有字段）。
@@ -1134,7 +1481,8 @@ PARTITIONS 8;
 ## 测试
 
 测试分两类，命名约定：单元测试 `*Test`，集成测试 `*IT`。
-mysql 模块的 POM **显式把 `**/*IT.java` 纳入 surefire 的 includes**（默认只扫 `*Test.java`）。
+mysql 与 pgsql 两个模块的 POM 都**显式把 `**/*IT.java` 纳入 surefire 的 includes**
+（默认只扫 `*Test.java`）。全仓 354 个 `@Test` 方法（core 64 / sql 66 / mysql 102 / pgsql 122）。
 根 POM 只为 surefire 锁版本（2.x 发现不了 JUnit 5），不再传 `--add-opens`：
 JSON 序列化换成 fastjson2 后不再反射触碰 `java.lang.reflect` 内部字段，
 原先为它开放 JDK 内部包的参数已成累赘，删掉后 core 单测仍全绿。
@@ -1144,11 +1492,25 @@ JSON 序列化换成 fastjson2 后不再反射触碰 `java.lang.reflect` 内部�
 | 模块 | 测试类 | 覆盖 |
 | --- | --- | --- |
 | core | `EntityParserTest` | 注解解析、表名/列名转换、类型推断、索引合并与去重、缓存 |
+| core | `parser/UniqueIndexDedupTest` | 索引名是"表 + 列 + 唯一性"的纯函数、唯一列上的普通索引被升档而非重复建、超 63 字符时截断补稳定哈希 |
 | core | `query/CriteriaFlattenTest` | 条件树展平（AND/OR/NOT 嵌套） |
+| core | `query/CriteriaNullHandlingTest` | 构造期快速失败：`eq/ne(null)` 降级成 `IS NULL/IS NOT NULL`、`like(null)` 与空/含 null 的 `in` 被拒、`allOf` 过滤 null 成员、`raw` 允许 null 绑定值 |
+| core | `cache/LocalEntityCacheTest` | 容量淘汰**同步**触发 `onEvict`、显式 `remove` 不触发淘汰回调、`invalidateByPrefix` 只删匹配前缀、不缓存 null、`getOrLoad` 单飞 |
+| core | `DbStatsTest` | min 以 0 作"未初始化"哨兵（首次必写、之后只替换更小的）、`reset` 清哨兵、`setEnabled(false)` 后 `record` 空操作 |
 | core | `ProtostuffUtilTest` | 二进制序列化往返 |
 | sql | `DefaultSqlExceptionHandlerTest` | 默认异常翻译（SQLState / 关键字兜底） |
+| sql | `JsonDateStorageTest` | `java.util.Date` 族落 epoch 毫秒、毫秒与历史本地时区字符串都能读回、循环图被包装而非裸 `StackOverflowError` |
+| sql | `JsonPolymorphicStorageTest` | 多态白名单（18 个用例）：默认档不写类型标记且子类型静默退化、`polymorphic=true` 才还原运行时类型、白名单外的类名被拒、容器标记归一到标准 JDK 实现、`Map<String,Object>` 这类无界声明是空操作、宽 JDK 接口不放行 gadget 或第三方实现、历史无标记行仍可读 |
 | sql | `query/SelectSqlBuilderTest` | SELECT 渲染文本与参数顺序 |
 | sql | `query/PaginationClauseTest` | 分页子句（`LIMIT ? OFFSET ?`）与参数顺序 |
+| sql | `query/SqlFragmentsTest` | `whereSection` 闸门：占位符数与参数数必须一致、**出现字符串字面量一律拒绝**（带不带占位符都拒，含经典 `'1'='1` 旁路形态）、原有黑名单继续生效、空白原样返回 |
+| mysql | `MysqlColumnTypeDefHandlerTest` | **纯单测**：23 个 `renderType` 期望与历史字面量逐字节一致、显式物理类型原样透传、两者皆空抛异常、`normalize` 幂等且与旧 `normalizeType` 在 31 个历史输入上等价、刻意保留的差异（`decimal(20,6)`==`decimal(20, 6)`，`tinyint(1)`≠`tinyint(4)`） |
+| pgsql | `PgsqlColumnTypeDefHandlerTest` | PG 渲染与规格化（16 个用例）：每个 `SqlType` 都可渲染且 `normalize` 幂等、库端回读形态与渲染形态同一个键、同义词折叠、`BYTE`/`SHORT` 刻意收敛到同一键、参数保留但折空白、时间族精度折叠而**时区不折叠**、`timestamptz` 短写折到库端长写法、`json`/`jsonb` 与 `text` 保持判不等、未识别基名原样返回、显式 `type` 透传与字符闸门 |
+| pgsql | `PgsqlDdlTextTest` | DDL 与语句形状（16 个用例）：建表拆成多条语句、列定义子句顺序、非 IDENTITY 主键不加 IDENTITY、注释用双写而非反斜杠、不安全默认值快速失败、INSERT 跳过 IDENTITY 列 / 只有 IDENTITY 列时走 `DEFAULT VALUES`、UPDATE 只把主键放 WHERE、复合键展开全部主键列、无主键被拒而不是静默、`queryById` 传标量被拒、分页只追加实际出现的子句、DSL 用 PG 引号、默认值比较折叠布尔与时间族同义词 |
+| pgsql | `PgsqlIdentifierTest` | 加引号并强制小写、内部双引号双写、小写折叠与 JVM Locale 无关、`"schema"."object"` 限定名、保留字列名直接可用 |
+| pgsql | `PgsqlSqlLiteralTest` | 单引号双写、**反斜杠原样不动**、NUL 被拒、纯文本透传、带引号默认值只包一层不重复转义、裸默认值通过、时间默认值写成带引号字符串、非法形态当场拒绝 |
+| pgsql | `PgsqlSqlExceptionHandlerTest` | 按 SQLState 精确分派（11 个用例）：完整性族落到细子类（not-null 不被降格成泛完整性违反）、42703 是未知列而非语法错误、竞争类可重试、连接类按"重连即可 / 拿不到连接"分档、未收录 state 兜底且绝不抛、异常携带 sql/params、方言名稳定 |
+| pgsql | `PgsqlBeanValueHandlerTest` | JDBC 时间形态原样透传（保住亚毫秒位）、`java.time` 各类型映射到匹配的 JDBC 形态（`LocalDate` → `java.sql.Date`）、标量稳定形态、`null` 与 `byte[]` 短路、JSON 模式按声明类型往返、自定义转换器优先、读端收窄到声明类型、**JSON 列绑成带类型名的 `PGobject`**、非 JSON 列与非文本值不包装 |
 
 ### 集成测试（嵌入式 MariaDB）
 
@@ -1176,7 +1538,7 @@ MariaDB，测试结束后 `db.stop()`：
 | 测试类 | 验证内容 |
 | --- | --- |
 | `BeanRunnerTest` | 自增主键回写到 bean、类型化映射无损（重点 BigDecimal 精度与 boolean）、批量插入后 `queryAll` 顺序与条数、完整 insert→query→update→query→delete 生命周期 |
-| `CachedBeanRunnerTest` | Write-Behind 全语义（19 个有序用例）：读写不对称、脏表按操作类型分三张并合并、Tombstone、三种 flush、事务边界与刷盘；含 **30 秒随机长跑**（3 秒 TTL 缓存 + 强制淘汰睡眠）与 **12 线程 × 40 轮多表并发**（共用同一 runner，约 10% 并发 flush），两者都带 `@Timeout(120, SECONDS)` |
+| `CachedBeanRunnerTest` | Write-Behind 全语义（22 个有序用例）：读写不对称、脏表按操作类型分三张并合并、Tombstone、三种 flush、事务边界与刷盘；含 **30 秒随机长跑**（3 秒 TTL 缓存 + 强制淘汰睡眠）与 **12 线程 × 40 轮多表并发**（共用同一 runner，约 10% 并发 flush），两者都带 `@Timeout(120, SECONDS)` |
 | `QueryRunnerTest` | DDL/元数据管线（10 个有序且有依赖的用例）：`loadAllTables`、`checkTable` 建表、`information_schema` 回读（列数与 NOT NULL/主键）、索引 `t_role_account_uk`（唯一）与 `t_role_level_score_idx`（恰好 2 列）、`checkTable` 幂等、缓存清理、原生 SQL、`ResultSetHandlers` 各工厂、`DROP TABLE` |
 | `QueryRunnerCloseTest` | `close()` 幂等、`isCloseConnection()`、事务内外 `isInTransaction()` 的状态切换 |
 | `SelectQueryIT` | 查询 DSL（13 个用例）：条件、`in`/`between`/`like`、**OR 嵌套在 AND 下的括号化并与手写 SQL 交叉验证**、4 页翻页且用 `Set` 检测重复、`count`/`exists`、`one()` 的实体/null/`TooManyResultsException` 三态、投影列、未知列在任何 SQL 发出前就抛、`toSql()`/`toParams()` 文本与参数顺序、DSL 复用事务连接、已废弃 `whereSection` 的注入拦截 |
@@ -1184,10 +1546,46 @@ MariaDB，测试结束后 `db.stop()`：
 | `SchemaDriftIT` | 类型解耦回归：建表后用第三方 `information_schema` 快照断言 20+ 列的**原生 MariaDB 形态**（`varchar(255)`、`tinyint(1)`、`tinyint(4)`、`int(11)`、`bigint(20)`、`smallint(6)`、`decimal(20,6)`、`longtext`…）；**再跑两轮 `clearTableCache` + `checkTable` 必须让快照逐字节相等（零 ALTER）**；手工制造 `varchar(32)` 漂移后被检测并改回 `varchar(64)` |
 | `SqlExceptionIT` | 真库触发 1062 → `DuplicateKeyException`（并断言 `errorCode`/`getSql()`/`getParams()`/不可重试）、1054、1064、1048 **或** 1364（MySQL vs MariaDB）、1406（需先 `SET SESSION sql_mode='STRICT_TRANS_TABLES'`，`finally` 恢复）；1213 用合成 `SQLException` 验证；未知码 999999 验证兜底委托 |
 | `PartitionManagerTest` | 14 个有序用例：按日 RANGE + `pmax` + 分区透明插入、`ADD PARTITION` 重复执行被缓存**跳过而不报错**、按月、按名 `DROP`（邻居分区完好）、`refresh`、build-only 文本、HASH 8 分区、按周、按年 2024–2027 + `pmax`、表达式值格式与单调性、`TRUNCATE` 保留分区定义、HASH/KEY/LIST 子句文本、`instanceof` 分层约束、`daysPerPart<=0` 被拒 |
-| `MysqlColumnTypeDefHandlerTest` | **纯单测**：23 个 `renderType` 期望与历史字面量逐字节一致、显式物理类型原样透传、两者皆空抛异常、`normalize` 幂等且与旧 `normalizeType` 在 31 个历史输入上等价、刻意保留的差异（`decimal(20,6)`==`decimal(20, 6)`，`tinyint(1)`≠`tinyint(4)`） |
 | `MysqlDbToBeanHandlerTest` | `toBean` 的列标签大小写回退（`SELECT ... AS \`NAME\`` 能映射到字段） |
 | `DbStatsPerformanceTest` | **冒烟而非基准**：5 线程 × 1000 条分批共 5 万插入、5 万查询、5 万更新；唯一断言是最终 `COUNT(*) == 50000`（不丢不重），耗时与 5 段直方图只打印不断言 |
 | `SqlDebugLogTest` | 用 logback `ListAppender` 断言调试日志内容：SQL + 参数 + 结果 + 耗时、失败日志带 SQL 上下文、批量只打印「参数组数」**不打印逐行参数**、`char[]` 参数被掩码为 `[***]`（口令不进日志） |
+
+### 集成测试（嵌入式 PostgreSQL）
+
+`PgsqlExtension`（JUnit 5 `BeforeAllCallback` / `AfterAllCallback`，各 IT 类用 `@RegisterExtension`
+挂静态字段）在测试类运行前拉起 zonky `embedded-postgres`，测试结束后 `close()`：
+
+- 默认端口 **5433**（与本机正在跑的 5432 错开），超级用户 `postgres` 空密码（trust 认证），
+  建 `test` 库，连接串 `jdbc:postgresql://localhost:<port>/test?user=postgres&sslmode=disable`；
+- 数据目录 `~/.wxd-batis/pgsql-data`，`setCleanDataDirectory(false)` **持久化复用**——与 MariaDB
+  那一套同一取向，`close()` 不删目录，否则每次都要重新 `initdb`（约十秒）且上一次留下的表全丢，
+  而「结构漂移」类用例必须能看到历史表；
+- 启动前只删 `postmaster.pid`（上次进程被强杀时 PG 来不及清理，残留文件会让本次判定「已有实例在
+  运行」而拒启），**绝不碰 `global/pg_internal` 之类的真实数据文件**；
+- `CREATE DATABASE` 没有 `IF NOT EXISTS` 形式，所以先用一条 autocommit 的裸连接连 `postgres` 库查
+  `pg_database` 再建——建库不能在事务里执行，管理连接和测试连接因此是分开的两条；
+- `setPGStartupWait(Duration.ofSeconds(60))`：首次 `initdb` 加共享内存在 Windows 上会超过默认 10 秒；
+- **启动失败不跳过用例**，直接抛 `IllegalStateException`：静默跳过会让「pgsql 方言从未被真库验证过」
+  这件事看不出来，而集成测试正是这个模块唯一的验收手段。
+
+可配置的系统属性：
+
+| 属性 | 作用 |
+| --- | --- |
+| `-Dwxd.batis.pgsql.url=jdbc:postgresql://host:5432/db` | 使用外部 PG，**跳过**嵌入式实例（配套 `wxd.batis.pgsql.user` / `wxd.batis.pgsql.password`） |
+| `-Dwxd.batis.pgsql.dataDir=<path>` | 数据目录 |
+| `-Dwxd.batis.pgsql.port=<port>` | 端口 |
+| `-Dwxd.batis.pgsql.clean=true` | 启动前清空 dataDir 重新 `initdb` |
+
+| 测试类 | 验证内容 |
+| --- | --- |
+| `PgBeanRunnerIT` | 8 个有序用例：**生成键按列名而非首列取回**（`RETURNING *` 的列序陷阱）、显式主键值被接受、全类型往返、列默认值在建表后真的落在库里、批量插入逐条回写主键、insert→query→update→delete 生命周期、复合主键的 `queryById`/`delete` 绑定全部主键列、`TRUNCATE ... RESTART IDENTITY` 后序列确实归零 |
+| `PgsqlDbMetaHandlerIT` | 10 个有序用例：catalog 即 `current_schema()`、表清单带注释、列按定义顺序返回、**库端回读类型与渲染类型逐列相等**、NOT NULL 与主键标记、列注释回读、默认值各种书写形态归一、IDENTITY 与历史 `nextval('..._seq')` 都识别为自增、索引清单保留普通索引与列序、嵌入式服务可达 |
+| `PgSchemaDriftIT` | 零漂移主回归：首建建表、**再跑两轮同步必须零 ALTER**、真实类型漂移被检测并改回、可空性漂移被修复、缺失列按同一份定义补上、冗余索引被删除且主键存活、`PgsqlTemplate` 把 12 个 SPI 槽位全部装配齐（漏一个当场红） |
+| `PgDriftGuardsIT` | 5 个「不该发生重写」的守卫：`timestamptz` 短写折叠后**不触发 `ALTER COLUMN TYPE`**、`timestamp → timestamptz` 带 `USING ... AT TIME ZONE` 迁移、跨表同名索引冲突只告警跳过（PG 索引名是 schema 级唯一）、部分索引（`WHERE` 谓词）在同步后存活、非默认 collation 保留并收敛而不被反复改写 |
+| `PgJsonTypeIT` | 8 个有序用例：`@Column(type="json"/"jsonb")` 建出原生列、JSON 列往返、`->`/`->>` 等 JSON 算子在真列上可用、裸 String 参数落 jsonb 列被服务端拒（SQLState `42804`，证明绑定必须走 `PGobject`）、重复同步零 ALTER 且**不重写表**、`text → jsonb` 迁移保留原行（`USING ::text::jsonb`）、`jsonb → text` 可逆、多态列落 jsonb 且读回子类型 |
+| `PgSelectQueryIT` | 10 个有序用例：渲染用双引号且参数顺序一致、只给 offset 时按裸 `OFFSET` 翻页（跳前 7 条得 3 条，不靠 MySQL 的哨兵 `LIMIT`）、翻页不重不漏、布尔条件绑真布尔值、OR 嵌在 AND 下的括号化、`count`/`exists`/`one()` 语义、投影把字段名解析成小写列、未知字段在 SQL 发出前被拒、DSL 复用事务连接、`JdbcTemplate` 便捷入口 |
+| `PgSqlExceptionIT` | 9 个有序用例：真库触发 23505→`DuplicateKeyException`、23502→非空违反、22001→截断、22003→数值越界、42703→未知列、42601/42P01→语法错误族、竞争类 state→可重试异常、未收录 state 兜底委托且**绝不抛** |
 
 > 测试断言中，`BigDecimal` 刻意用 `compareTo` 而非 `equals`——JDBC 回读的 scale 可能与构造时不同
 > （`10.00` 与 `10.0` 值相等但 `equals` 为假），用 `equals` 会得到「看着像 bug」的假失败。
@@ -1198,9 +1596,10 @@ MariaDB，测试结束后 `db.stop()`：
 
 ```
 wxd-gaming.batis/
-├── pom.xml                                  聚合 POM（版本 1.1.0，JDK 21，surefire 3.2.5）
+├── pom.xml                                  聚合 POM（版本 1.1.1，JDK 21，surefire 3.2.5）
 ├── README.md
 ├── .gitignore
+├── deploy.cmd                               发布入口：`mvnw clean deploy -Dmaven.test.skip=true -Pdeploy`
 ├── mvnw / mvnw.cmd                          Maven wrapper 启动脚本（only-script 模式）
 ├── .mvn/wrapper/maven-wrapper.properties    固定 Maven 3.9.9 + distributionSha256Sum
 ├── com.wxdgaming.batis/                     核心层
@@ -1211,7 +1610,7 @@ wxd-gaming.batis/
 │       ├── query/                           Criteria / CriteriaBuilder / Criterion / CriterionOperator / Sort / Page / Pageable
 │       ├── cache/                           EntityCache / LocalEntityCache / CacheKeyBuilder
 │       ├── converter/                       TypeConverter / NoneTypeConverter
-│       ├── exception/                       异常体系（21 个类）
+│       ├── exception/                       异常体系（22 个类）
 │       ├── util/ProtostuffUtil.java         二进制序列化
 │       ├── DbTemplate.java                  批量大小 + 性能统计
 │       ├── DbStats.java                     分操作类型的指标与直方图
@@ -1223,8 +1622,10 @@ wxd-gaming.batis/
 │       ├── QueryRunner.java                 JDBC 执行器
 │       ├── BeanRunner.java                  实体级 API
 │       ├── CachedBeanRunner.java            缓存 + Write-Behind
-│       ├── *Handler.java                    DbMeta / ColumnTypeDef / TableCreate·Alter·Drop·Truncate /
+│       ├── *Handler.java                    12 个方言 SPI：DbMeta / ColumnTypeDef / TableCreate·Alter·Drop·Truncate /
 │       │                                    BeanToInsert·Update·Delete·Select / SqlDbToBean / SqlException
+│       │                                    （另有 BeanValueHandler 接口 + AbstractBeanValueHandler /
+│       │                                     DefaultSqlExceptionHandler 两个方言无关的默认实现）
 │       ├── query/                           SelectSqlBuilder / SelectQuery / SqlFragments
 │       ├── tx/                              TransactionTemplate / TxContext / ConnectionHolder /
 │       │                                    TransactionStatus / TransactionCallback /
@@ -1236,21 +1637,24 @@ wxd-gaming.batis/
 │   └── src/
 │       ├── main/java/.../mysql/
 │       │   ├── MysqlTemplate.java           装配全部 MySQL SPI + 自动建库
-│       │   ├── Mysql*Handler.java           14 个方言实现
+│       │   ├── Mysql*Handler.java           13 个方言实现：12 个 SPI 槽位各一类（读写四向拆成
+│       │   │                                Insert/Update/Delete/Select 四个独立类）+ BeanValueHandler
 │       │   ├── MysqlSqlCodes.java           错误码常量表
+│       │   ├── MysqlSqlLiteral.java         字符串字面量 / 反斜杠转义口径
 │       │   └── partition/                   MysqlPartitionManager / MysqlPartitionExpr / MysqlPartitionMetaReader
-│       └── test/java/.../mysql/             集成测试 + 测试实体 + MariaDB4jExtension
-├── com.wxdgaming.batis.sql.pgsql/           PostgreSQL 方言
+│       └── test/java/.../mysql/             集成测试 + 单测 + 测试实体 + MariaDB4jExtension
+├── com.wxdgaming.batis.sql.pgsql/           PostgreSQL 方言（**无 partition 包**）
 │   └── src/
-│       ├── main/java/.../pgsql/
+│       ├── main/java/.../pgsql/             共 16 个类
 │       │   ├── PgsqlTemplate.java           装配全部 PG SPI + 自动建库
-│       │   ├── Pgsql*Handler.java           12 个方言实现
+│       │   ├── Pgsql*Handler.java           11 个方言实现填满 12 个 SPI 槽位
+│       │   │                                （PgsqlBeanToStatementHandler 一类同时供 Update/Delete/Select）
 │       │   ├── PgsqlIdentifier.java         标识符双引号引用（强制小写）
 │       │   ├── PgsqlSqlLiteral.java         字符串字面量转义 / DEFAULT 字面量
 │       │   ├── PgsqlSqlStates.java          SQLState 常量表
-│       │   ├── PgsqlJsonType.java           json/jsonb 档位与迁移方向
-│       │   └── PgsqlExtension.java          嵌入式 PG 测试扩展
-│       └── test/java/.../pgsql/             集成测试 + 单测 + 测试实体
+│       │   └── PgsqlJsonType.java           json/jsonb 档位与迁移方向
+│       ├── test/java/.../pgsql/             7 个 *IT + 6 个 *Test + 测试实体 + PgsqlExtension（嵌入式 PG）
+│       └── test/resources/logback-test.xml  测试期日志配置
 └── com.wxdgaming.batis.mongodb/             占位（仅空类 MongodbTemplate，已从聚合摘除）
 ```
 
@@ -1263,7 +1667,8 @@ wxd-gaming.batis/
 2. **`NESTED` 传播与 `READ_UNCOMMITTED` 隔离级别有意缺失**，见上文说明。
 3. **`TX_PENDING_BUFFER` 未实现**，使用会抛 `UnsupportedOperationException`。
 4. **`SqlType.TIMESTAMP` 是预留档**，当前无任何路径产出。
-5. **`GenerationType.AUTO` 行为等同 `NONE`**：MySQL 方言只判定 `IDENTITY`。
+5. **`GenerationType.AUTO` 行为等同 `NONE`**：两套方言都只判定 `IDENTITY`
+   （`MysqlTableCreateHandler` / `PgsqlTableCreateHandler` 与各自的 Insert/Alter 侧都是 `== GenerationType.IDENTITY`）。
    想用数据库自增必须显式写 `IDENTITY`。
 6. **`@Entity` 与 `@Table` 不可互补**：`@Table` 存在时 `@Entity` 被完全忽略，
    所以用 `@Entity` 就没法配复合索引（只能靠字段级 `@Index`）。
@@ -1272,12 +1677,19 @@ wxd-gaming.batis/
    去重天然成立；改列组合或唯一性会改变索引名，对存量表表现为"删旧建新"（见命名规则的迁移注意）。
 9. **`@Column#converter` 在解析期实例化**，缺无参构造会让整个实体解析失败，
    报错是实例化异常而非数据访问异常，排查时容易误认为 SQL 问题。
-10. **`JSON` 存储模式在 MySQL 侧渲染为 `LONGTEXT`**，不是原生 `json` 列，无法用 JSON 函数查询。
+10. **`JSON` 存储模式默认不建原生 JSON 列**：MySQL 侧渲染 `LONGTEXT`、PG 侧渲染 `TEXT`，
+    都不带 JSON 类型，无法直接用 JSON 函数/算子查询。PG 有显式通道：`@Column(type = "json")`
+    或 `"jsonb"` 换成原生列，`text` ↔ `jsonb` 的双向迁移带 `USING` 且保留原行
+    （见「值转换与 PG 原生 JSON 列」）。MySQL 侧没有对应通道，而且**手工把列改成原生 `json`
+    会被下一轮 `checkTable` 判成漂移并 `MODIFY` 回 `longtext`**（`normalize("json")` 与
+    `normalize("longtext")` 判不等）——MySQL 要原生 JSON 只能整个绕开框架的表结构同步。
 11. **`CachedBeanRunner` 的延迟写不落库**，返回值无意义（`null` / `-1`），跨进程不可见；
     且只有 `queryById` 走缓存，`queryAll`/`queryOne`/`queryList`/`select` 直通数据库、
     **看不到未刷盘的延迟写**。`deleteAll` 是例外：它清库之外还会失效该表缓存。
-12. **`MysqlTableAlterHandler` 从不生成 `DROP COLUMN`**：实体里删掉的字段，库端的列会永久保留
-    （只删对应索引）。想清列必须手工 DDL。索引则相反——实体里没有声明的索引会被 `DROP`，
+12. **两套 `TableAlterHandler` 都从不生成 `DROP COLUMN`**（`MysqlTableAlterHandler` /
+    `PgsqlTableAlterHandler`）：实体里删掉的字段，库端的列会永久保留（只删对应索引）。
+    想清列必须手工 DDL——PG 上尤其如此，因为 `DROP COLUMN` 连带删掉依赖它的视图/约束，
+    框架不替调用方做这种不可逆决定。索引则相反——实体里没有声明的索引会被 `DROP`，
     现在会逐条 `warn` 出索引名，也可用 `setDropRedundantIndexes(false)` 改为只告警不删除。
 13. **JSON 反序列化默认不碰 autoType**（防按 `@type` 实例化任意类的反序列化攻击），所以多态子类
     元素会静默退化；只有 `@Column(polymorphic = true)` 的列才走带白名单的还原通道
@@ -1302,9 +1714,11 @@ wxd-gaming.batis/
 21. **`logback-test.xml` 引用了本仓库未定义的类**
     `ch.qos.logback.core.LogbackResetTimeFilter`（`file_info` appender 的 filter），
     它必须来自外部依赖，否则测试日志配置会加载失败。
-22. **DDL 里的 `DEFAULT` 与 `COMMENT` 现在走统一的转义工具**（`MysqlSqlLiteral`）：
-    字符串默认值必须自带引号（如 `defaultValue = "'unknown'"`），裸字面量（`0`、`CURRENT_TIMESTAMP`、
-    `CURRENT_TIMESTAMP(3)`）走字符白名单；两者都不符合会抛 `IllegalArgumentException` 而不是拼出坏 DDL。
+22. **DDL 里的 `DEFAULT` 与 `COMMENT` 走方言各自的转义工具**（`MysqlSqlLiteral` / `PgsqlSqlLiteral`，
+    不是同一个类，因为两套方言的字面量规则相反）：字符串默认值必须自带引号（如 `defaultValue = "'unknown'"`），
+    裸字面量（`0`、`CURRENT_TIMESTAMP`、`CURRENT_TIMESTAMP(3)`）走字符白名单；两者都不符合会抛
+    `IllegalArgumentException` 而不是拼出坏 DDL。PG 侧额外两条：只认单引号双写、**反斜杠不转义**
+    （`standard_conforming_strings=on`），且出现 NUL 字符直接拒。
 23. **遗留的字符串 `whereSection` API 收紧了闸门**：除原有的分号/注释/UNION 黑名单外，
     现在要求占位符数量与参数数量一致，且**只要出现字符串字面量就会被直接拒绝**
     （无论是否同时带有占位符——`name = 'x' OR '1'='1 AND id = ?` 这类「字面量 + 占位符」混搭
@@ -1324,10 +1738,28 @@ wxd-gaming.batis/
     编译就会把字节码目标提到 25，新环境因此表现不一致。现在根 POM 只保留
     `<java.version>21</java.version>` 与 `<maven.compiler.release>${java.version}</maven.compiler.release>`：
     `release` 同时约束语法级别和可引用的 JDK API，无法再跟随构建机 JDK 漂移。
-28. **发布链路**：构件经 Central Portal 发布（根 POM `deploy` profile，GPG 签名，
-    `settings.xml` 需配置 id 为 `central` 的 server token）；旧 OSSRH `s01.oss.sonatype.org`
-    端点已停服，POM 中已清除相关死配置。仓库根目录已有 Apache-2.0 `LICENSE`。
-    `mvnw` wrapper 已补齐（Maven 3.9.9，`only-script` 模式，含 SHA-256 校验）。
+28. **发布链路以 `deploy` profile 的插件参数为准**（当前 POM 现状，与 POM 内两处注释不一致，改动前先看清）：
+    实际发布由 `org.sonatype.central:central-publishing-maven-plugin` 0.12.0 承担，它在 `pluginManagement`
+    里以 `extensions=true` 接管 deploy 阶段，而**这个插件不读 `distributionManagement`**——传给 Central
+    Portal 的 serverId 只由插件自身的 `publishingServerId` 决定。POM 里两处取值不同：
+    `pluginManagement` 默认 `central`（[pom.xml:251](file:///C:/code/wxd-gaming.batis/pom.xml#L251)），
+    `deploy` profile 又把它覆盖成 `s01`（[pom.xml:347](file:///C:/code/wxd-gaming.batis/pom.xml#L347)，
+    `autoPublish=true`），带 profile 构建时后者生效。于是
+    `.\deploy.cmd`（`mvnw.cmd clean deploy -Dmaven.test.skip=true -Pdeploy`）要求 `settings.xml`
+    在 **`<server><id>s01</id>`** 上配 Central Portal 的 token（`<username>` / `<password>` 填门户
+    生成的 token 用户名与口令）——
+    id 沿用旧 OSSRH 的叫法，凭据仍是 `https://central.sonatype.com` 门户签发的 token，不是 s01 的账号密码。
+    同一份 POM 里的 `distributionManagement`（id 也叫 `s01`，URL 指向 2025-06 已停服的
+    `s01.oss.sonatype.org`，[pom.xml:47-56](file:///C:/code/wxd-gaming.batis/pom.xml#L47)）走 central-publishing
+    时**不会被读取**，只有不带 profile 直接 `mvn deploy`（退回内置 deploy 插件）才会命中它，那条路必然失败；
+    而注释里「serverId 是 central」（[pom.xml:42-43](file:///C:/code/wxd-gaming.batis/pom.xml#L42)）
+    与「s01 端点已停服」（[pom.xml:241-244](file:///C:/code/wxd-gaming.batis/pom.xml#L241)）都只描述了
+    `pluginManagement` 的默认值，没跟上 profile 里的覆盖。要发布到别的门户，改 `deploy` profile 的
+    `publishingServerId` 并同步 `settings.xml` 的 server id。
+    可重复构建靠 `project.build.outputTimestamp`（当前 `2026-10-15T00:00:00Z`，
+    [pom.xml:84](file:///C:/code/wxd-gaming.batis/pom.xml#L84)），发新版本时记得一并推进，否则产物时间戳停在旧值。
+    GPG 签名只在 `deploy` profile 启用；仓库根目录有 Apache-2.0 `LICENSE`；`mvnw` wrapper 锁 Maven 3.9.9
+    （`only-script` 模式 + `distributionSha256Sum` 校验）。
 29. ~~**父 POM 把 `fastjson2` / `logback-classic` / `commons-*` / `protostuff` 作为 compile 依赖下发**~~
     **已修复**：`commons-lang3`/`commons-text`（全仓零引用）已移除，`logback-classic/core`
     降为 test scope（不再向使用方传递日志绑定），`fastjson2` 只在 `com.wxdgaming.batis.sql`
@@ -1354,3 +1786,20 @@ wxd-gaming.batis/
 34. **PG 列级 collation 只回读告警、不参与变更**：实体注解无法表达排序规则，
     库端列使用非默认 collation（如 `COLLATE "C"`）时启动 WARN 指出列名，框架绝不
     自动 ALTER——需要变更请手工 DDL。
+35. **pgjdbc 不会把多条 DDL 合成一次执行**：prepared 协议拒绝一次提交多语句，所以 PG 侧
+    建表/改表都是「一次同步 → 一串语句」逐条发（见「建表：一次建表对应多条语句」），
+    MySQL 那种单条多 `ALTER` 逗号拼接的写法在这里直接报语法错；`COMMENT ON TABLE / COLUMN`
+    同样是各自独立的语句，注释不是列定义的一部分。
+36. **PG 的 `TRUNCATE` / `DROP TABLE` 刻意不带 `CASCADE`**：被外键引用的表会被拒
+    （SQLState `2BP01`），加 `CASCADE` 等于连带清空/删除别人家的表和视图、触发器，
+    这种不可逆决定留给调用方。另两条口径差异：`TRUNCATE` 必须带 `RESTART IDENTITY`
+    才与 MySQL 的「AUTO_INCREMENT 归零」等价（PG 默认只清行、序列留在原值），
+    而 `DELETE` 不带 WHERE 也**不会**重置序列——依赖「清场后 id 从 1 开始」的用例只能走
+    `truncateTable`，不能靠 `deleteAll`。
+37. **PG 侧标识符一律双引号并强制小写**（`PgsqlIdentifier.quote`，折叠用 `Locale.ROOT`
+    而非默认 Locale，否则土耳其语 JVM 把大写 `I` 折成无点小写 `ı`）：实体写驼峰列名落库就是
+    全小写，库里不存在大小写敏感的列名，手写 SQL 里用 MySQL 的反引号 `` ` `` 直接 42601。
+    读侧 `toBean` 因此带「精确匹配优先、小写不敏感兜底」的列标签回退，索引按需只建一次。
+38. **PG 的 `SQLException#getErrorCode()` 恒为 `0`**，异常分派只能读 SQLState 字符串
+    （`PgsqlSqlStates` + `PgsqlSqlExceptionHandler`）。往 PG 方言加错误码没有意义，
+    新增分档要加的是 state 常量；反过来 MySQL 侧的 `MysqlSqlCodes` 数字码表也不能照搬过来。

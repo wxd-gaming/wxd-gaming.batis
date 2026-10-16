@@ -6,12 +6,34 @@
     <parent>
         <groupId>io.github.wxd-gaming</groupId>
         <artifactId>wxd-gaming.batis</artifactId>
-        <version>1.1.0</version>
+        <version>1.1.1</version>
     </parent>
 
     <name>com.wxdgaming.batis.sql.pgsql</name>
     <artifactId>com.wxdgaming.batis.sql.pgsql</artifactId>
-    <description>com.wxdgaming.batis.sql.pgsql</description>
+    <description>
+        PostgreSQL dialect of wxd-gaming.batis, a lightweight JDBC-first ORM for Java 21.
+        Constructing a PgsqlTemplate injects every SPI of com.wxdgaming.batis.sql with a PostgreSQL
+        implementation: column type rendering that folds the logical types onto BOOLEAN, SMALLINT, INTEGER,
+        BIGINT, NUMERIC, VARCHAR, TEXT, BYTEA and TIMESTAMP, CREATE / ALTER / DROP / TRUNCATE DDL with
+        PostgreSQL identifier quoting, SQLState based error translation, and pg_catalog readers (via
+        format_type, with column and table comments) that drive the zero-drift schema comparison. JSON columns
+        can use PostgreSQL's native types: declare a column with type = "json" or type = "jsonb" to get a real
+        json / jsonb column instead of TEXT, and set polymorphic = true on a column whose values are subclass
+        instances so the class name is written and restored through a whitelist of the entity inheritance
+        tree. Ships the PostgreSQL JDBC driver; its integration tests start an embedded PostgreSQL, so no
+        external server is needed to build them. Partitioned-table maintenance is not implemented for
+        PostgreSQL yet - use com.wxdgaming.batis.sql.mysql if you need it.
+
+        wxd-gaming.batis 的 PostgreSQL 方言实现。构造 PgsqlTemplate 会把 com.wxdgaming.batis.sql 的全部 SPI
+        注入为 PostgreSQL 版本：把逻辑类型收敛到 BOOLEAN、SMALLINT、INTEGER、BIGINT、NUMERIC、VARCHAR、TEXT、
+        BYTEA、TIMESTAMP 的列类型渲染，带 PG 标识符引用的 CREATE / ALTER / DROP / TRUNCATE 语句、基于 SQLState
+        的错误翻译，以及用 pg_catalog + format_type 回读表/列/索引（含表与列注释）来驱动零漂移结构比对。
+        JSON 列可以走 PG 原生类型：把列声明为 type = "json" 或 type = "jsonb"，得到真正的 json / jsonb 列
+        而不是 TEXT；字段值是子类实例时在该列打开 polymorphic = true，写入类名并按实体继承树白名单还原。
+        产物内含 PostgreSQL JDBC 驱动，集成测试自行拉起嵌入式 PostgreSQL，无需外部数据库。
+        本方言暂未实现分区表维护，需要分区能力请使用 com.wxdgaming.batis.sql.mysql。
+    </description>
 
     <dependencies>
         <dependency>

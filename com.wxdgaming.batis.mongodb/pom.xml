@@ -6,10 +6,25 @@
     <parent>
         <groupId>io.github.wxd-gaming</groupId>
         <artifactId>wxd-gaming.batis</artifactId>
-        <version>1.1.0</version>
+        <version>1.1.1</version>
     </parent>
 
+    <name>com.wxdgaming.batis.mongodb</name>
     <artifactId>com.wxdgaming.batis.mongodb</artifactId>
+    <!--
+      占位模块：目前只有一个空类，且已被聚合 POM 的 <modules> 排除，不会构建也不会发布。
+      这里的 description 刻意写明「未实现」，避免将来误发布出一个空 jar 被当成可用方言引入。
+    -->
+    <description>
+        Unimplemented placeholder for a future MongoDB dialect of wxd-gaming.batis, a lightweight JDBC-first
+        ORM for Java 21. This module currently contains no usable API, is excluded from the reactor build, and
+        publishes no artifact. Do not depend on it; use com.wxdgaming.batis.sql.mysql or
+        com.wxdgaming.batis.sql.pgsql instead.
+
+        wxd-gaming.batis 未来 MongoDB 方言的未实现占位模块：当前不提供任何可用 API，已从 reactor 构建中排除，
+        也不会发布任何产物，请勿依赖。MySQL 请用 com.wxdgaming.batis.sql.mysql，
+        PostgreSQL 请用 com.wxdgaming.batis.sql.pgsql。
+    </description>
 
     <properties>
         <maven.compiler.source>21</maven.compiler.source>
