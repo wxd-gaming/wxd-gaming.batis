@@ -9,6 +9,7 @@ import com.wxdgaming.batis.exception.DataTruncationException;
 import com.wxdgaming.batis.exception.DeadlockLoserDataAccessException;
 import com.wxdgaming.batis.exception.DuplicateKeyException;
 import com.wxdgaming.batis.exception.ForeignKeyConstraintViolationException;
+import com.wxdgaming.batis.exception.NonTransientDataAccessException;
 import com.wxdgaming.batis.exception.NotNullConstraintViolationException;
 import com.wxdgaming.batis.exception.QueryTimeoutException;
 import com.wxdgaming.batis.exception.RecoverableDataAccessException;
@@ -230,7 +231,26 @@ class PgsqlSqlExceptionHandlerTest {
         assertEquals(0, ex.getErrorCode());
     }
 
-    /** 用例⑪：方言名参与日志与错误信息，多方言排查时不能认错对象 */
+    /**
+     * 用例⑫：25P02（事务已中止）必须落在不可重试的一档，并在消息里点明要 ROLLBACK。
+     * <p>它是一条"回声"异常：本条语句根本没执行，真实原因是事务里更早那条失败语句。
+     * 判成可重试会让补偿逻辑反复压一条必然失败的语句；判成"无法分类"又会让排查看错方向，
+     * 所以这里同时断言类型、重试语义与消息要素。</p>
+     */
+    @Test
+    void abortedTransactionIsNonRetryableAndSaysRollback() {
+        var ex = handler.translate(
+                pg("current transaction is aborted, commands ignored until end of transaction block",
+                        PgsqlSqlStates.IN_FAILED_SQL_TRANSACTION),
+                "INSERT INTO t_role (name) VALUES (?)", new Object[]{"a"});
+        assertInstanceOf(NonTransientDataAccessException.class, ex);
+        assertFalse(ex.isRetryable());
+        assertTrue(ex.getMessage().contains("ROLLBACK"), "消息必须点明处置动作: " + ex.getMessage());
+        assertTrue(ex.getMessage().contains("并未真正执行"), "消息必须说明本条语句没执行: " + ex.getMessage());
+        assertEquals(PgsqlSqlStates.IN_FAILED_SQL_TRANSACTION, ex.getSqlState());
+    }
+
+    /** 用例⑬：方言名参与日志与错误信息，多方言排查时不能认错对象 */
     @Test
     void dialectNameIsStable() {
         assertEquals("pgsql", handler.dialectName());

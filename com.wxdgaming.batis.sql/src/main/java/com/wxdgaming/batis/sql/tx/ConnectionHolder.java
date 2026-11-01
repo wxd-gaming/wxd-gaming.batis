@@ -31,6 +31,11 @@ public class ConnectionHolder {
     /** begin 之前的 autoCommit 值，完成时恢复（池化连接被复用，谁借到都得是"默认自动提交"的状态） */
     private final boolean previousAutoCommit;
     /**
+     * begin 之前的隔离级别；本次没有显式设置隔离级别时为 {@code null}（无需恢复）。
+     * <p>隔离级别同样是连接级状态，池化连接被复用时不恢复会让同池后续事务继承这次的级别。</p>
+     */
+    private final Integer previousIsolation;
+    /**
      * 事务内被直接写过 DB、或读过（可能读到未提交行）的缓存 key（供回滚时精确失效缓存）
      * <p>只记 key 不记旧值：回滚后缓存里的内容已经不可信，正确做法是丢掉让下次读回源，
      * 而不是凭内存快照猜一个回去。</p>
@@ -67,10 +72,11 @@ public class ConnectionHolder {
     /** 回滚是否失败过：连接状态不可信，归还前不能再 setAutoCommit(true)（会隐式提交本该回滚的数据） */
     private volatile boolean rollbackFailed;
 
-    public ConnectionHolder(Connection connection, boolean previousAutoCommit,
+    public ConnectionHolder(Connection connection, boolean previousAutoCommit, Integer previousIsolation,
                             boolean readOnly, boolean transactional) {
         this.connection = connection;
         this.previousAutoCommit = previousAutoCommit;
+        this.previousIsolation = previousIsolation;
         this.readOnly = readOnly;
         this.transactional = transactional;
     }
@@ -83,6 +89,11 @@ public class ConnectionHolder {
     /** 借出前的 autoCommit，release 时恢复回去 */
     public boolean getPreviousAutoCommit() {
         return previousAutoCommit;
+    }
+
+    /** 借出前的隔离级别；{@code null} 表示本次未改过隔离级别，无需恢复 */
+    public Integer getPreviousIsolation() {
+        return previousIsolation;
     }
 
     /** 本事务写过的缓存 key 集合（可变，Runner 在写成功后追加；回滚时按它精确失效缓存） */

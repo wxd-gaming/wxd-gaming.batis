@@ -28,6 +28,7 @@ package com.wxdgaming.batis.exception;
  * @version 2026-10-09
  **/
 public class TransactionStartedException extends TransactionException {
+    private static final long serialVersionUID = 1L;
 
     /** 事务边界操作失败：cause 为连接层抛出的原始 SQLException */
     public TransactionStartedException(String message, Throwable cause) {

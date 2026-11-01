@@ -15,6 +15,7 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -69,9 +70,9 @@ public class MysqlDbToBeanHandler implements SqlDbToBeanHandler {
         StringBuilder where = new StringBuilder();
         for (int i = 0; i < pks.size(); i++) {
             if (i > 0) where.append(" AND ");
-            where.append('`').append(pks.get(i).getColumnName().toLowerCase()).append("` = ?");
+            where.append('`').append(pks.get(i).getColumnName().toLowerCase(Locale.ROOT)).append("` = ?");
         }
-        String sql = "SELECT * FROM `" + tableInfo.getTableName().toLowerCase() + "` WHERE " + where;
+        String sql = "SELECT * FROM `" + tableInfo.getTableName().toLowerCase(Locale.ROOT) + "` WHERE " + where;
         return query(mysqlTemplate, entityClass, sql, args);
     }
 
@@ -97,7 +98,7 @@ public class MysqlDbToBeanHandler implements SqlDbToBeanHandler {
     @Override
     public <T> List<T> queryAll(JdbcTemplate mysqlTemplate, Class<T> entityClass) {
         TableInfo tableInfo = EntityParser.parse(entityClass);
-        String sql = "SELECT * FROM `" + tableInfo.getTableName().toLowerCase() + "`";
+        String sql = "SELECT * FROM `" + tableInfo.getTableName().toLowerCase(Locale.ROOT) + "`";
         return queryList(mysqlTemplate, entityClass, sql);
     }
 
@@ -129,7 +130,7 @@ public class MysqlDbToBeanHandler implements SqlDbToBeanHandler {
                 if (caseInsensitive == null) {
                     caseInsensitive = indexByLower(tableInfo);
                 }
-                col = caseInsensitive.get(columnLabel.toLowerCase());
+                col = caseInsensitive.get(columnLabel.toLowerCase(Locale.ROOT));
             }
             if (col == null) {
                 continue;
@@ -149,7 +150,7 @@ public class MysqlDbToBeanHandler implements SqlDbToBeanHandler {
     private Map<String, ColumnInfo> indexByLower(TableInfo tableInfo) {
         Map<String, ColumnInfo> index = new HashMap<>();
         for (ColumnInfo c : tableInfo.getColumns().values()) {
-            index.put(c.getColumnName().toLowerCase(), c);
+            index.put(c.getColumnName().toLowerCase(Locale.ROOT), c);
         }
         return index;
     }

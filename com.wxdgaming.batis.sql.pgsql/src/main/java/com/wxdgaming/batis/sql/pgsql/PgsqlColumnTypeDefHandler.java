@@ -209,6 +209,26 @@ public class PgsqlColumnTypeDefHandler implements ColumnTypeDefHandler {
     }
 
     /**
+     * 只有"框架认识的标量类型"才允许参与自动类型变更。
+     * <p>{@code BASE_TYPE_MAP} 覆盖了内置标量；{@code json/jsonb} 刻意不在表里（要保留
+     * text↔jsonb 的漂移可见性），但它们是合法且可 ALTER 的类型，必须放行。
+     * 其余形态——domain（可能是裸名）、自定义 enum、数组（{@code integer[]}）、
+     * 带引号/schema 限定的类型——一律返回 false：comparison 会表现为"永不相等"，
+     * 自动 ALTER 只会每次启动重试一条注定失败的整表重写（H5）。</p>
+     */
+    @Override
+    public boolean isTypeComparable(String physicalType) {
+        if (physicalType == null) return true;
+        String t = physicalType.toLowerCase(Locale.ROOT).trim().replaceAll("\\s+", " ");
+        Matcher m = PHYSICAL_PATTERN.matcher(t);
+        if (!m.matches()) return false;
+        String base = m.group(1);
+        if (BASE_TYPE_MAP.containsKey(base)) return true;
+        if (base.equals("timestamptz") || base.equals("timetz")) return true;
+        return base.equals("json") || base.equals("jsonb");
+    }
+
+    /**
      * 把物理类型字符串规格化为可比较形式：同义写法折叠到同一个键，参数只在有契约意义时保留。
      * <p>与 MySQL 版的两点不同：</p>
      * <ul>

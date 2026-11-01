@@ -29,6 +29,7 @@ package com.wxdgaming.batis.exception;
  * @version 2026-10-09
  **/
 public class DataAccessException extends RuntimeException {
+    private static final long serialVersionUID = 1L;
 
     /** 触发异常的 SQL 语句，可为 null */
     private final String sql;

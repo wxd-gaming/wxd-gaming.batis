@@ -55,15 +55,80 @@ public class MysqlPartitionManager implements PartitionManager {
      */
     private static final Pattern SAFE_IDENTIFIER = Pattern.compile("[A-Za-z0-9_$]+");
 
+    /**
+     * 分区表达式白名单：只允许列名/函数名、数字、括号、逗号与算术运算符。
+     * <p>表达式是 DDL 里唯一无法参数化的自由文本，原样拼接等于把注入面交给调用方。
+     * 字符白名单挡住分号与引号，但挡不住 {@code id) PARTITIONS 8} 这种"闭合括号再追加子句"——
+     * 所以还要做括号配平（深度不得为负、结尾必须归零），并拒绝 SQL 关键字。</p>
+     */
+    private static final Pattern SAFE_EXPRESSION = Pattern.compile("[A-Za-z0-9_$(),+\\-*/%. ]+");
+
+    /** 表达式里不该出现的 SQL 关键字（下划线命名的列名不会命中：{@code update_time} 没有词边界） */
+    private static final Pattern EXPRESSION_KEYWORD = Pattern.compile(
+            "\\b(?:union|select|insert|update|delete|drop|alter|create|partition|partitions"
+                    + "|values|into|outfile|dumpfile|sleep|benchmark|load_file)\\b",
+            Pattern.CASE_INSENSITIVE);
+
+    /** 单个边界值：数字或字符串字面量（字符串内只允许 {@code ''} 转义，反斜杠一律拒绝） */
+    private static final String VALUE_ITEM = "MAXVALUE|[-+]?\\d+(?:\\.\\d+)?|'(?:[^'\\\\]|'')*'";
+
+    /**
+     * ADD/REORGANIZE 的边界子句：{@code VALUES LESS THAN (...)} / {@code VALUES LESS THAN MAXVALUE} /
+     * {@code VALUES IN (...)}。整串必须吻合，多一个分号或注释都会拒绝。
+     */
+    private static final Pattern PARTITION_VALUE = Pattern.compile(
+            "VALUES\\s+(?:LESS\\s+THAN|IN)\\s*(?:\\s*\\(\\s*(?:" + VALUE_ITEM + ")"
+                    + "(?:\\s*,\\s*(?:" + VALUE_ITEM + "))*\\s*\\)|(?:" + VALUE_ITEM + "))",
+            Pattern.CASE_INSENSITIVE);
+
     private static void requireIdentifier(String kind, String name) {
         if (name == null || name.isEmpty() || !SAFE_IDENTIFIER.matcher(name).matches()) {
             throw new IllegalArgumentException(kind + " 含非法字符（只允许字母数字与 _ $）: " + name);
         }
     }
 
-    private static void requirePartitionNames(String kind, List<PartitionDef> defs) {
+    /** 校验分区定义：名字是安全标识符，边界子句是完整的 VALUES ... 形态（防 DDL 注入与语法漏拼） */
+    private static void requirePartitionDefs(String kind, List<PartitionDef> defs) {
         for (PartitionDef def : defs) {
             requireIdentifier(kind, def.getName());
+            requirePartitionValue(def);
+        }
+    }
+
+    private static void requirePartitionValue(PartitionDef def) {
+        String value = def.getValue();
+        if (value == null || value.isBlank() || !PARTITION_VALUE.matcher(value.trim()).matches()) {
+            throw new IllegalArgumentException("分区 " + def.getName()
+                    + " 的边界定义不合法（期望形如 VALUES LESS THAN (20260802) / "
+                    + "VALUES LESS THAN MAXVALUE / VALUES IN (1, 2)）: " + value);
+        }
+    }
+
+    /** 表达式校验：非空、字符白名单、括号配平、无 SQL 关键字 */
+    private static void requireExpression(String expression) {
+        if (expression == null || expression.isBlank()) {
+            throw new IllegalArgumentException("分区表达式不能为空");
+        }
+        if (!SAFE_EXPRESSION.matcher(expression).matches()) {
+            throw new IllegalArgumentException(
+                    "分区表达式含非法字符（只允许列名/函数、数字、括号与算术运算符）: " + expression);
+        }
+        if (EXPRESSION_KEYWORD.matcher(expression).find()) {
+            throw new IllegalArgumentException("分区表达式含 SQL 关键字，拒绝拼进 DDL: " + expression);
+        }
+        int depth = 0;
+        for (int i = 0; i < expression.length(); i++) {
+            char c = expression.charAt(i);
+            if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                if (--depth < 0) {
+                    throw new IllegalArgumentException("分区表达式括号不配对: " + expression);
+                }
+            }
+        }
+        if (depth != 0) {
+            throw new IllegalArgumentException("分区表达式括号不配对: " + expression);
         }
     }
 
@@ -77,7 +142,10 @@ public class MysqlPartitionManager implements PartitionManager {
     @Override
     public String buildCreatePartition(PartitionConfig config) {
         requireIdentifier("表名", config.getTableName());
-        requirePartitionNames("分区名", config.getPartitions());
+        requireExpression(config.getExpression());
+        if (config.getType() == null) {
+            throw new IllegalArgumentException("分区类型不能为空（请调用 rangeBy/listBy/hashBy/keyBy/partitionBy）");
+        }
         String tn = config.getTableName();
         StringBuilder sb = new StringBuilder(512);
 
@@ -91,14 +159,14 @@ public class MysqlPartitionManager implements PartitionManager {
             sb.append("\nPARTITIONS ").append(config.getPartitionCount());
         } else {
             // RANGE / LIST 分区
+            requirePartitionDefs("分区名", config.getPartitions());
             sb.append("ALTER TABLE `").append(tn).append("`\n");
             sb.append("PARTITION BY ");
             appendRangeOrListPrefix(sb, config.getType(), config.getExpression());
             sb.append("\n(\n");
             // 分区定义按 config 里的顺序原样输出：RANGE 要求边界单调，顺序由 Builder 负责保证
-            //（名字不加反引号，因为约定是 p+数字；DROP/TRUNCATE 那两支才需要按用户给的名字加引号）
             sb.append(config.getPartitions().stream()
-                    .map(d -> "  PARTITION " + d.getName() + " " + d.getValue())
+                    .map(d -> "  PARTITION `" + d.getName() + "` " + d.getValue())
                     .collect(Collectors.joining(",\n")));
             sb.append("\n)");
         }
@@ -115,12 +183,12 @@ public class MysqlPartitionManager implements PartitionManager {
     @Override
     public String buildAddPartition(PartitionConfig config) {
         requireIdentifier("表名", config.getTableName());
-        requirePartitionNames("分区名", config.getPartitions());
+        requirePartitionDefs("分区名", config.getPartitions());
         String tn = config.getTableName();
         StringBuilder sb = new StringBuilder();
         sb.append("ALTER TABLE `").append(tn).append("` ADD PARTITION (\n");
         sb.append(config.getPartitions().stream()
-                .map(d -> "  PARTITION " + d.getName() + " " + d.getValue())
+                .map(d -> "  PARTITION `" + d.getName() + "` " + d.getValue())
                 .collect(Collectors.joining(",\n")));
         sb.append("\n);");
         return sb.toString();
@@ -170,13 +238,13 @@ public class MysqlPartitionManager implements PartitionManager {
     public String buildReorganizePartition(PartitionConfig config) {
         requireIdentifier("表名", config.getTableName());
         requireIdentifier("原分区名", config.getReorganizeOldName());
-        requirePartitionNames("分区名", config.getReorganizeDefs());
+        requirePartitionDefs("分区名", config.getReorganizeDefs());
         String tn = config.getTableName();
         StringBuilder sb = new StringBuilder();
-        sb.append("ALTER TABLE `").append(tn).append("` REORGANIZE PARTITION ")
-          .append(config.getReorganizeOldName()).append(" INTO (\n");
+        sb.append("ALTER TABLE `").append(tn).append("` REORGANIZE PARTITION `")
+          .append(config.getReorganizeOldName()).append("` INTO (\n");
         sb.append(config.getReorganizeDefs().stream()
-                .map(d -> "  PARTITION " + d.getName() + " " + d.getValue())
+                .map(d -> "  PARTITION `" + d.getName() + "` " + d.getValue())
                 .collect(Collectors.joining(",\n")));
         sb.append("\n);");
         return sb.toString();

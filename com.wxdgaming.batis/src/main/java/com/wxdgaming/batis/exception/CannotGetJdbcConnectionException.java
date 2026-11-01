@@ -23,6 +23,7 @@ package com.wxdgaming.batis.exception;
  * @version 2026-10-09
  **/
 public class CannotGetJdbcConnectionException extends TransientDataAccessException {
+    private static final long serialVersionUID = 1L;
 
     /** 连接准备阶段失败（事务开启路径常见），不带 SQL 上下文 */
     public CannotGetJdbcConnectionException(String message, Throwable cause) {

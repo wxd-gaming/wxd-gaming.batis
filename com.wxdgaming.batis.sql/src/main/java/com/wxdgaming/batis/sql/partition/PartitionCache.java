@@ -5,6 +5,7 @@ import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -73,29 +74,34 @@ public class PartitionCache {
      * 获取指定表的已有分区名集合
      * <p>首次访问时从数据库加载，后续命中缓存。</p>
      *
-     * <p>失败处理是这里最需要留意的一点：读取元数据抛异常时按"该表没有分区"处理并把空集合
-     * 缓存下来（降级而不是让业务 DDL 失败）。后果是<b>去重能力静默失效</b>——
-     * 之后每次 addPartition 都查不到已有分区，补分区作业会退化成重复 ADD 而在库端报错。
-     * 排查"分区明明存在却还在反复 ADD"时，应先怀疑这里有没有吞掉元数据查询异常（warn 级日志）。</p>
+     * <p>读取元数据失败时<b>不写入缓存</b>：本次按"该表没有分区"降级返回一个临时空集合（不让 DDL 直接失败），
+     * 但失败状态不固化，下一次访问会重新读库。旧实现把空集合塞进缓存，等于把一次瞬时抖动
+     * 变成进程生命周期内的"这张表永远没有分区"——之后每次 addPartition 都重复 ADD，
+     * 库端报分区已存在，而日志里只有当初一条 warn，排查时几乎不可能联想到。
+     * 代价是元数据持续不可用时每次访问都会重试（多一次查询），比静默错判便宜得多。</p>
      *
      * @param tableName 表名，大小写不敏感（内部按小写建 key）
-     * @return 该表已有分区名的可变集合；未分区或读取失败时为空集合
+     * @return 该表已有分区名的可变集合；未分区时为空集合，读取失败时为空集合且不缓存
      */
     public Set<String> getPartitions(String tableName) {
-        String key = tableName.toLowerCase();
-        return cache.computeIfAbsent(key, tn -> {
-            // 大小写不敏感比较：分区名在不同库/不同书写方式下大小写不一致，按名字比对不能区分大小写
-            Set<String> names = new ConcurrentSkipListSet<>(String.CASE_INSENSITIVE_ORDER);
-            try {
-                List<String> fromDb = metaReader.getPartitionNames(jdbcTemplate, tn);
-                names.addAll(fromDb);
-                log.debug("加载表 {} 的分区缓存: {}", tn, fromDb);
-            } catch (Exception e) {
-                log.warn("加载表 {} 分区元数据失败，视为无分区: {} (cause: {})",
-                        tn, e.getMessage(), e.getClass().getSimpleName());
-            }
+        String key = tableName.toLowerCase(Locale.ROOT);
+        Set<String> cached = cache.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        // 大小写不敏感比较：分区名在不同库/不同书写方式下大小写不一致，按名字比对不能区分大小写
+        Set<String> names = new ConcurrentSkipListSet<>(String.CASE_INSENSITIVE_ORDER);
+        try {
+            List<String> fromDb = metaReader.getPartitionNames(jdbcTemplate, key);
+            names.addAll(fromDb);
+            log.debug("加载表 {} 的分区缓存: {}", key, fromDb);
+        } catch (Exception e) {
+            log.warn("加载表 {} 分区元数据失败，本次视为无分区（不写入缓存，下次访问重试）: {} (cause: {})",
+                    key, e.getMessage(), e.getClass().getSimpleName());
             return names;
-        });
+        }
+        Set<String> existing = cache.putIfAbsent(key, names);
+        return existing != null ? existing : names;
     }
 
     /**
@@ -136,7 +142,7 @@ public class PartitionCache {
      * 索性整体重读一次。</p>
      */
     public void refresh(String tableName) {
-        cache.remove(tableName.toLowerCase());
+        cache.remove(tableName.toLowerCase(Locale.ROOT));
     }
 
     /**

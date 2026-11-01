@@ -7,6 +7,7 @@ import com.wxdgaming.batis.sql.BeanToSelectHandler;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * MySQL 方言的 SELECT 处理器
@@ -30,7 +31,7 @@ public class MysqlBeanToSelectHandler implements BeanToSelectHandler {
         List<String> whereCols = new ArrayList<>();
         for (ColumnInfo col : columns.values()) {
             if (col.isPrimaryKey()) {
-                whereCols.add("`" + col.getColumnName().toLowerCase() + "` = ?");
+                whereCols.add("`" + col.getColumnName().toLowerCase(Locale.ROOT) + "` = ?");
             }
         }
 
@@ -39,13 +40,13 @@ public class MysqlBeanToSelectHandler implements BeanToSelectHandler {
                     "实体 " + tableInfo.getEntityClass().getSimpleName() + " 未定义主键，无法执行 queryById");
         }
 
-        return "SELECT * FROM `" + tableInfo.getTableName().toLowerCase()
+        return "SELECT * FROM `" + tableInfo.getTableName().toLowerCase(Locale.ROOT)
                 + "` WHERE " + String.join(" AND ", whereCols);
     }
 
     /** 构建全表查询：{@code SELECT * FROM `t`}；排序/分页由查询 DSL 经接口默认方法追加 */
     @Override
     public String buildSelectAllSql(TableInfo tableInfo) {
-        return "SELECT * FROM `" + tableInfo.getTableName().toLowerCase() + "`";
+        return "SELECT * FROM `" + tableInfo.getTableName().toLowerCase(Locale.ROOT) + "`";
     }
 }

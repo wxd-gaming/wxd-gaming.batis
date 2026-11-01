@@ -1,5 +1,8 @@
 package com.wxdgaming.batis.sql;
 
+import java.util.Collections;
+import java.util.List;
+
 /**
  * 批量刷盘结果
  * <p>两组数字的差别是读这个对象的关键，混淆它会误判数据是否全部落库：</p>
@@ -10,6 +13,8 @@ package com.wxdgaming.batis.sql;
  *       插入侧通常是批量降级后有失败条目，更新侧更常见的是"更新一条库里不存在的行"
  *       （延迟更新标记残留、或那条记录本就没落库），得到 0 行生效却不报错。</li>
  * </ul>
+ * <p>失败条目已经由执行器放回脏表等下次重试，这里保留原始异常供调用方告警/判定是否值得重试；
+ * 只记日志不暴露异常会让调用方无法区分"全部落库"和"部分失败但被吞掉"。</p>
  * <p>不可变对象：刷盘结束时一次性构造，只读，可安全跨线程传递做统计或断言。</p>
  *
  * @author wxd-gaming(無心道, 15388152619)
@@ -29,6 +34,8 @@ public class FlushResult {
     private final int updateAffected;
     /** 实际删除的行数 */
     private final int deleteAffected;
+    /** 本次刷盘过程中捕获的异常（已放回脏表的失败条目对应异常，按发生顺序） */
+    private final List<Throwable> errors;
 
     /**
      * 构造刷盘结果。
@@ -44,12 +51,25 @@ public class FlushResult {
      */
     public FlushResult(int insertCount, int updateCount, int deleteCount,
                        int insertAffected, int updateAffected, int deleteAffected) {
+        this(insertCount, updateCount, deleteCount, insertAffected, updateAffected, deleteAffected, List.of());
+    }
+
+    /**
+     * 构造带失败明细的刷盘结果。
+     *
+     * @param errors 本次刷盘捕获的异常（失败条目已由执行器放回脏表）
+     */
+    public FlushResult(int insertCount, int updateCount, int deleteCount,
+                       int insertAffected, int updateAffected, int deleteAffected,
+                       List<Throwable> errors) {
         this.insertCount = insertCount;
         this.updateCount = updateCount;
         this.deleteCount = deleteCount;
         this.insertAffected = insertAffected;
         this.updateAffected = updateAffected;
         this.deleteAffected = deleteAffected;
+        this.errors = errors == null || errors.isEmpty()
+                ? List.of() : List.copyOf(errors);
     }
 
     /** 待插入条目数（提交的量，不代表成功量） */
@@ -69,10 +89,20 @@ public class FlushResult {
     /** 实际生效的行数：三类 affected 之和，与 {@link #getTotalCount()} 的差额即未落库部分 */
     public int getTotalAffected()   { return insertAffected + updateAffected + deleteAffected; }
 
+    /** 是否发生过失败（失败条目已放回脏表，可下次重试） */
+    public boolean hasErrors()      { return !errors.isEmpty(); }
+
+    /** 本次刷盘捕获的异常（不可修改，按发生顺序） */
+    public List<Throwable> getErrors() { return Collections.unmodifiableList(errors); }
+
+    /** 失败次数 */
+    public int getErrorCount()      { return errors.size(); }
+
     /** 一行摘要，形如 {@code insert=3(3行), update=2(1行)}，括号内为受影响行数 */
     @Override
     public String toString() {
-        return String.format("FlushResult{insert=%d(%d行), update=%d(%d行), delete=%d(%d行)}",
+        String base = String.format("FlushResult{insert=%d(%d行), update=%d(%d行), delete=%d(%d行)",
                 insertCount, insertAffected, updateCount, updateAffected, deleteCount, deleteAffected);
+        return errors.isEmpty() ? base + "}" : base + ", errors=" + errors.size() + "}";
     }
 }

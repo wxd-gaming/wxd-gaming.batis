@@ -3,13 +3,13 @@ package com.wxdgaming.batis.sql.partition;
 import com.wxdgaming.batis.model.TableInfo;
 import com.wxdgaming.batis.parser.EntityParser;
 import com.wxdgaming.batis.sql.JdbcTemplate;
-import com.wxdgaming.batis.sql.QueryRunner;
 import lombok.extern.slf4j.Slf4j;
 
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * 分区构建器（链式 API，与具体数据库无关）
@@ -180,14 +180,14 @@ public class PartitionBuilder {
     public PartitionBuilder table(Class<?> entityClass) {
         resetConfig();
         TableInfo tableInfo = EntityParser.parse(entityClass);
-        config.setTableName(tableInfo.getTableName().toLowerCase());
+        config.setTableName(tableInfo.getTableName().toLowerCase(Locale.ROOT));
         return this;
     }
 
     /** 由表名直接指定（不依赖实体类，用于非 ORM 管理的表） */
     public PartitionBuilder table(String tableName) {
         resetConfig();
-        config.setTableName(tableName.toLowerCase());
+        config.setTableName(tableName.toLowerCase(Locale.ROOT));
         return this;
     }
 
@@ -241,6 +241,7 @@ public class PartitionBuilder {
      * @param count 分区个数，必须与最终期望的分区数一致（测试用例⑦断言"恰为 8 个"就是防参数没接上）
      */
     public PartitionBuilder hashBy(String expression, int count) {
+        requirePartitionCount("HASH", count);
         config.setType(PartitionType.HASH);
         config.setExpression(expression);
         config.setPartitionCount(count);
@@ -253,10 +254,22 @@ public class PartitionBuilder {
      * 因此比 HASH 更通用；渲染形态与 HASH 一致。</p>
      */
     public PartitionBuilder keyBy(String columns, int count) {
+        requirePartitionCount("KEY", count);
         config.setType(PartitionType.KEY);
         config.setExpression(columns);
         config.setPartitionCount(count);
         return this;
+    }
+
+    /**
+     * HASH/KEY 分区数校验。
+     * <p>0 或负数会渲染成 {@code PARTITIONS 0} / {@code PARTITIONS -1}，是必然失败的 DDL；
+     * 这种参数错误应该在链式调用点就暴露，而不是等到启动期执行分区语句才由数据库报语法错。</p>
+     */
+    private static void requirePartitionCount(String kind, int count) {
+        if (count <= 0) {
+            throw new IllegalArgumentException(kind + " 分区数必须大于 0，实际: " + count);
+        }
     }
 
     /** 逃生口：直接指定类型与表达式，用于快捷方法没覆盖的类型（RANGE_COLUMNS / LIST_COLUMNS 等） */
@@ -278,13 +291,33 @@ public class PartitionBuilder {
      * 不带缓存构造时这里永不让步，每次都进列表。</p>
      *
      * <p>{@code value} 是完整边界子句（含 {@code VALUES LESS THAN} 前缀）而非裸数字，
-     * 本方法不校验其内容，写错只能在执行时由数据库暴露。</p>
+     * 其语法合法性由方言渲染层校验（见 {@link PartitionManager} 的 MySQL 实现），
+     * 这里只拦"空值"与"同一批内名字/边界重复"这两类必然失败的调用。</p>
      */
     public PartitionBuilder addPartition(String name, String value) {
+        if (name == null || name.isBlank()) {
+            throw new IllegalArgumentException("分区名不能为空");
+        }
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException("分区 " + name + " 的边界值不能为空");
+        }
         if (cache != null && cache.contains(config.getTableName(), name)) {
             skipped.add(name);
             log.debug("分区 {}.{} 已存在，跳过", config.getTableName(), name);
             return this;
+        }
+        // 缓存只能挡住"库端已存在"，挡不住同一批里重复添加：两个边界值相同的分区
+        // 会在一条 ADD PARTITION 里一起发出去，MySQL 直接拒绝整条语句（边界必须唯一）
+        for (PartitionDef existing : config.getPartitions()) {
+            if (existing.getName().equalsIgnoreCase(name)) {
+                throw new IllegalArgumentException(
+                        "同一批分区定义中分区名重复: " + name);
+            }
+            if (existing.getValue().trim().equalsIgnoreCase(value.trim())) {
+                throw new IllegalArgumentException(
+                        "分区 " + name + " 的边界值与已添加的分区 " + existing.getName()
+                                + " 重复（RANGE/LIST 的边界值必须唯一）: " + value);
+            }
         }
         config.addPartition(new PartitionDef(name, value));
         return this;
@@ -788,8 +821,8 @@ public class PartitionBuilder {
      * <p>连接只能从 {@link PartitionCache} 拿，所以无缓存构造（{@code of(manager)}）走到这里
      * 会明确抛异常而不是静默什么都不做——这是"只能 build 不能 execute"的实现依据。</p>
      * <p>{@code sql} 为 null/空串时静默返回（对应 ADD 全部跳过的正常路径）。
-     * 每条 DDL 各开一个 {@link QueryRunner}，失败异常原样抛出：DDL 在 MySQL 下本来就不成事务，
-     * 不做回滚也不吞异常。</p>
+     * 统一走 {@link JdbcTemplate#executeDdl(String)}：独立连接 + 语句超时，避免 DDL 复用线程事务连接
+     * （MySQL 的 DDL 会隐式提交当前业务事务），也避免等元数据锁时无限期卡住。</p>
      */
     private void execute(String sql) {
         if (sql == null || sql.isEmpty()) return;
@@ -799,8 +832,6 @@ public class PartitionBuilder {
                 "PartitionCache 未设置，无法执行 SQL。请使用 PartitionBuilder.of(manager, cache) 创建实例");
         }
         log.info("执行分区SQL:\n{}", sql);
-        try (QueryRunner qr = new QueryRunner(jt)) {
-            qr.update(sql);
-        }
+        jt.executeDdl(sql);
     }
 }

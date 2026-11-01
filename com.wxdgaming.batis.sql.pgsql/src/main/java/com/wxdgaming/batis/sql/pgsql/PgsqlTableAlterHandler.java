@@ -74,6 +74,9 @@ public class PgsqlTableAlterHandler implements TableAlterHandler {
         String tableName = entityTable.getTableName().toLowerCase(Locale.ROOT);
         TableInfo dbTable = cache.get(tableName);
         if (dbTable == null) return;
+        // 库端真实表名（可能含大写）：建表路径用的是原值，同步也必须用原值，
+        // 否则 @Table(name="MyTable") 会发 ALTER TABLE "mytable" → relation does not exist（H7）
+        String physicalTableName = hasText(dbTable.getTableName()) ? dbTable.getTableName() : tableName;
 
         // 优先用注入的方言渲染器，未注入时回退 PG 默认，保证纯 PG 场景仍可比对
         ColumnTypeDefHandler typeDef = jdbcTemplate.getColumnTypeDefHandler() != null
@@ -82,7 +85,7 @@ public class PgsqlTableAlterHandler implements TableAlterHandler {
         List<String> alterClauses = new ArrayList<>();
         List<String> deferredStatements = new ArrayList<>();
 
-        String quotedTable = PgsqlIdentifier.quote(tableName);
+        String quotedTable = PgsqlIdentifier.quote(physicalTableName);
 
         // ===== 0. 表级注释 =====
         // 只处理"实体声明了注释且与库端不同"的情形：实体没写注释时不去清空库端注释，
@@ -102,18 +105,26 @@ public class PgsqlTableAlterHandler implements TableAlterHandler {
                         + PgsqlTableCreateHandler.columnDefinition(entityCol, typeDef).strip());
                 if (hasText(entityCol.getComment())) {
                     deferredStatements.add(PgsqlTableCreateHandler
-                            .buildColumnComment(tableName, colName, entityCol.getComment()));
+                            .buildColumnComment(physicalTableName, entityCol.getColumnName(), entityCol.getComment()));
                 }
                 continue;
             }
 
-            String quotedColumn = PgsqlIdentifier.quote(colName);
+            // 已存在的列必须用库端真实列名（可能含大写）；用实体小写名会指向不存在的列
+            String physicalColName = hasText(dbCol.getColumnName()) ? dbCol.getColumnName() : entityCol.getColumnName();
+            String quotedColumn = PgsqlIdentifier.quote(physicalColName);
             if (!expectsIdentity(entityCol)) {
-                warnUnexpectedIdentity(tableName, colName, dbCol);
+                warnUnexpectedIdentity(physicalTableName, physicalColName, dbCol);
             }
 
             // 1a. 物理类型：只有真的判不等才发 TYPE（这一条会整表重写，绝不能虚发）
-            if (!typeDef.renderNormalized(entityCol).equals(typeDef.normalize(dbCol.getType()))) {
+            // domain / 自定义 enum / 数组等框架无法比较的类型直接跳过并 WARN：
+            // 否则 normalize 原样返回导致"永不相等"，每次启动都发一条可能失败的整表重写（H5）
+            if (!typeDef.isTypeComparable(dbCol.getType())) {
+                log.warn("列 {}.{} 的库端类型 {} 不是框架可识别的类型（domain/自定义/数组等），"
+                                + "跳过类型比较与自动 ALTER；如需纳管请手工处理",
+                        physicalTableName, physicalColName, dbCol.getType());
+            } else if (!typeDef.renderNormalized(entityCol).equals(typeDef.normalize(dbCol.getType()))) {
                 String using = typeUsingClause(entityCol, dbCol, typeDef, quotedColumn);
                 alterClauses.add("ALTER COLUMN " + quotedColumn + " TYPE "
                         + typeDef.renderType(entityCol) + (using == null ? "" : " " + using));
@@ -132,38 +143,56 @@ public class PgsqlTableAlterHandler implements TableAlterHandler {
                 }
             }
             // 1d. 自增：实体要而库端没有才修，反方向只告警
+            // 新增 IDENTITY 会新建一个从 1 开始的序列；存量表必须把序列推到 MAX+1，
+            // 否则下一条插入直接撞主键（M9）
             if (expectsIdentity(entityCol) && !hasIdentity(dbCol)) {
                 alterClauses.addAll(identityClauses(quotedColumn, dbCol));
+                deferredStatements.add(identityCalibrationSql(quotedTable, quotedColumn));
             }
             // 1e. 列注释
             if (!Objects.equals(normalizeComment(entityCol.getComment()), normalizeComment(dbCol.getComment()))
                     && hasText(entityCol.getComment())) {
                 deferredStatements.add(PgsqlTableCreateHandler
-                        .buildColumnComment(tableName, colName, entityCol.getComment()));
+                        .buildColumnComment(physicalTableName, physicalColName, entityCol.getComment()));
             }
 
             // 1f. 非默认 collation：实体注解表达不了排序规则，只能告警让人看见
             // （与 MySQL 侧字符集漂移同一口径：不自动改、但必须可见）
-            warnNonDefaultCollation(tableName, colName, dbCol);
+            warnNonDefaultCollation(physicalTableName, physicalColName, dbCol);
         }
 
         // ===== 2. 索引对比 =====
-        warnUnmanagedIndexes(jdbcTemplate, tableName);
-        diffIndexes(jdbcTemplate, quotedTable, tableName, entityTable, dbTable, deferredStatements);
+        warnUnmanagedIndexes(jdbcTemplate, physicalTableName);
+        diffIndexes(jdbcTemplate, quotedTable, physicalTableName, entityTable, dbTable, deferredStatements);
 
-        // ===== 3. 执行 =====
-        try (QueryRunner queryRunner = new QueryRunner(jdbcTemplate)) {
-            if (!alterClauses.isEmpty()) {
-                String alterSql = "ALTER TABLE " + quotedTable + "\n  " + String.join(",\n  ", alterClauses);
-                log.debug("修改表sql:\n{};", alterSql);
-                queryRunner.update(alterSql);
-            }
-            // 索引与注释是独立对象，无法并入上面那条 ALTER；pgjdbc 的 prepared 路径也不吃多语句
-            for (String statement : deferredStatements) {
-                log.debug("修改表sql:\n{};", statement);
-                queryRunner.update(statement);
-            }
+        // ===== 3. 执行：ALTER 与后续语句放进同一个事务，失败则整组回滚（M8） =====
+        List<String> statements = new ArrayList<>(deferredStatements.size() + 1);
+        if (!alterClauses.isEmpty()) {
+            statements.add("ALTER TABLE " + quotedTable + "\n  " + String.join(",\n  ", alterClauses));
         }
+        statements.addAll(deferredStatements);
+        for (String statement : statements) {
+            log.debug("修改表sql:\n{};", statement);
+        }
+        // 独立连接 + 事务 + 语句超时：不加入线程事务，且不会无限期等锁（H6）
+        jdbcTemplate.executeDdl(statements);
+    }
+
+    /**
+     * 新增 IDENTITY 后校准序列：把当前值推到 {@code MAX(col)+1}，避免存量行与新 ID 冲突。
+     * <p>空表也安全（GREATEST(...,1)），且只在"本次刚加 IDENTITY"时下发，
+     * 不会覆盖已有序列的当前值。用 DO 块是因为序列名要在库端动态解析
+     * （{@code pg_get_serial_sequence}），预先拿不到。</p>
+     */
+    private static String identityCalibrationSql(String quotedTable, String quotedColumn) {
+        String tableLiteral = quotedTable.replace("'", "''");
+        String columnLiteral = quotedColumn.replace("'", "''");
+        return "DO $$ DECLARE seq text; BEGIN"
+                + " seq := pg_get_serial_sequence('" + tableLiteral + "', '" + columnLiteral + "');"
+                + " IF seq IS NOT NULL THEN"
+                + " PERFORM setval(seq::regclass, GREATEST(COALESCE((SELECT MAX(" + quotedColumn + ")"
+                + " FROM " + quotedTable + "), 0) + 1, 1), false);"
+                + " END IF; END $$";
     }
 
     /**

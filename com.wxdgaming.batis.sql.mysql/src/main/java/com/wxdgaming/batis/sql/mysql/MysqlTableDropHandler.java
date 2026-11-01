@@ -6,6 +6,8 @@ import com.wxdgaming.batis.sql.QueryRunner;
 import com.wxdgaming.batis.sql.TableDropHandler;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.Locale;
+
 /**
  * MySQL 删除表处理器
  * <p>删除整张表的结构与数据；与 {@link MysqlTableTruncateHandler}（只清数据保留结构）相对。</p>
@@ -23,7 +25,7 @@ public class MysqlTableDropHandler implements TableDropHandler {
      */
     @Override
     public void doAction(JdbcTemplate jdbcTemplate, TableInfo tableInfo) {
-        String sql = "DROP TABLE IF EXISTS `" + tableInfo.getTableName().toLowerCase() + "`;";
+        String sql = "DROP TABLE IF EXISTS `" + tableInfo.getTableName().toLowerCase(Locale.ROOT) + "`;";
         log.debug("删除表sql:\n{}", sql);
         try (QueryRunner queryRunner = new QueryRunner(jdbcTemplate)) {
             queryRunner.execute(sql);

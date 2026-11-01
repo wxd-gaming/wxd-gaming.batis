@@ -13,7 +13,8 @@ import static org.junit.jupiter.api.Assertions.*;
  * <p>锁定两条不变式：</p>
  * <ol>
  *   <li>逻辑类型渲染结果与解耦前 EntityParser 直出的物理字面量逐字节一致；</li>
- *   <li>normalize 与解耦前 MysqlTableAlterHandler#normalizeType 在历史出现过的一切输入上等价。</li>
+ *   <li>normalize 与解耦前 MysqlTableAlterHandler#normalizeType 在历史输入上等价，
+ *       仅保留三处刻意的分层改进（null 空串、DECIMAL 参数空格、tinyint(1) 布尔档）。</li>
  * </ol>
  *
  * @author wxd-gaming(無心道, 15388152619)
@@ -148,19 +149,21 @@ class MysqlColumnTypeDefHandlerTest {
      * 只要它对某个历史输入给出不一样结果，存量库就会被判成漂移并在启动时刷出一堆 MODIFY。
      * 特别地，tinyint(1) 与 tinyint(4) 必须保持可区分（前者是布尔、后者是单字节整数），
      * 若被统一抹掉，布尔列和普通整数列会互相误判。</p>
-     * <p>末尾两条是有意的偏离，故单独断言：null 规格化成空串；
+     * <p>末尾三条是有意的偏离，故单独断言：null 规格化成空串；
      * decimal 参数里的空格被折叠，使 decimal(20,6) 与 decimal(20, 6) 判等
-     * ——旧实现认为两者不同，正是它会对明明没变的 DECIMAL 列反复发 MODIFY 的原因。</p>
+     * ——旧实现认为两者不同，正是它会对明明没变的 DECIMAL 列反复发 MODIFY 的原因；
+     * {@code tinyint(1)} 保留宽度（见 M6），旧实现把它与 tinyint(4) 一起抹成 tinyint，
+     * 导致布尔列与单字节整数列无法区分。</p>
      */
     @Test
     void normalizeEquivalentToLegacyOnHistoricalInputs() {
         String[] inputs = {
-                "int(11)", "bigint(20)", "tinyint(4)", "tinyint(1)", "smallint(6)", "mediumint(9)",
+                "int(11)", "bigint(20)", "tinyint(4)", "smallint(6)", "mediumint(9)",
                 "varchar(64)", "varchar(255)", "char(1)", "text", "mediumtext", "longtext",
                 "blob", "longblob", "datetime", "date", "time", "timestamp",
                 "DECIMAL(20,6)", "double", "float",
                 "int(11) unsigned", "bigint(20) unsigned",
-                "INT", "BIGINT", "TINYINT(1)", "VARCHAR(64)", "LONGTEXT", "DATETIME",
+                "INT", "BIGINT", "VARCHAR(64)", "LONGTEXT", "DATETIME",
         };
         for (String input : inputs) {
             assertEquals(legacyNormalize(input), handler.normalize(input),
@@ -169,6 +172,10 @@ class MysqlColumnTypeDefHandlerTest {
         assertEquals("", handler.normalize(null));
         // 有意的改进：旧实现对 "decimal(20, 6)" vs "decimal(20,6)" 判不等（虚假 MODIFY），新实现折叠参数空格
         assertEquals(handler.normalize("decimal(20,6)"), handler.normalize("decimal(20, 6)"));
+        // 有意的改进（M6）：tinyint(1) 是布尔档，必须与其它整数宽度可区分
+        assertEquals("tinyint(1)", handler.normalize("tinyint(1)"));
+        assertEquals("tinyint(1)", handler.normalize("TINYINT(1)"));
+        assertEquals("tinyint", handler.normalize("tinyint(4)"));
     }
 
     /**
@@ -181,7 +188,8 @@ class MysqlColumnTypeDefHandlerTest {
     @Test
     void renderNormalizedMatchesLegacyPipeline() {
         // 旧管线 = legacyNormalize(EntityParser直出字面量)；新管线 = renderNormalized
-        assertEquals(legacyNormalize("TINYINT(1)"), handler.renderNormalized(col(SqlType.BOOLEAN, 255, 0)));
+        // BOOLEAN 渲染为 TINYINT(1)，规格化后保留宽度（M6：布尔档必须与整数档可区分）
+        assertEquals("tinyint(1)", handler.renderNormalized(col(SqlType.BOOLEAN, 255, 0)));
         assertEquals(legacyNormalize("VARCHAR(255)"), handler.renderNormalized(col(SqlType.VARCHAR, 255, 0)));
         assertEquals(legacyNormalize("DECIMAL(20,6)"), handler.renderNormalized(col(SqlType.DECIMAL, 20, 6)));
         assertEquals(legacyNormalize("BIGINT"), handler.renderNormalized(col(SqlType.BIGINT, 255, 0)));

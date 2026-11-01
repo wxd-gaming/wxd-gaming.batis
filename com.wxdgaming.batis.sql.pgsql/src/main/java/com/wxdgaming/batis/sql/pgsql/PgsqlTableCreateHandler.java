@@ -7,7 +7,6 @@ import com.wxdgaming.batis.model.SqlType;
 import com.wxdgaming.batis.model.TableInfo;
 import com.wxdgaming.batis.sql.ColumnTypeDefHandler;
 import com.wxdgaming.batis.sql.JdbcTemplate;
-import com.wxdgaming.batis.sql.QueryRunner;
 import com.wxdgaming.batis.sql.TableCreateHandler;
 import lombok.extern.slf4j.Slf4j;
 
@@ -21,7 +20,8 @@ import java.util.List;
  * （{@code COMMENT ON}），所以产出 {@code CREATE TABLE} + N 条 {@code CREATE INDEX}
  * + 表/列注释语句，由 {@link #buildStatements} 统一给出、{@link #doAction} 逐条执行。</p>
  * <p>逐条执行而非拼成一串的原因：pgjdbc 走 prepared 协议时不接受多语句（会直接报语法错误），
- * 而 {@code QueryRunner#update} 正是 PreparedStatement 路径。</p>
+ * 所以这里把语句<b>逐条</b>交给 {@link JdbcTemplate#executeDdl(List)}——它仍是同一条独立连接、
+ * 同一个事务，只是每次单独 execute，绕开多语句限制的同时保住"整组建或整组不建"的原子性。</p>
  * <p>列物理类型一律经 {@link ColumnTypeDefHandler} 渲染，使建表与
  * {@link PgsqlTableAlterHandler} 的结构 diff 使用同一套类型口径。</p>
  *
@@ -36,19 +36,17 @@ public class PgsqlTableCreateHandler implements TableCreateHandler {
 
     /**
      * 生成并执行建表语句集。
-     * <p>执行走 {@link QueryRunner} 的 try-with-resources，连接借出后必然归还。
-     * 多条语句之间存在依赖（索引与注释都引用已存在的表），所以顺序固定为
+     * <p>多条语句之间存在依赖（索引与注释都引用已存在的表），所以顺序固定为
      * 表 → 索引 → 注释，且不做"前面失败也继续"的容错：表都没建起来时后面条目的报错只是噪音。</p>
+     * <p>执行走 {@link JdbcTemplate#executeDdl(List)}：独立连接、单事务、逐条带语句超时。
+     * PG 的 DDL 是事务性的，因此这里"任一条失败整组回滚"，不会留下"表建了、索引没建"的半套结构；
+     * 同时避免借用调用线程的事务连接（DDL 不该跟业务事务纠缠），也不会在等锁时无限期挂起。</p>
      */
     @Override
     public void doAction(JdbcTemplate jdbcTemplate, TableInfo tableInfo) {
         List<String> statements = buildStatements(tableInfo, typeDef(jdbcTemplate));
         log.debug("创建表sql:\n{}", joinForLog(statements));
-        try (QueryRunner queryRunner = new QueryRunner(jdbcTemplate)) {
-            for (String statement : statements) {
-                queryRunner.update(statement);
-            }
-        }
+        jdbcTemplate.executeDdl(statements);
     }
 
     /**

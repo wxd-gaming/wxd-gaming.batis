@@ -178,7 +178,10 @@ public final class SelectSqlBuilder {
                                     + ")不一致，参数会错位绑定: " + fragment);
                 }
                 params.addAll(c.values());
-                return new Frag(fragment, Criteria.Kind.LEAF);
+                // 一律包一层括号：raw 是整段自由 SQL，可能自带 OR。若原样拼进 AND 链，
+                // `a OR b` AND c 会按优先级变成 a OR (b AND c)——条件范围静默扩大。
+                // 单条件时多一对括号无副作用；NOT 分支外层再包一层也仍然正确。
+                return new Frag("(" + fragment + ")", Criteria.Kind.LEAF);
             }
             String qc = handler.quote(resolveColumn(table, c.column()).getColumnName());
             return switch (c.op()) {

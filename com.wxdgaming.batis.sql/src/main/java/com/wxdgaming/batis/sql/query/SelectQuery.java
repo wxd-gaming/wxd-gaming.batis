@@ -231,7 +231,13 @@ public final class SelectQuery<T> implements SelectSqlBuilder.SelectQuerySpec {
         int size = limit == null || limit <= 0 ? 10 : limit;
         int off = offset == null || offset < 0 ? 0 : offset;
         long total = count();
-        List<T> content = list();
+        // 不能直接 list()：未设置 limit 时 list() 不带 LIMIT，会把整表捞进内存再当第一页返回。
+        // 这里用临时规格补上 LIMIT/OFFSET，只取本页行；count 仍是全量计数，两者口径才一致。
+        SelectSqlBuilder.Plan plan = buildPlan(false, size, off);
+        List<T> content;
+        try (QueryRunner qr = new QueryRunner(template)) {
+            content = qr.query(plan.sql(), plan.params(), ResultSetHandlers.beanList(template, entityClass));
+        }
         return new Page<>(content, total, off / size + 1, size, sort);
     }
 

@@ -22,6 +22,7 @@ package com.wxdgaming.batis.exception;
  * @version 2026-10-09
  **/
 public class UncategorizedDataAccessException extends NonTransientDataAccessException {
+    private static final long serialVersionUID = 1L;
 
     /** 包装场景：只有描述与原始异常 */
     public UncategorizedDataAccessException(String message, Throwable cause) {

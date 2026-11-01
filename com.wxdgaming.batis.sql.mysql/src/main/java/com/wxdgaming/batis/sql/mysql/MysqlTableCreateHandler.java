@@ -7,6 +7,7 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * mysql表构建
@@ -25,16 +26,16 @@ public class MysqlTableCreateHandler implements TableCreateHandler {
 
     /**
      * 生成并执行建表 DDL。
-     * <p>列物理类型通过 template 注入的 {@link ColumnTypeDefHandler} 渲染，从而支持使用方替换方言；
-     * 执行走 {@link QueryRunner} 的 try-with-resources，连接借出后必然归还。</p>
+     * <p>列物理类型通过 template 注入的 {@link ColumnTypeDefHandler} 渲染，从而支持使用方替换方言。</p>
+     * <p>执行走 {@link JdbcTemplate#executeDdl}：DDL 使用独立连接且带语句超时。与改表路径同一口径，
+     * 原因是 MySQL 的 DDL 会隐式提交事务——若借用调用线程的事务连接，会把业务事务的前半段提前提交，
+     * 也会在等待元数据锁时无限期挂起。</p>
      */
     @Override
     public void doAction(JdbcTemplate jdbcTemplate, TableInfo tableInfo) {
         String buildSql = buildSql(tableInfo, typeDef(jdbcTemplate));
         log.debug("创建表sql:\n{}", buildSql);
-        try (QueryRunner queryRunner = new QueryRunner(jdbcTemplate)) {
-            queryRunner.update(buildSql);
-        }
+        jdbcTemplate.executeDdl(buildSql);
     }
 
     /**
@@ -62,7 +63,7 @@ public class MysqlTableCreateHandler implements TableCreateHandler {
      */
     private String buildSql(TableInfo tableInfo, ColumnTypeDefHandler typeDef) {
         StringBuilder sb = new StringBuilder(512);
-        sb.append("CREATE TABLE IF NOT EXISTS `").append(tableInfo.getTableName().toLowerCase()).append("` (\n");
+        sb.append("CREATE TABLE IF NOT EXISTS `").append(tableInfo.getTableName().toLowerCase(Locale.ROOT)).append("` (\n");
 
         List<String> columnDefs = new ArrayList<>();
 
@@ -75,7 +76,7 @@ public class MysqlTableCreateHandler implements TableCreateHandler {
         List<String> pkColumns = new ArrayList<>();
         for (ColumnInfo col : tableInfo.getColumns().values()) {
             if (col.isPrimaryKey()) {
-                pkColumns.add(col.getColumnName().toLowerCase());
+                pkColumns.add(col.getColumnName().toLowerCase(Locale.ROOT));
             }
         }
         if (!pkColumns.isEmpty()) {
@@ -88,9 +89,9 @@ public class MysqlTableCreateHandler implements TableCreateHandler {
                 String indexType = index.isUnique() ? "UNIQUE INDEX" : "INDEX";
                 List<String> quotedCols = new ArrayList<>();
                 for (String colName : index.getColumns()) {
-                    quotedCols.add("`" + colName.toLowerCase() + "`");
+                    quotedCols.add("`" + colName.toLowerCase(Locale.ROOT) + "`");
                 }
-                columnDefs.add("  " + indexType + " `" + index.getName().toLowerCase() + "` (" + String.join(", ", quotedCols) + ")");
+                columnDefs.add("  " + indexType + " `" + index.getName().toLowerCase(Locale.ROOT) + "` (" + String.join(", ", quotedCols) + ")");
             }
         }
 
@@ -112,7 +113,7 @@ public class MysqlTableCreateHandler implements TableCreateHandler {
      */
     private String buildColumnDef(ColumnInfo col, ColumnTypeDefHandler typeDef) {
         StringBuilder sb = new StringBuilder(64);
-        sb.append("  `").append(col.getColumnName().toLowerCase()).append("` ").append(typeDef.renderType(col));
+        sb.append("  `").append(col.getColumnName().toLowerCase(Locale.ROOT)).append("` ").append(typeDef.renderType(col));
 
         if (!col.isNullable()) {
             sb.append(" NOT NULL");

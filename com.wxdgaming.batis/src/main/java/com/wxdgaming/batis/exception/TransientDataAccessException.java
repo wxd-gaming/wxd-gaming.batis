@@ -19,6 +19,7 @@ package com.wxdgaming.batis.exception;
  * @version 2026-10-09
  **/
 public class TransientDataAccessException extends DataAccessException {
+    private static final long serialVersionUID = 1L;
 
     /** 无 SQL 上下文的瞬时故障，通常由事务模板等框架组件直接构造 */
     public TransientDataAccessException(String message) {

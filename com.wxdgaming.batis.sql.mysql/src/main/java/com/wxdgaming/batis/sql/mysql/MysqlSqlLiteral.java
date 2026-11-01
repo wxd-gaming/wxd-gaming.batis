@@ -44,7 +44,10 @@ final class MysqlSqlLiteral {
     static String defaultValue(String raw) {
         String value = raw.trim();
         if (value.length() >= 2 && value.charAt(0) == '\'' && value.charAt(value.length() - 1) == '\'') {
-            return "'" + escapeString(value.substring(1, value.length() - 1)) + "'";
+            // 注解里用 '' 表示一个单引号（SQL 字面量写法）。必须先解转义再统一转义一次，
+            // 否则 'O''Brien' 会被二次转义成 O''''Brien，落库后多出一个引号（M5）
+            String inner = value.substring(1, value.length() - 1).replace("''", "'");
+            return "'" + escapeString(inner) + "'";
         }
         if (!SAFE_BARE.matcher(value).matches()) {
             throw new IllegalArgumentException(

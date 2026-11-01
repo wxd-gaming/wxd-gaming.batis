@@ -100,7 +100,13 @@ public final class CacheKeyBuilder {
         if (id == null) throw new IllegalArgumentException("主键值不能为 null，无法构建缓存 Key");
         if (id instanceof Object[] arr) {
             StringBuilder sb = new StringBuilder();
-            for (Object component : arr) {
+            for (int i = 0; i < arr.length; i++) {
+                Object component = arr[i];
+                // 复合主键缺一个分量就定位不到缓存行；静默写 "null" 段会让不同 bean 撞同一 key
+                if (component == null) {
+                    throw new IllegalArgumentException(
+                            "复合主键第 " + i + " 个分量为 null，无法构建缓存 Key");
+                }
                 String s = String.valueOf(component);
                 sb.append(s.length()).append(':').append(s);
             }

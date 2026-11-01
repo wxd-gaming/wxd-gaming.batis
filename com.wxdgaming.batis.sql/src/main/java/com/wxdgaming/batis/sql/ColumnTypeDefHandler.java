@@ -65,6 +65,19 @@ public interface ColumnTypeDefHandler {
     String normalize(String physicalType);
 
     /**
+     * 该物理类型是否属于方言可安全比较/自动变更的范围。
+     * <p>默认 true（MySQL 的列类型集合是封闭的）。PG 需要覆盖：domain、自定义 enum、数组等
+     * 类型无法与实体侧渲染结果可靠比对，强行比对会表现为"永不相等"，
+     * 于是每次启动都发一条可能失败的 {@code ALTER COLUMN TYPE}（整表重写）。
+     * 返回 false 时调用方只告警、跳过该列的类型比较。</p>
+     *
+     * @param physicalType 库端回读的物理类型，可为 null
+     */
+    default boolean isTypeComparable(String physicalType) {
+        return true;
+    }
+
+    /**
      * 方言名，用于日志与诊断
      * <p>异常信息里带上它才能区分"哪套方言没装配对"，默认 generic 表示未被方言覆盖。</p>
      */

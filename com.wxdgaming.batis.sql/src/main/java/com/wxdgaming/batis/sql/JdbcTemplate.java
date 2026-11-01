@@ -23,10 +23,12 @@ import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.function.Function;
 
 /**
@@ -108,14 +110,14 @@ public class JdbcTemplate extends DbTemplate {
     private SqlExceptionHandler sqlExceptionHandler;
 
     /**
-     * 是否允许 {@link #checkTable(TableInfo)} 删除"实体里没有声明"的索引，默认 true（既有语义）。
+     * 是否允许 {@link #checkTable(TableInfo)} 删除"实体里没有声明"的索引，默认 false。
      * <p>
-     * 关掉它的场景很具体：存量表首次接入框架时，数据库里往往有 DBA 手工建的索引（含全文索引、
-     * 覆盖索引）而实体注解还没补齐，默认语义会在一次 checkTable 里把它们删掉且不留日志。
-     * 关闭后框架只 warn 列出将被删除的索引名，不动库。
+     * 默认关闭而不是开启：存量表首次接入框架时，数据库里往往有 DBA 手工建的索引（含全文索引、
+     * 覆盖索引、外键支撑索引）而实体注解还没补齐，一次 checkTable 就把它们删掉是不可逆的破坏。
+     * 需要严格收敛时显式打开；打开后外键支撑索引仍会被跳过（否则 ALTER 会因 1553 整体失败）。
      * </p>
      */
-    private boolean dropRedundantIndexes = true;
+    private boolean dropRedundantIndexes = false;
 
     /** 由池配置自建连接池：适用于独立使用；已持有 DataSource 时请用下面的重载，避免重复建池 */
     public JdbcTemplate(HikariConfig config) {
@@ -163,7 +165,7 @@ public class JdbcTemplate extends DbTemplate {
 
                 for (TableInfo tableInfo : tables) {
                     String tableName = tableInfo.getTableName();
-                    cache.put(tableName.toLowerCase(), readTable(qr, catalog, tableName, tableInfo));
+                    cache.put(tableName.toLowerCase(Locale.ROOT), readTable(qr, catalog, tableName, tableInfo));
                 }
             }
 
@@ -191,7 +193,7 @@ public class JdbcTemplate extends DbTemplate {
 
         LinkedHashMap<String, ColumnInfo> columnMap = new LinkedHashMap<>();
         for (ColumnInfo col : columns) {
-            columnMap.put(col.getColumnName().toLowerCase(), col);
+            columnMap.put(col.getColumnName().toLowerCase(Locale.ROOT), col);
         }
         target.setColumns(columnMap);
         target.setIndexes(indexes);
@@ -336,6 +338,68 @@ public class JdbcTemplate extends DbTemplate {
         return handler.translate(ex, sql, params);
     }
 
+    /**
+     * DDL 语句的语句级超时（秒）。
+     * <p>DDL 等的是元数据锁：默认等待上限在 MySQL 是 {@code lock_wait_timeout}（一年），
+     * 在 PG 是无限等待。启动期同步结构时一旦有长事务占着表，就会把启动线程永久挂住，
+     * 并让之后所有访问该表的查询排队。给每条 DDL 加一个明确上限，失败好过静默卡死。</p>
+     */
+    public static final int DDL_QUERY_TIMEOUT_SECONDS = 30;
+
+    /**
+     * 在<b>独立连接</b>上执行一条 DDL，不加入当前线程事务，并带语句超时。
+     * <p>为什么不复用 {@link QueryRunner}：Runner 会优先绑定线程事务连接，
+     * 而 MySQL 的 DDL 会隐式提交事务——在业务事务里执行 DDL 会把前半段写入提前提交，
+     * 事务的原子性直接失效。DDL 就应该是独立、短命、可超时的操作。</p>
+     *
+     * @param sql 完整 DDL（调用方负责标识符白名单/引号）
+     * @return 受影响行数（DDL 通常为 0）
+     */
+    public int executeDdl(String sql) {
+        return executeDdl(List.of(sql));
+    }
+
+    /**
+     * 在同一个独立连接、同一事务内执行一组 DDL：任何一条失败则整组回滚。
+     * <p>PG 的 DDL 是事务性的，ALTER 与随后的 CREATE INDEX/COMMENT 必须同生共死，
+     * 否则中途失败会留下"列改了、索引没建"的半套结构，下次启动再靠 diff 去猜哪一半生效了。
+     * MySQL 的 DDL 本身不可回滚，这里的 rollback 只对"失败点之前已隐式提交"无能为力，
+     * 但把多条语句收敛到一条连接上仍然是正确做法。</p>
+     *
+     * @param sqls 按顺序执行的 DDL（空集合直接返回 0）
+     * @return 累计受影响行数
+     */
+    public int executeDdl(List<String> sqls) {
+        if (sqls == null || sqls.isEmpty()) return 0;
+        try (Connection conn = dataSource.getConnection()) {
+            boolean previousAutoCommit = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            try {
+                int affected = 0;
+                for (String sql : sqls) {
+                    try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+                        stmt.setQueryTimeout(DDL_QUERY_TIMEOUT_SECONDS);
+                        affected += stmt.executeUpdate();
+                    }
+                }
+                conn.commit();
+                return affected;
+            } catch (SQLException e) {
+                try {
+                    conn.rollback();
+                } catch (SQLException rollbackEx) {
+                    e.addSuppressed(rollbackEx);
+                }
+                throw translateException(e, sqls.get(0), null);
+            } finally {
+                // 归还连接前恢复自动提交：池里的连接会被下一个线程复用
+                conn.setAutoCommit(previousAutoCommit);
+            }
+        } catch (SQLException e) {
+            throw translateException(e, sqls.get(0), null);
+        }
+    }
+
     /** 新建实体操作器（独立模式，用完 close） */
     public BeanRunner beanRunner() {
         return new BeanRunner(this);
@@ -343,10 +407,8 @@ public class JdbcTemplate extends DbTemplate {
 
     /**
      * 创建带缓存的 BeanRunner（默认 Caffeine 本地缓存 + 延迟刷盘模式）
-     * <p>单例复用即可，线程安全。</p>
-     * <p>提示：Write-Behind 的脏表是<b>进程全局</b>的，不是每个实例一份；
-     * 反复 new 出来的多个 CachedBeanRunner 共享同一份待刷数据，
-     * 所以刷盘/统计要在业务层收敛成一个入口，别指望"我这个实例的脏数据"。</p>
+     * <p>建议在业务层收敛成一个实例：Write-Behind 的三张脏表与缓存都是<b>每个实例一份</b>，
+     * 不是进程全局共享。反复 new 会让待刷数据散落在多个实例里，刷盘/统计必须逐个覆盖。</p>
      */
     public CachedBeanRunner cachedBeanRunner() {
         return new CachedBeanRunner(this);
@@ -395,7 +457,7 @@ public class JdbcTemplate extends DbTemplate {
      * @param tableInfo 实体解析得到的表元数据
      */
     public void checkTable(TableInfo tableInfo) {
-        String tableName = tableInfo.getTableName().toLowerCase();
+        String tableName = tableInfo.getTableName().toLowerCase(Locale.ROOT);
         // 整段互斥：并发调用同一模板时，避免对同一张表重复建表/重复 ALTER，也避免刷新缓存与 diff 交叉
         synchronized (tableLock) {
             if (tableCache == null) {

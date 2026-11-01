@@ -87,6 +87,39 @@ class DefaultSqlExceptionHandlerTest {
                 handler.translate(ex("42000", 0, "syntax error near 'SELCT'"), SQL, PARAMS));
     }
 
+    /**
+     * M12 回归：超时类 SQLState 必须翻译成可重试的 QueryTimeoutException。
+     * <p>{@code HYT} 是三位 ODBC 风格类别，按前两位截取只会得到 {@code HY}，
+     * 所以这条特意用 {@code HYT00}/{@code HYT01} 钉住"M12 之前必然落进未知错误"的位置；
+     * {@code 57} 类是标准语句超时。判成不可重试会被批量降级放大成 N 次压库。</p>
+     */
+    @Test
+    void state57AndHytAreTimeouts() {
+        QueryTimeoutException hyt00 = assertInstanceOf(QueryTimeoutException.class,
+                handler.translate(ex("HYT00", 0, "Timeout expired"), SQL, PARAMS));
+        assertTrue(hyt00.isRetryable(), "超时是可重试的瞬时故障");
+
+        assertInstanceOf(QueryTimeoutException.class,
+                handler.translate(ex("HYT01", 0, "Connection timeout expired"), SQL, PARAMS));
+        assertInstanceOf(QueryTimeoutException.class,
+                handler.translate(ex("57014", 0, "canceling statement due to statement timeout"), SQL, PARAMS));
+    }
+
+    /**
+     * SQLState 为空串/单字符时不得抛 StringIndexOutOfBounds：截类别码前必须判长度，
+     * 否则驱动给出不规范状态码时，翻译层自己成为故障点。
+     */
+    @Test
+    void shortOrEmptyStateDoesNotCrash() {
+        assertInstanceOf(UncategorizedDataAccessException.class,
+                handler.translate(ex("", 0, "something unusual happened"), SQL, PARAMS));
+        assertInstanceOf(UncategorizedDataAccessException.class,
+                handler.translate(ex("0", 0, "something unusual happened"), SQL, PARAMS));
+        // 单字符状态码仍要走关键字兜底
+        assertInstanceOf(QueryTimeoutException.class,
+                handler.translate(ex("H", 0, "query timeout of 5000ms exceeded"), SQL, PARAMS));
+    }
+
     // ===== 关键字兜底（无 SQLState） =====
 
     @Test

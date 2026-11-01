@@ -4,6 +4,7 @@ import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONWriter;
 import com.wxdgaming.batis.annotation.Column;
 import com.wxdgaming.batis.annotation.Id;
+import com.wxdgaming.batis.annotation.Index;
 import com.wxdgaming.batis.annotation.Table;
 import com.wxdgaming.batis.model.ColumnInfo;
 import com.wxdgaming.batis.model.IndexInfo;
@@ -375,5 +376,93 @@ class EntityParserTest {
         assertEquals("t_player", EntityParser.camelToUnderscore("t_player"));
         assertEquals("ab_test", EntityParser.camelToUnderscore("ABTest"));
         assertEquals("url_value", EntityParser.camelToUnderscore("URLValue"));
+    }
+
+    // ==================== Lombok 布尔字段命名兼容 ====================
+
+    /**
+     * Lombok 对 {@code boolean isXxx} 字段生成的是 {@code isXxx()} 与 {@code setXxx(...)}
+     * （不是 {@code isIsXxx}/{@code setIsXxx}）。缺少兼容时这类实体会被判定"没有 getter/setter"，
+     * 只能退回反射直取字段——功能上未必报错，但会绕开所有基于方法的访问路径（如主键提取）。
+     */
+    @Test
+    void testLombokBoolFieldAccessorsAreFound() {
+        TableInfo info = EntityParser.parse(LombokBooleanEntity.class);
+        ColumnInfo flag = info.getColumn("is_enabled");
+
+        assertNotNull(flag);
+        assertNotNull(flag.getReadMethod(), "boolean isXxx 字段应能找到 isXxx() 读方法");
+        assertEquals("isEnabled", flag.getReadMethod().getName());
+        assertNotNull(flag.getWriteMethod(), "应能找到 Lombok 生成的 setXxx(...) 写方法");
+        assertEquals("setEnabled", flag.getWriteMethod().getName());
+        assertEquals(SqlType.BOOLEAN, flag.getSqlType());
+    }
+
+    @Table(name = "t_lombok_bool")
+    public static class LombokBooleanEntity {
+        @Id
+        private long id;
+        private boolean isEnabled;
+
+        public long getId() { return id; }
+        public void setId(long id) { this.id = id; }
+        public boolean isEnabled() { return isEnabled; }
+        public void setEnabled(boolean enabled) { this.isEnabled = enabled; }
+    }
+
+    // ==================== 索引配置的解析期校验 ====================
+
+    @Test
+    void testTableIndexWithoutColumnListFailsFast() {
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> EntityParser.parse(TableIndexBlankEntity.class));
+        assertTrue(ex.getMessage().contains("columnList"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("t_bad_index"), ex.getMessage());
+    }
+
+    @Table(name = "t_bad_index", indexes = @Index)
+    public static class TableIndexBlankEntity {
+        @Id
+        private long id;
+
+        public long getId() { return id; }
+        public void setId(long id) { this.id = id; }
+    }
+
+    @Test
+    void testTableIndexWithEmptyColumnSegmentFailsFast() {
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> EntityParser.parse(TableIndexEmptySegmentEntity.class));
+        assertTrue(ex.getMessage().contains("空列名"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("a,,b"), ex.getMessage());
+    }
+
+    @Table(name = "t_bad_index2", indexes = @Index(columnList = "a,,b"))
+    public static class TableIndexEmptySegmentEntity {
+        @Id
+        private long id;
+
+        public long getId() { return id; }
+        public void setId(long id) { this.id = id; }
+    }
+
+    @Test
+    void testFieldIndexWithEmptyColumnSegmentFailsFast() {
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> EntityParser.parse(FieldIndexEmptySegmentEntity.class));
+        assertTrue(ex.getMessage().contains("空列名"), ex.getMessage());
+    }
+
+    @Table(name = "t_bad_index3")
+    public static class FieldIndexEmptySegmentEntity {
+        @Id
+        private long id;
+        @Index(columnList = "name,")
+        private String name;
+
+        public long getId() { return id; }
+        public void setId(long id) { this.id = id; }
+        public String getName() { return name; }
+        public void setName(String name) { this.name = name; }
     }
 }

@@ -198,9 +198,13 @@ public class TransactionTemplate {
             if (holder.isRollbackOnly()) {
                 rollback(holder);
                 completion[0] = TransactionSynchronization.STATUS_ROLLED_BACK;
-            } else {
-                commit(holder, completion);
+                // 不能把 result 返回给调用方：事务已整体回滚，正常返回值会让调用方误判"已提交成功"。
+                // 交付语义是"要么提交并返回结果，要么明确失败"，静默回滚属于最坏的一种（S2）。
+                throw new IllegalTransactionStateException(
+                        "事务被标记为 rollbackOnly（内层事务或业务代码调用了 setRollbackOnly），已整体回滚，"
+                                + "不返回正常结果");
             }
+            commit(holder, completion);
             return result;
         } catch (Throwable ex) {
             // commit() 内部已按需回滚过（completion 已判定），只有"回调自己抛异常"这一种情形要在这里补回滚
@@ -262,9 +266,9 @@ public class TransactionTemplate {
      * 否则归还时无从恢复；设置隔离级别/readOnly 失败要立刻关掉连接再抛错，
      * 因为一条"声称只读但其实没设上"的连接继续用下去，比直接失败危险得多。
      * </p>
-     * <p>隔离级别是<b>连接级</b>设置：池化连接会被复用，而这里只在 begin 时设置、
-     * 不在 release 时恢复（{@code release} 只恢复 autoCommit 与 readOnly），
-     * 因此显式指定 isolation 时，同一池里其他事务可能继承这个级别。有跨事务级别要求请单独建池。</p>
+     * <p>隔离级别是<b>连接级</b>设置：池化连接会被复用，所以这里先把原值读进 holder，
+     * 再由 {@link #release} 恢复——否则显式指定 isolation 的事务结束后，
+     * 同池里下一个借到这条连接的事务会继承这个级别。</p>
      */
     private ConnectionHolder doBegin() {
         Connection conn;
@@ -274,10 +278,14 @@ public class TransactionTemplate {
             throw new CannotGetJdbcConnectionException("获取事务连接失败: " + e.getMessage(), e);
         }
         boolean prevAutoCommit;
+        Integer prevIsolation = null;
         try {
             prevAutoCommit = conn.getAutoCommit();
             Integer jdbcIsolation = isolation.toJdbcConstant();
-            if (jdbcIsolation != null) conn.setTransactionIsolation(jdbcIsolation);
+            if (jdbcIsolation != null) {
+                prevIsolation = conn.getTransactionIsolation();
+                conn.setTransactionIsolation(jdbcIsolation);
+            }
             if (readOnly) conn.setReadOnly(true);
             conn.setAutoCommit(false);
         } catch (SQLException e) {
@@ -287,7 +295,7 @@ public class TransactionTemplate {
             }
             throw new TransactionStartedException("开启事务失败: " + e.getMessage(), e);
         }
-        ConnectionHolder holder = new ConnectionHolder(conn, prevAutoCommit, readOnly, true);
+        ConnectionHolder holder = new ConnectionHolder(conn, prevAutoCommit, prevIsolation, readOnly, true);
         holder.setQueryTimeoutSeconds(timeoutSeconds);
         log.debug("事务开始: isolation={}, readOnly={}, timeout={}s", isolation, readOnly, timeoutSeconds);
         return holder;
@@ -387,7 +395,8 @@ public class TransactionTemplate {
      * 表现为"数据时隐时现"的诡异故障。恢复失败也只 warn——此时 close() 会让池把它丢弃或重置，
      * 上抛只会盖掉真正的原因。
      * </p>
-     * <p>注意 isolation 不在此恢复（见 {@link #doBegin} 的说明）。</p>
+     * <p>隔离级别同样必须恢复：它也是连接级状态，漏恢复会让同池后续事务继承这次设置的级别
+     * （见 {@link #doBegin}）。放在 autoCommit 恢复之后执行，避免在连接仍处于事务中时切换隔离级别。</p>
      */
     private void release(ConnectionHolder holder) {
         Connection conn = holder.getConnection();
@@ -397,6 +406,9 @@ public class TransactionTemplate {
             // 只能跳过恢复直接 close，让池丢弃/重置这条连接
             if (!holder.isRollbackFailed()) {
                 conn.setAutoCommit(holder.getPreviousAutoCommit());
+                if (holder.getPreviousIsolation() != null) {
+                    conn.setTransactionIsolation(holder.getPreviousIsolation());
+                }
             }
         } catch (SQLException e) {
             log.warn("归还事务连接前恢复状态失败: {}", e.getMessage());

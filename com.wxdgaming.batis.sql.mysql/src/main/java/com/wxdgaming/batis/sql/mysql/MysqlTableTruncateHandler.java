@@ -6,6 +6,8 @@ import com.wxdgaming.batis.sql.QueryRunner;
 import com.wxdgaming.batis.sql.TableTruncateHandler;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.Locale;
+
 /**
  * MySQL 截断表处理器
  * <p>只清空数据、保留表结构；与 {@link MysqlTableDropHandler}（结构一并删除）相对。</p>
@@ -24,7 +26,7 @@ public class MysqlTableTruncateHandler implements TableTruncateHandler {
      */
     @Override
     public void doAction(JdbcTemplate jdbcTemplate, TableInfo tableInfo) {
-        String sql = "TRUNCATE TABLE `" + tableInfo.getTableName().toLowerCase() + "`;";
+        String sql = "TRUNCATE TABLE `" + tableInfo.getTableName().toLowerCase(Locale.ROOT) + "`;";
         log.debug("截断表sql:\n{}", sql);
         try (QueryRunner queryRunner = new QueryRunner(jdbcTemplate)) {
             queryRunner.execute(sql);

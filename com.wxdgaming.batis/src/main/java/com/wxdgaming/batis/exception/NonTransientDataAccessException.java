@@ -22,6 +22,7 @@ package com.wxdgaming.batis.exception;
  * @version 2026-10-09
  **/
 public class NonTransientDataAccessException extends DataAccessException {
+    private static final long serialVersionUID = 1L;
 
     /** 纯描述型：框架本地校验失败，无 SQL/驱动上下文 */
     public NonTransientDataAccessException(String message) {

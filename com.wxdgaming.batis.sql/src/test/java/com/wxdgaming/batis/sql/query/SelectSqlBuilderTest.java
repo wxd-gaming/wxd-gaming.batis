@@ -124,7 +124,8 @@ class SelectSqlBuilderTest {
     @Test
     void rawFragmentPassesThrough() {
         SelectSqlBuilder.Plan plan = render(Criteria.raw("`status` + ? > 0", 5));
-        assertEquals("SELECT * FROM `t_dsl_test` WHERE `status` + ? > 0", plan.sql());
+        // RAW 片段整体加括号：否则与 AND/OR 组合时优先级会改变语义
+        assertEquals("SELECT * FROM `t_dsl_test` WHERE (`status` + ? > 0)", plan.sql());
         assertArrayEquals(new Object[]{5}, plan.params());
     }
 

@@ -106,10 +106,15 @@ public class MysqlDbMetaHandler implements DbMetaHandler {
     /**
      * 索引查询：information_schema.STATISTICS 每个索引列一行，按 INDEX_NAME、SEQ_IN_INDEX 排序，
      * 便于 handler 依序把同一索引的多个列聚合成有序列表。
+     * <p>除名字/列/唯一性外还取 {@code SUB_PART}（前缀长度）、{@code INDEX_TYPE}（BTREE/FULLTEXT/…）、
+     * {@code COLLATION}（A=升序，D=降序）：这三项是实体注解表达不了的库端形态。
+     * 不读它们时，"库里的 idx(name(10))"与"实体声明的 idx(name)"会被判成一致，
+     * 框架永远建不上全列索引，也永远发现不了索引被 DBA 手工改过。表达式索引则通过
+     * {@code COLUMN_NAME IS NULL} 识别（函数索引的 STATISTICS 行没有列名），不需要额外查询列。</p>
      */
     @Override
     public String indexListSql() {
-        return "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE, SEQ_IN_INDEX "
+        return "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE, SEQ_IN_INDEX, SUB_PART, INDEX_TYPE, COLLATION "
                 + "FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? "
                 + "ORDER BY INDEX_NAME, SEQ_IN_INDEX";
     }
@@ -118,6 +123,8 @@ public class MysqlDbMetaHandler implements DbMetaHandler {
      * 索引 ResultSet → IndexInfo 列表：STATISTICS 一列一行，用 LinkedHashMap 按索引名分组并保留列顺序。
      * <p>主键索引（PRIMARY）在此跳过：它已由 columnListHandler 通过 COLUMN_KEY='PRI' 表达，
      * 若这里再收一遍会让 diff 把主键误当成普通索引处理。</p>
+     * <p>前缀长度/降序/索引类型逐列收集；{@code COLUMN_NAME} 为 null 的行标记为表达式索引
+     * （函数索引没有列名），消费方据此跳过自动重建，避免把 {@code ((lower(name)))} 覆盖成普通列索引。</p>
      */
     @Override
     public ResultSetHandler<List<IndexInfo>> indexListHandler() {
@@ -132,9 +139,21 @@ public class MysqlDbMetaHandler implements DbMetaHandler {
                     IndexInfo i = new IndexInfo();
                     i.setName(indexName);
                     i.setColumns(new ArrayList<>());
+                    i.setPrefixLengths(new ArrayList<>());
+                    i.setDescending(new ArrayList<>());
                     return i;
                 });
-                info.getColumns().add(rs.getString("COLUMN_NAME"));
+                String columnName = rs.getString("COLUMN_NAME");
+                info.getColumns().add(columnName);
+                if (columnName == null) {
+                    info.setExpressionIndex(true);
+                }
+                // SUB_PART 为 NULL 表示整列参与索引，归一成 0 便于逐位比较
+                int prefix = rs.getInt("SUB_PART");
+                info.getPrefixLengths().add(rs.wasNull() ? 0 : prefix);
+                // COLLATION：A=升序，D=降序；FULLTEXT 等类型可能为 NULL，按升序处理
+                info.getDescending().add("D".equalsIgnoreCase(rs.getString("COLLATION")));
+                info.setIndexType(rs.getString("INDEX_TYPE"));
                 // NON_UNIQUE = 0 表示唯一索引，1 表示非唯一
                 info.setUnique(rs.getInt("NON_UNIQUE") == 0);
             }

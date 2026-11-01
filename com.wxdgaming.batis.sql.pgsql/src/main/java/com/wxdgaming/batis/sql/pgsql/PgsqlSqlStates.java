@@ -70,6 +70,15 @@ public final class PgsqlSqlStates {
     /** query_canceled：语句超时被取消 */
     public static final String QUERY_CANCELED = "57014";
 
+    // ===== 事务状态 =====
+    /**
+     * in_failed_sql_transaction：事务里前一条语句已失败，当前事务进入 aborted 状态，
+     * 此后的每条语句都会立刻以它失败，直到 ROLLBACK。
+     * <p>必须单独映射：默认兜底的类别前缀规则认不出 25 类，会归成"无法分类"，
+     * 而它真正要传达的信息是"重试这条语句永远失败，必须回滚整个事务重来"。</p>
+     */
+    public static final String IN_FAILED_SQL_TRANSACTION = "25P02";
+
     private PgsqlSqlStates() {
     }
 }

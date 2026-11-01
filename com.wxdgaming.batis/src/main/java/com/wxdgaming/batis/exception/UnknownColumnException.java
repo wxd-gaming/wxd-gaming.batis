@@ -26,6 +26,7 @@ package com.wxdgaming.batis.exception;
  * @version 2026-10-09
  **/
 public class UnknownColumnException extends BadSqlGrammarException {
+    private static final long serialVersionUID = 1L;
 
     /** 本地校验失败专用：没有 SQLException 可包装，故显式传入空的 cause */
     public UnknownColumnException(String message) {

@@ -265,6 +265,9 @@ public class CachedBeanRunner {
                 // 此时它还是 #pending:N 临时 key，直接用它会让 queryById(真实主键) 永远未命中
                 String realKey = realKeyAfterWrite(key, bean);
                 cache.put(realKey, bean);
+                // 行已落库：同 key 的脏插入/脏更新/脏删除都过期了。不清就会在下一轮刷盘
+                // 再 INSERT 一次（重复行或主键冲突），或把刚插入的行又 DELETE 掉（S3/S4）。
+                clearDirtyAfterWrite(bean, key, realKey);
                 invalidateCacheOnRollback(realKey);
                 log.debug("立即插入+缓存: {}", realKey);
                 return genId;
@@ -322,9 +325,9 @@ public class CachedBeanRunner {
                 if (rows > 0) {
                     cache.put(realKey, bean);
                 }
-                // 已经落库，两张待写表里的同 key 条目都不再需要
-                dirtyUpdates.remove(key);
-                dirtyInserts.remove(key);
+                // 已经落库，同 key 的旧脏标记不再需要。只摘"仍是本次实例"的条目：
+                // 写库期间别的线程可能已放入更新的版本，无条件 remove 会把那份新意图一起抹掉（M1）。
+                clearDirtyAfterWrite(bean, key, realKey);
                 invalidateCacheOnRollback(realKey);
                 log.debug("立即更新+刷新缓存: {}, rows={}", realKey, rows);
                 return rows;
@@ -372,9 +375,7 @@ public class CachedBeanRunner {
                 String realKey = realKeyAfterWrite(key, bean);
                 // 立即删除不写 Tombstone：DB 已经是真相，回源本来就查不到
                 cache.remove(realKey);
-                dirtyInserts.remove(key);
-                dirtyUpdates.remove(key);
-                dirtyDeletes.remove(key);
+                clearDirtyAfterWrite(bean, key, realKey);
                 invalidateCacheOnRollback(realKey);
                 log.debug("立即删除+删缓存: {}, rows={}", realKey, rows);
                 return rows;
@@ -384,7 +385,9 @@ public class CachedBeanRunner {
             dirtyDeletes.put(key, bean);
             dirtyInserts.remove(key);
             dirtyUpdates.remove(key);
-            pendingKeys.remove(bean);
+            // 刻意保留 pendingKeys 映射：同一实例再次 insert 时会复用这个临时 key，
+            // 从而让 insertBean 的"以 insert 为准"合并规则能清掉这条删除标记（S4）。
+            // 映射在刷盘 DELETE 成功后由 releasePendingKey / pendingKeys.remove 回收。
             log.debug("延迟删除（Tombstone）: {}", key);
             return -1;
         }
@@ -421,6 +424,7 @@ public class CachedBeanRunner {
         int insCount = 0, insAff = 0;
         int updCount = 0, updAff = 0;
         int delCount = 0, delAff = 0;
+        List<Throwable> errors = new ArrayList<>();
 
         Object insertBean = dirtyInserts.remove(key);
         Object updateBean = dirtyUpdates.remove(key);
@@ -429,36 +433,56 @@ public class CachedBeanRunner {
         registerTxFlushCompensation(
                 singleSnapshot(key, insertBean), singleSnapshot(key, updateBean), singleSnapshot(key, deleteBean));
 
-        if (insertBean != null) {
-            insCount = 1;
-            try (BeanRunner runner = jdbcTemplate.beanRunner()) {
-                runner.insertBean(insertBean);
-                // 主键已回写：缓存条目迁到正式 key，否则 queryById 读不到刚写的这条
-                migrateCacheEntries(List.of(insertBean));
-                insAff = 1;
+        boolean insertDone = insertBean == null;
+        boolean updateDone = updateBean == null;
+        boolean deleteDone = deleteBean == null;
+        try {
+            if (insertBean != null) {
+                insCount = 1;
+                try (BeanRunner runner = jdbcTemplate.beanRunner()) {
+                    runner.insertBean(insertBean);
+                    // 主键已回写：缓存条目迁到正式 key，否则 queryById 读不到刚写的这条
+                    migrateCacheEntries(List.of(insertBean));
+                    insAff = 1;
+                }
+                insertDone = true;
             }
+
+            if (updateBean != null) {
+                updCount = 1;
+                try (BeanRunner runner = jdbcTemplate.beanRunner()) {
+                    updAff = runner.updateBean(updateBean);
+                    releasePendingKey(updateBean);
+                }
+                updateDone = true;
+            }
+
+            if (deleteBean != null) {
+                delCount = 1;
+                try (BeanRunner runner = jdbcTemplate.beanRunner()) {
+                    delAff = runner.deleteBean(deleteBean);
+                }
+                cache.remove(key);
+                // 删除时用的是临时 key，刷盘后主键已回写，把 Tombstone 迁到正式 key 上继续挡回源
+                relocatePendingTombstone(deleteBean, key);
+                pendingKeys.remove(deleteBean);
+                deleteDone = true;
+            }
+        } catch (RuntimeException e) {
+            // 本方法先摘标记再执行：抛异常时未完成的标记必须放回，否则这批改动永久丢失
+            if (!insertDone) restoreInto(dirtyInserts, singleSnapshot(key, insertBean));
+            if (!updateDone) restoreInto(dirtyUpdates, singleSnapshot(key, updateBean));
+            if (!deleteDone && deleteBean != null
+                    && dirtyDeletes.putIfAbsent(key, deleteBean) == null
+                    && cache.getIfPresent(key) == null) {
+                cache.put(key, TOMBSTONE);
+            }
+            errors.add(e);
+            log.error("单条刷盘失败，已放回脏表: key={}, {}", key, e.getMessage(), e);
+            throw e;
         }
 
-        if (updateBean != null) {
-            updCount = 1;
-            try (BeanRunner runner = jdbcTemplate.beanRunner()) {
-                updAff = runner.updateBean(updateBean);
-                releasePendingKey(updateBean);
-            }
-        }
-
-        if (deleteBean != null) {
-            delCount = 1;
-            try (BeanRunner runner = jdbcTemplate.beanRunner()) {
-                delAff = runner.deleteBean(deleteBean);
-            }
-            cache.remove(key);
-            // 删除时用的是临时 key，刷盘后主键已回写，把 Tombstone 迁到正式 key 上继续挡回源
-            relocatePendingTombstone(deleteBean, key);
-            pendingKeys.remove(deleteBean);
-        }
-
-        return new FlushResult(insCount, updCount, delCount, insAff, updAff, delAff);
+        return new FlushResult(insCount, updCount, delCount, insAff, updAff, delAff, errors);
     }
 
     /** 构造单条目快照 Map（null 值返回空 Map） */
@@ -502,6 +526,8 @@ public class CachedBeanRunner {
         Map<Class<?>, Map<String, Object>> deleteGroups = groupByClass(deleteSnap);
 
         int insertAffected = 0, updateAffected = 0, deleteAffected = 0;
+        // 失败不能再"只打日志"：异常必须随 FlushResult 交回调用方，否则"部分落库"与"全部成功"无法区分
+        List<Throwable> errors = new ArrayList<>();
 
         // 按分组批量 INSERT
         for (Map<String, Object> group : insertGroups.values()) {
@@ -516,12 +542,17 @@ public class CachedBeanRunner {
                 migrateCacheEntries(beans);
                 releasePendingKeys(beans);
                 // 非事务下失败条目必须放回脏表，否则永久丢失（事务内由补偿兜底）
+                // 非事务下失败条目必须放回脏表，否则永久丢失；事务内同样放回——
+                // afterCompletion 的补偿只在该事务回滚时才触发，事务若提交（MySQL 语句失败不毒化事务）
+                // 这批被摘走的数据就再也没人写了（S1）。
                 requeueFailed(dirtyInserts, group, failedBeans(objectBatchResult));
+                recordBatchFailures(errors, "INSERT", objectBatchResult);
                 log.info("批量刷盘 INSERT {}: {} 条, 影响 {} 行",
                         beans.getFirst().getClass().getSimpleName(), beans.size(), affected);
             } catch (Exception e) {
-                log.warn("批量刷盘 INSERT 失败，放回脏表: {}", e.getMessage());
+                log.error("批量刷盘 INSERT 失败，已放回脏表: {}", e.getMessage(), e);
                 requeueFailed(dirtyInserts, group, beans);
+                errors.add(e);
             }
         }
 
@@ -536,11 +567,13 @@ public class CachedBeanRunner {
                 updateAffected += (int) affected;
                 releasePendingKeys(beans);
                 requeueFailed(dirtyUpdates, group, failedBeans(objectBatchResult));
+                recordBatchFailures(errors, "UPDATE", objectBatchResult);
                 log.info("批量刷盘 UPDATE {}: {} 条, 影响 {} 行",
                         beans.getFirst().getClass().getSimpleName(), beans.size(), affected);
             } catch (Exception e) {
-                log.warn("批量刷盘 UPDATE 失败，放回脏表: {}", e.getMessage());
+                log.error("批量刷盘 UPDATE 失败，已放回脏表: {}", e.getMessage(), e);
                 requeueFailed(dirtyUpdates, group, beans);
+                errors.add(e);
             }
         }
 
@@ -562,15 +595,29 @@ public class CachedBeanRunner {
                 log.info("批量刷盘 DELETE {}: {} 条, 影响 {} 行",
                         beans.getFirst().getClass().getSimpleName(), beans.size(), sum);
             } catch (Exception e) {
-                log.warn("批量刷盘 DELETE 失败，放回脏表: {}", e.getMessage());
+                log.error("批量刷盘 DELETE 失败，已放回脏表: {}", e.getMessage(), e);
                 requeueDeleted(dirtyDeletes, group, beans);
+                errors.add(e);
             }
         }
 
         return new FlushResult(
                 insertSnap.size(), updateSnap.size(), deleteSnap.size(),
-                insertAffected, updateAffected, deleteAffected
+                insertAffected, updateAffected, deleteAffected, errors
         );
+    }
+
+    /** 把批量结果里的失败原因收进 FlushResult 并打 ERROR：失败条目已由 requeue 系列方法放回脏表 */
+    private static void recordBatchFailures(List<Throwable> errors, String phase, BatchResult<?> result) {
+        if (!result.hasFailures()) return;
+        List<Throwable> causes = new ArrayList<>(result.getErrorCount());
+        for (BatchResult.FailureDetail failure : result.getFailures()) {
+            if (failure.getCause() != null) {
+                causes.add(failure.getCause());
+            }
+        }
+        log.error("批量刷盘 {} 有 {} 条失败，已放回脏表: {}", phase, result.getErrorCount(), causes);
+        errors.addAll(causes);
     }
 
     // ==================== 淘汰回调（数据一致性兜底） ====================
@@ -793,19 +840,25 @@ public class CachedBeanRunner {
     }
 
     /**
-     * 主键缺失判定：null、或数值 0（原始类型 long/int 未回写时的哨兵，自增主键从 1 起）、或复合主键各分量均缺失。
+     * 主键缺失判定：null、数值 0（原始类型 long/int 未回写时的哨兵，自增主键从 1 起）、
+     * 或复合主键<b>任一</b>分量缺失。
      * <p>把 0 也算"缺失"是针对基本类型字段的必要妥协：{@code long id} 没回写时读出来就是 0，
      * 无法与 null 区分。副作用是"主键真为 0"的行会被当成未生成而走临时 key——
      * 业务若显式使用 0 作主键，请用包装类型字段。</p>
+     * <p>复合主键要求全部分量就位才算正式 Key：旧实现"有任一分量非空即算已生成"，
+     * 会让 {@code [1, null]} 渲染出带 {@code null} 段的 key，不同 bean 的缺失分量会撞到同一个字符串上，
+     * 进而把临时 key 映射、脏表条目和缓存条目互相错配。缺一个分量就按实例身份用临时 key，
+     * 与单主键未生成时的处理保持一致。</p>
      */
     private static boolean pkMissing(Object pk) {
         if (pk == null) return true;
         if (pk instanceof Number n) return n.longValue() == 0L;
         if (pk instanceof Object[] arr) {
+            if (arr.length == 0) return true;
             for (Object component : arr) {
-                if (!pkMissing(component)) return false;
+                if (pkMissing(component)) return true;
             }
-            return true;
+            return false;
         }
         return false;
     }
@@ -886,25 +939,52 @@ public class CachedBeanRunner {
     }
 
     /**
+     * 立即写落库后清理同 key 的脏标记。
+     * <p>只摘"值仍是本次写入实例"的插入/更新条目：写库期间别的线程可能已放入更新的版本，
+     * 无条件按 key 删除会把那份新意图一起抹掉。删除标记则按 key 无条件清——
+     * 行已经落库（或已经删除），残留的删除标记只会让下一轮刷盘误删刚写进去的新行。</p>
+     * <p>临时 key 与正式 key 都要覆盖：IDENTITY 主键在写库前后 key 不同，
+     * 只清一个会留下另一个的幽灵标记。</p>
+     */
+    private void clearDirtyAfterWrite(Object bean, String keyBefore, String keyAfter) {
+        for (String key : new String[]{keyBefore, keyAfter}) {
+            if (key == null) continue;
+            dirtyInserts.computeIfPresent(key, (k, v) -> v == bean ? null : v);
+            dirtyUpdates.computeIfPresent(key, (k, v) -> v == bean ? null : v);
+            dirtyDeletes.remove(key);
+        }
+    }
+
+    /**
      * 按前缀摘取脏数据（key → bean），并从脏表移除；返回快照供事务回滚补偿。
      * <p>
-     * 摘取必须是"原子摘取"：{@code map.remove(key, value)} 只在当前映射仍然是读到的那个值时才删除。
-     * 早期实现用迭代器的 {@code remove()}（按 key 无条件删除），在"读到 v1 → 删 key"之间若别的线程
-     * 写入新版本 v2，被删掉的就是 v2：v2 既不在脏表里、也没进 DB，而调用方已经收到"已受理"，
-     * 这次更新永久丢失。
+     * 摘取必须是"原子且按实例身份"的：{@code map.remove(key, value)} 虽然也是原子的，
+     * 但它用 {@code equals} 比较值——两个 {@code @EqualsAndHashCode(of="id")} 的实体在业务上相等，
+     * 于"读到 v1 → 删 key"之间写入的 v2 会被当成 v1 一起删掉，造成更新丢失。
+     * 这里改用 {@code computeIfPresent} 内的引用比较：只有当前映射仍是读到的那个实例才摘除。
      * </p>
      * <p>返回 LinkedHashMap 保留脏表遍历顺序——刷盘顺序不影响正确性，但稳定的顺序让日志可复现。</p>
      */
     private Map<String, Object> takeByPrefix(ConcurrentHashMap<String, Object> map, String keyPrefix) {
         Map<String, Object> taken = new LinkedHashMap<>();
-        for (Map.Entry<String, Object> entry : map.entrySet()) {
-            String key = entry.getKey();
+        for (String key : map.keySet()) {
             if (keyPrefix != null && !key.startsWith(keyPrefix)) {
                 continue;
             }
-            Object value = entry.getValue();
-            if (map.remove(key, value)) {
-                taken.put(key, value);
+            Object snapshot = map.get(key);
+            if (snapshot == null) {
+                continue;
+            }
+            boolean[] removed = {false};
+            map.computeIfPresent(key, (k, current) -> {
+                if (current == snapshot) {
+                    removed[0] = true;
+                    return null;
+                }
+                return current;
+            });
+            if (removed[0]) {
+                taken.put(key, snapshot);
             }
         }
         return taken;
@@ -1058,15 +1138,16 @@ public class CachedBeanRunner {
     }
 
     /**
-     * 非事务刷盘失败时，把未落库的插入/更新实体放回脏表（按分组快照的原始 key，不重算）。
-     * <p>事务内直接返回：那种情况由 {@link #registerTxFlushCompensation} 在 afterCompletion 兜底，
-     * 这里再放回会与补偿重复、且放回时机早于回滚判定，语义矛盾。</p>
+     * 刷盘失败时把未落库的插入/更新实体放回脏表（按分组快照的原始 key，不重算）。
+     * <p>事务内也照常放回：{@link #registerTxFlushCompensation} 只在事务<em>回滚</em>时恢复整份快照，
+     * 而 MySQL 下单条语句失败不会毒化事务，随后事务可能正常提交——此时被摘走的失败条目
+     * 若不在这里放回，就永久消失了。回滚场景下与补偿重复放回也无害：
+     * {@code restoreInto} 用 {@code putIfAbsent}，不会覆盖任何新值。</p>
      * <p>{@code restoreInto} 内部用 putIfAbsent，不覆盖刷盘期间其他线程写入的更新版本；
      * 缓存里没有该条目时一并回填，保持"读仍见未落库改动"。</p>
      */
     private void requeueFailed(ConcurrentHashMap<String, Object> dirtyMap,
                                Map<String, Object> group, Collection<Object> failedBeans) {
-        if (txActive()) return;
         Set<Object> failed = Collections.newSetFromMap(new IdentityHashMap<>());
         failed.addAll(failedBeans);
         for (Map.Entry<String, Object> entry : group.entrySet()) {
@@ -1077,13 +1158,13 @@ public class CachedBeanRunner {
     }
 
     /**
-     * 非事务刷盘失败时，把未落库的删除实体放回脏表，并补回 Tombstone。
+     * 刷盘失败时把未落库的删除实体放回脏表，并补回 Tombstone。
      * <p>与 {@link #requeueFailed} 的差别只在缓存回填物：删除失败要补 Tombstone 而不是实体本身，
      * 否则下一次 {@link #queryById} 会回源 DB 把刚删掉的行读回来（缓存穿透）。</p>
+     * <p>同样不再区分事务内外，理由见 {@link #requeueFailed}。</p>
      */
     private void requeueDeleted(ConcurrentHashMap<String, Object> dirtyMap,
                                 Map<String, Object> group, Collection<Object> failedBeans) {
-        if (txActive()) return;
         Set<Object> failed = Collections.newSetFromMap(new IdentityHashMap<>());
         failed.addAll(failedBeans);
         for (Map.Entry<String, Object> entry : group.entrySet()) {

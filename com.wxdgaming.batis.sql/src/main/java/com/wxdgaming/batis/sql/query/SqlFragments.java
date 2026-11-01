@@ -32,6 +32,19 @@ public final class SqlFragments {
                     + "|\\binformation_schema\\b|\\bgrant\\b|\\binto\\s+(out|dump)file\\b",
             Pattern.CASE_INSENSITIVE);
 
+    /**
+     * 裸字面量：独立出现的数字与布尔常量。
+     * <p>WHY 连数字也拦：只拒绝引号的规则挡不住 {@code age = 0 OR 1=1} 这种纯数字恒真条件——
+     * 它不含引号、不含黑名单关键字、占位符数量也"对得上"（0 个），照样把条件放宽成全表。
+     * 既然这条废弃路径的规则是"值只能走参数绑定"，那么字符串与数字就应当同一口径：
+     * 宁可误伤 {@code age > 18}（改写成 {@code age > ?} 即可），也不留"数字字面量可拼接"的口子。</p>
+     * <p>前后各加"非标识符字符"断言，避免误伤 {@code col1}/{@code player_2} 这类列名；
+     * 布尔常量同样按词边界判断，{@code is_true} 不会命中。</p>
+     */
+    private static final Pattern BARE_LITERAL = Pattern.compile(
+            "(?<![\\w?])[-+]?\\d+(?:\\.\\d+)?(?![\\w])|\\b(?:true|false)\\b",
+            Pattern.CASE_INSENSITIVE);
+
     private SqlFragments() {
     }
 
@@ -42,11 +55,12 @@ public final class SqlFragments {
      * 用一个语义明确、消息里写清"请改用查询 DSL"的语法错误最容易被排查，也无需为它再扩异常体系。
      * </p>
      * <p>
-     * 校验规则与带参重载<b>完全一致</b>（含"出现字符串字面量一律拒绝"）。之所以强调这一点：
+     * 校验规则与带参重载<b>完全一致</b>（含"出现字符串/数字/布尔字面量一律拒绝"）。之所以强调这一点：
      * 两个重载若各管一套规则，调用方写 {@code guardWhereSection(拼接串)} 就会绕过新校验——
      * 而"拼接串"恰恰是最需要拦的那一种。
      * </p>
      * <p>代价：合法值里含这些特征的字面量（如 {@code remark = 'a--b'}）也会被拒，
+     * 该规则延伸到数字与布尔（{@code age > 18} 需改写为 {@code age > ?}），
      * 属于废弃路径上可接受的误伤——迁移到 DSL 用参数绑定即可绕开。</p>
      *
      * @param whereSection WHERE 子句（不含 WHERE 关键字）；null/空白原样返回（调用方据此走"无条件"分支）
@@ -98,6 +112,14 @@ public final class SqlFragments {
             throw new BadSqlGrammarException(
                     "whereSection 含字符串字面量，请改写成占位符 + 参数的形式"
                             + "（例如 name = ? 然后传参）：把值拼进 SQL 就是注入的入口: " + whereSection,
+                    null, null, 0, null, null);
+        }
+        // 数字/布尔裸字面量同样放行恒真条件：age = 0 OR 1=1 不含任何引号，
+        // 字符串规则和占位符计数都拦不住。规则统一为"值只能走参数绑定"。
+        if (BARE_LITERAL.matcher(whereSection).find()) {
+            throw new BadSqlGrammarException(
+                    "whereSection 含数字或布尔字面量，请改写成占位符 + 参数的形式"
+                            + "（例如 age > ? 然后传参）；裸字面量可构造 1=1 这类恒真条件绕过: " + whereSection,
                     null, null, 0, null, null);
         }
         return whereSection;

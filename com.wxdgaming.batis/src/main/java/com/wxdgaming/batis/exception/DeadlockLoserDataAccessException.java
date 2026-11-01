@@ -24,6 +24,7 @@ package com.wxdgaming.batis.exception;
  * @version 2026-10-09
  **/
 public class DeadlockLoserDataAccessException extends TransientDataAccessException {
+    private static final long serialVersionUID = 1L;
 
     /** 合成/非 SQL 场景，仅消息与 cause */
     public DeadlockLoserDataAccessException(String message, Throwable cause) {

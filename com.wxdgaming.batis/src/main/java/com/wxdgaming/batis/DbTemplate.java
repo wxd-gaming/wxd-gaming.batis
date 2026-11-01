@@ -20,7 +20,8 @@ public class DbTemplate {
 
     /**
      * 数据库操作性能统计（线程安全）。
-     * <p>final 且随模板生命周期常驻：所有实例共享同一份累计指标，reset 才清零。</p>
+     * <p>final 且随模板生命周期常驻：<b>每个模板实例各自持有一份</b>累计指标
+     * （同一实例被多线程共用时计数是共享的），{@code reset} 才清零。</p>
      */
     private final DbStats stats = new DbStats();
 

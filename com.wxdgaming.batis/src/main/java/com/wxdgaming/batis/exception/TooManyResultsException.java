@@ -22,6 +22,7 @@ package com.wxdgaming.batis.exception;
  * @version 2026-10-09
  **/
 public class TooManyResultsException extends NonTransientDataAccessException {
+    private static final long serialVersionUID = 1L;
 
     /** 主用法：消息里带上实体名与触发的 SQL，便于定位是哪条查询的意图不成立 */
     public TooManyResultsException(String message) {

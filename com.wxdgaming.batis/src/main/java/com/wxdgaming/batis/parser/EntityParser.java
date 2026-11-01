@@ -73,7 +73,12 @@ import java.util.stream.Collectors;
  */
 public class EntityParser {
 
-    /** 元数据缓存：同一实体 Class 只解析一次，解析后的 TableInfo 全局共享、视为只读 */
+    /**
+     * 元数据缓存：同一实体 Class 只解析一次，解析后的 TableInfo 全局共享、视为只读。
+     * <p>键是 Class 的<b>强引用</b>，所以自定义类加载器/热部署场景下旧 Class 会被这张表钉住；
+     * 卸载业务类前应调用 {@link #clearAll()}。这里刻意不用弱引用：缓存必须整个进程生命周期稳定命中，
+     * 弱引用会让"只被缓存引用"的实体在与 GC 赛跑时被清掉，表现为随机重复解析与结构比对抖动。</p>
+     */
     private static final Map<Class<?>, TableInfo> CACHE = new ConcurrentHashMap<>();
 
     private EntityParser() {
@@ -397,8 +402,7 @@ public class EntityParser {
                 List<String> idxColumns;
                 String columnList = indexAnn.columnList();
                 if (!columnList.isEmpty()) {
-                    idxColumns = Arrays.stream(columnList.split(","))
-                            .map(String::trim).collect(Collectors.toList());
+                    idxColumns = parseIndexColumns(columnList, tableName);
                 } else {
                     idxColumns = List.of(colInfo.getColumnName());
                 }
@@ -415,8 +419,12 @@ public class EntityParser {
         Table tableAnn = entityClass.getAnnotation(Table.class);
         if (tableAnn != null) {
             for (Index indexAnn : tableAnn.indexes()) {
-                List<String> idxColumns = Arrays.stream(indexAnn.columnList().split(","))
-                        .map(String::trim).collect(Collectors.toList());
+                // 表级索引没有"当前字段"可兜底，留空必须当场失败，否则会生成 "INDEX `x` ()" 这种坏 DDL
+                if (indexAnn.columnList() == null || indexAnn.columnList().isBlank()) {
+                    throw new IllegalArgumentException("表 " + tableName + " 的表级 @Index 未指定 columnList："
+                            + "表级索引没有默认列，请在 @Index(columnList = \"col1,col2\") 中写明列名");
+                }
+                List<String> idxColumns = parseIndexColumns(indexAnn.columnList(), tableName);
                 IndexInfo indexInfo = new IndexInfo();
                 indexInfo.setName(indexName(tableName, indexAnn.unique(), idxColumns));
                 indexInfo.setColumns(idxColumns);
@@ -457,6 +465,24 @@ public class EntityParser {
                 // 按名字典序稳定排序，保证解析结果与建表 DDL 的索引顺序可复现
                 .sorted(Comparator.comparing(IndexInfo::getName))
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * 切分索引列清单并校验：逗号分隔、trim 后不允许空列名。
+     * <p>{@code "a,,b"} 这类笔误若放过，拼出的索引 DDL 会带一个空列（{@code ``}），
+     * 到库端才报语法错误，而且位置离配置处很远。解析期直接失败更好定位。</p>
+     */
+    private static List<String> parseIndexColumns(String columnList, String tableName) {
+        // limit=-1：默认 split 会丢掉尾部空串，"a,b," 这类尾逗号笔误就漏过了校验
+        List<String> cols = Arrays.stream(columnList.split(",", -1))
+                .map(String::trim).collect(Collectors.toList());
+        for (String col : cols) {
+            if (col.isEmpty()) {
+                throw new IllegalArgumentException("表 " + tableName
+                        + " 的 @Index 列清单含空列名: \"" + columnList + "\"");
+            }
+        }
+        return cols;
     }
 
     // ============== 类型推断（仅逻辑类型） ==============
@@ -613,7 +639,12 @@ public class EntityParser {
 
     // ============== getter / setter 方法查找（解析时缓存） ==============
 
-    /** 查找 getter：优先 getXxx，boolean 类型兼容 isXxx */
+    /**
+     * 查找 getter：优先 getXxx，boolean 类型兼容 isXxx。
+     * <p>另一个兼容点是 Lombok 对布尔字段的命名规则：字段本身叫 {@code isRunning} 时，
+     * 生成的 getter 就是 {@code isRunning()}，而不是 {@code isIsRunning()}。
+     * 少了这一步，这类实体会被当成"没有 getter"，读写都只能退回反射直取字段。</p>
+     */
     private static Method findReadMethod(Class<?> entityClass, Field field) {
         String cap = capitalize(field.getName());
         Method m = findMethod(entityClass, "get" + cap);
@@ -622,11 +653,20 @@ public class EntityParser {
         if (t == boolean.class || t == Boolean.class) {
             m = findMethod(entityClass, "is" + cap);
             if (m != null) return m;
+            // Lombok: boolean isRunning → isRunning()（原样同名）
+            if (isPrefixedFieldName(field.getName())) {
+                m = findMethod(entityClass, field.getName());
+                if (m != null) return m;
+            }
         }
         return null;
     }
 
-    /** 查找 setter：兼容字段基本类型与包装类型参数 */
+    /**
+     * 查找 setter：兼容字段基本类型与包装类型参数。
+     * <p>布尔字段 {@code isRunning} 的 setter 由 Lombok 生成为 {@code setRunning}（去掉 {@code is} 前缀），
+     * 所以按 {@code setIsRunning} 找不到时必须再试去前缀的形态。</p>
+     */
     private static Method findWriteMethod(Class<?> entityClass, Field field) {
         String cap = capitalize(field.getName());
         Class<?> t = field.getType();
@@ -635,7 +675,20 @@ public class EntityParser {
             Class<?> alt = t.isPrimitive() ? boxOf(t) : unboxOf(t);
             if (alt != null) m = findMethod(entityClass, "set" + cap, alt);
         }
+        if (m == null && (t == boolean.class || t == Boolean.class) && isPrefixedFieldName(field.getName())) {
+            String stripped = capitalize(field.getName().substring(2));
+            m = findMethod(entityClass, "set" + stripped, t);
+            if (m == null) {
+                Class<?> alt = t.isPrimitive() ? boxOf(t) : unboxOf(t);
+                if (alt != null) m = findMethod(entityClass, "set" + stripped, alt);
+            }
+        }
         return m;
+    }
+
+    /** 布尔字段名是否形如 {@code isXxx}（{@code is} 之后还有内容） */
+    private static boolean isPrefixedFieldName(String name) {
+        return name != null && name.length() > 2 && name.startsWith("is") && Character.isUpperCase(name.charAt(2));
     }
 
     /** 沿父类链查找方法（兼容继承字段与重写） */

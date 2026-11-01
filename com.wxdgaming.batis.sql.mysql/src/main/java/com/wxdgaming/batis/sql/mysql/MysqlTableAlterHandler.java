@@ -10,11 +10,15 @@ import com.wxdgaming.batis.sql.QueryRunner;
 import com.wxdgaming.batis.sql.TableAlterHandler;
 import lombok.extern.slf4j.Slf4j;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * MySQL 表结构变更处理器
@@ -43,9 +47,12 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
         Map<String, TableInfo> cache = jdbcTemplate.getTableCache();
         if (cache == null) return;
 
-        String tableName = entityTable.getTableName().toLowerCase();
+        String tableName = entityTable.getTableName().toLowerCase(Locale.ROOT);
         TableInfo dbTable = cache.get(tableName);
         if (dbTable == null) return;
+        // 库端真实表名（可能含大写）：建表用的是原值，同步也必须用原值，否则
+        // lower_case_table_names=0 的库上 ALTER TABLE 会指向一张不存在的表（H7）
+        String physicalTableName = dbTable.getTableName() != null ? dbTable.getTableName() : tableName;
 
         // 优先用注入的方言渲染器，未注入时回退 MySQL 默认，保证纯 MySQL 场景仍可比对
         ColumnTypeDefHandler typeDef = jdbcTemplate.getColumnTypeDefHandler() != null
@@ -63,7 +70,7 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
 
         // ===== 1. 列对比 =====
         for (ColumnInfo entityCol : entityTable.getColumns().values()) {
-            String colName = entityCol.getColumnName().toLowerCase();
+            String colName = entityCol.getColumnName().toLowerCase(Locale.ROOT);
             ColumnInfo dbCol = dbTable.getColumn(colName);
             if (dbCol == null) {
                 // 新增列
@@ -88,12 +95,12 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
             Map<String, IndexInfo> dbIndexMap = new HashMap<>();
             if (dbIndexes != null) {
                 for (IndexInfo idx : dbIndexes) {
-                    dbIndexMap.put(idx.getName().toLowerCase(), idx);
+                    dbIndexMap.put(idx.getName().toLowerCase(Locale.ROOT), idx);
                 }
             }
 
             for (IndexInfo entityIdx : entityIndexes) {
-                String idxName = entityIdx.getName().toLowerCase();
+                String idxName = entityIdx.getName().toLowerCase(Locale.ROOT);
                 IndexInfo dbIdx = dbIndexMap.get(idxName);
                 if (dbIdx == null) {
                     // 新增索引
@@ -108,15 +115,24 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
             }
 
             // 删除实体中已移除的索引
+            // 外键约束依赖的索引不能删：MySQL 会以 1553 拒绝，整条 ALTER 因此失败；
+            // 即使驱动吞掉错误，删掉之后外键也会失去可用索引。只在真要删时才查（懒加载）
+            Set<String> fkIndexes = jdbcTemplate.isDropRedundantIndexes() && !dbIndexMap.isEmpty()
+                    ? foreignKeyIndexNames(jdbcTemplate, physicalTableName) : Set.of();
             for (IndexInfo dropIdx : dbIndexMap.values()) {
+                if (fkIndexes.contains(dropIdx.getName().toLowerCase(Locale.ROOT))) {
+                    log.warn("表 {} 的索引 {} 是外键约束依赖的索引，跳过删除（实体未声明但外键需要它）",
+                            physicalTableName, dropIdx.getName());
+                    continue;
+                }
                 if (jdbcTemplate.isDropRedundantIndexes()) {
                     alterClauses.add("DROP INDEX `" + dropIdx.getName() + "`");
                     log.warn("表 {} 的索引 {} 在实体中没有声明，将被 DROP（需要保留请补上注解，"
                                     + "或设置 JdbcTemplate#setDropRedundantIndexes(false)）",
-                            tableName, dropIdx.getName());
+                            physicalTableName, dropIdx.getName());
                 } else {
                     log.warn("表 {} 的索引 {} 在实体中没有声明，按配置跳过删除（dropRedundantIndexes=false）",
-                            tableName, dropIdx.getName());
+                            physicalTableName, dropIdx.getName());
                 }
             }
         }
@@ -124,13 +140,41 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
         // ===== 3. 执行 ALTER =====
         if (!alterClauses.isEmpty()) {
             StringBuilder sb = new StringBuilder(512);
-            sb.append("ALTER TABLE `").append(tableName).append("`\n");
+            sb.append("ALTER TABLE `").append(physicalTableName).append("`\n");
             sb.append(String.join(",\n", alterClauses));
             sb.append(";");
             log.debug("修改表sql:\n{}", sb.toString());
-            try (QueryRunner queryRunner = new QueryRunner(jdbcTemplate)) {
-                queryRunner.update(sb.toString());
-            }
+            // 独立连接执行：DDL 不得复用线程事务连接（MySQL 的 DDL 会隐式提交事务），
+            // 且带语句超时，避免等待元数据锁时无限期挂起（H6）
+            jdbcTemplate.executeDdl(sb.toString());
+        }
+    }
+
+    /**
+     * 查询"外键约束依赖的索引名"（小写）。
+     * <p>MySQL 不会单独暴露"FK 用的是哪个索引"，这里按"索引包含外键列"做上界判断：
+     * 宁可多保护几个索引，也不能把外键依赖的那个删掉。查询失败时返回空集合并 warn——
+     * 结构同步不应因为一条元数据查询失败而整表跳过，但要让人知道这次没有保护。
+     */
+    private static Set<String> foreignKeyIndexNames(JdbcTemplate jdbcTemplate, String tableName) {
+        String sql = "SELECT DISTINCT s.INDEX_NAME FROM information_schema.STATISTICS s "
+                + "JOIN information_schema.KEY_COLUMN_USAGE k "
+                + "  ON k.TABLE_SCHEMA = s.TABLE_SCHEMA AND k.TABLE_NAME = s.TABLE_NAME "
+                + " AND k.COLUMN_NAME = s.COLUMN_NAME AND k.REFERENCED_TABLE_NAME IS NOT NULL "
+                + "WHERE s.TABLE_SCHEMA = DATABASE() AND s.TABLE_NAME = ?";
+        try (QueryRunner queryRunner = new QueryRunner(jdbcTemplate)) {
+            List<String> names = queryRunner.query(sql, new Object[]{tableName}, rs -> {
+                List<String> list = new ArrayList<>();
+                while (rs.next()) {
+                    String name = rs.getString(1);
+                    if (name != null) list.add(name.toLowerCase(Locale.ROOT));
+                }
+                return list;
+            });
+            return new HashSet<>(names);
+        } catch (RuntimeException e) {
+            log.warn("读取表 {} 的外键索引失败，本次不保护外键索引: {}", tableName, e.getMessage());
+            return Set.of();
         }
     }
 
@@ -141,7 +185,7 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
      */
     private String buildColumnDef(ColumnInfo col, ColumnTypeDefHandler typeDef) {
         StringBuilder sb = new StringBuilder(64);
-        sb.append("`").append(col.getColumnName().toLowerCase()).append("` ").append(typeDef.renderType(col));
+        sb.append("`").append(col.getColumnName().toLowerCase(Locale.ROOT)).append("` ").append(typeDef.renderType(col));
 
         if (!col.isNullable()) {
             sb.append(" NOT NULL");
@@ -168,7 +212,7 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
     private String buildIndexColumns(IndexInfo index) {
         List<String> quotedCols = new ArrayList<>();
         for (String colName : index.getColumns()) {
-            quotedCols.add("`" + colName.toLowerCase() + "`");
+            quotedCols.add("`" + colName.toLowerCase(Locale.ROOT) + "`");
         }
         return String.join(", ", quotedCols);
     }
@@ -205,7 +249,7 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
     /** 库端列是否带 auto_increment（来自 information_schema.COLUMNS.EXTRA） */
     private static boolean hasAutoIncrement(ColumnInfo dbCol) {
         String extra = dbCol.getExtra();
-        return extra != null && extra.toLowerCase().contains("auto_increment");
+        return extra != null && extra.toLowerCase(Locale.ROOT).contains("auto_increment");
     }
 
     /**
@@ -221,7 +265,7 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
     private static void warnCharacterSetDrift(String tableName, String colName, ColumnInfo dbCol) {
         String charset = dbCol.getCharacterSet();
         if (charset == null || charset.isEmpty() || "utf8mb4".equalsIgnoreCase(charset)) return;
-        String type = dbCol.getType() == null ? "" : dbCol.getType().toLowerCase();
+        String type = dbCol.getType() == null ? "" : dbCol.getType().toLowerCase(Locale.ROOT);
         if (!type.contains("char") && !type.contains("text")) return;
         log.warn("列 {}.{} 的库端字符集是 {}，框架建表统一用 utf8mb4，"
                         + "字符集不会被自动修复（实体无对应注解），如需统一请手工执行 ALTER TABLE ... CONVERT TO CHARACTER SET utf8mb4",
@@ -241,8 +285,32 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
     /**
      * 判断索引是否变化：唯一性、列数量、逐位列名（忽略大小写）任一不同即视为变化。
      * <p>复合索引按位比较，因为 (a,b) 与 (b,a) 是两个服务能力不同的索引，顺序变了必须重建而非放过。</p>
+     * <p>库端形态超出实体注解表达能力的索引（表达式索引、FULLTEXT/SPATIAL、前缀索引、DESC 索引）
+     * 一律只告警、不自动重建：{@code @Index} 只能表达"普通 B-tree 全列升序索引"，
+     * 拿实体定义去 DROP + CREATE 会把 DBA 手工建的函数索引/全文索引/前缀索引覆盖成普通索引——
+     * 这是不可逆的性能事故，而"检测到并提示"已经消除了原来的静默盲区。</p>
      */
     private boolean hasIndexChanged(IndexInfo entityIdx, IndexInfo dbIdx) {
+        if (dbIdx.isExpressionIndex()) {
+            log.warn("索引 {} 在库端是表达式（函数）索引，实体 @Index 无法表达，跳过自动比对与重建；"
+                    + "如需变更请手工 ALTER", dbIdx.getName());
+            return false;
+        }
+        if (dbIdx.getIndexType() != null && !"BTREE".equalsIgnoreCase(dbIdx.getIndexType())) {
+            log.warn("索引 {} 在库端类型为 {}，实体 @Index 只能表达 BTREE，跳过自动比对与重建；"
+                    + "如需变更请手工 ALTER", dbIdx.getName(), dbIdx.getIndexType());
+            return false;
+        }
+        if (hasPrefixColumn(dbIdx)) {
+            log.warn("索引 {} 在库端含前缀列（SUB_PART>0），实体 @Index 无法表达前缀长度，"
+                    + "跳过自动比对与重建；如需全列索引请手工先 DROP 再交给框架创建", dbIdx.getName());
+            return false;
+        }
+        if (hasDescendingColumn(dbIdx)) {
+            log.warn("索引 {} 在库端含降序列（COLLATION=D），实体 @Index 无法表达排序方向，"
+                    + "跳过自动比对与重建；如需变更请手工 ALTER", dbIdx.getName());
+            return false;
+        }
         if (entityIdx.isUnique() != dbIdx.isUnique()) return true;
         if (entityIdx.getColumns() == null || dbIdx.getColumns() == null) return true;
         if (entityIdx.getColumns().size() != dbIdx.getColumns().size()) return true;
@@ -252,21 +320,91 @@ public class MysqlTableAlterHandler implements TableAlterHandler {
         return false;
     }
 
+    /** 库端索引是否含前缀列（SUB_PART &gt; 0） */
+    private static boolean hasPrefixColumn(IndexInfo idx) {
+        List<Integer> prefixes = idx.getPrefixLengths();
+        if (prefixes == null) return false;
+        for (Integer prefix : prefixes) {
+            if (prefix != null && prefix > 0) return true;
+        }
+        return false;
+    }
+
+    /** 库端索引是否含降序列（COLLATION=D） */
+    private static boolean hasDescendingColumn(IndexInfo idx) {
+        List<Boolean> descending = idx.getDescending();
+        if (descending == null) return false;
+        for (Boolean desc : descending) {
+            if (Boolean.TRUE.equals(desc)) return true;
+        }
+        return false;
+    }
+
     /**
-     * 比较默认值是否等价
-     * <ul>
-     *   <li>实体端 null/空字符串 均表示"未设置默认值"</li>
-     *   <li>数据库端 null 表示"没有默认值"，字符串 "NULL" 表示 "DEFAULT NULL"</li>
-     * </ul>
+     * 比较默认值是否等价。
+     * <p>两侧的书写形态本来就不同：实体注解写的是完整 DDL 字面量（字符串必须带引号，见
+     * {@link MysqlSqlLiteral#defaultValue}），而 {@code information_schema.COLUMN_DEFAULT} 返回的是
+     * <b>不带引号</b>的值——{@code 'abc'} 返回 {@code abc}、{@code CURRENT_TIMESTAMP} 返回
+     * {@code current_timestamp()}、{@code 0} 在 DECIMAL(10,2) 上返回 {@code 0.00}。
+     * 直接 {@code Objects.equals} 会把这些永久判成不同，每次启动都发 MODIFY，大表上等于每次启动锁表。</p>
+     * <p>折叠只消除"同一语义的书写差异"：字符串去外层引号后<b>区分大小写</b>比较；
+     * 时间函数统一小写并去掉空括号；纯数字按 {@link BigDecimal} 比较（0 == 0.00）；
+     * TRUE/FALSE 折叠为 1/0。</p>
      */
     private boolean defaultValueEquals(String entityDefault, String dbDefault) {
-        // 实体未设置默认值 && 数据库也无默认值 → 相等
-        if ((entityDefault == null || entityDefault.isEmpty()) && dbDefault == null) return true;
-        // 空字符串视为 null
-        if (entityDefault != null && entityDefault.isEmpty()) entityDefault = null;
-        // 实体 null == 数据库 "NULL"（即 DEFAULT NULL）
-        if (entityDefault == null && "NULL".equals(dbDefault)) return true;
-        return Objects.equals(entityDefault, dbDefault);
+        String entity = normalizeDefaultLiteral(entityDefault);
+        String db = normalizeDefaultLiteral(dbDefault);
+        if (entity == null) {
+            return db == null || "null".equals(db);
+        }
+        return entity.equals(db);
+    }
+
+    /** 把默认值字面量折叠成可比较键；null/空串表示"未设置默认值" */
+    private static String normalizeDefaultLiteral(String raw) {
+        if (raw == null) return null;
+        String value = raw.trim();
+        if (value.isEmpty()) return null;
+
+        boolean quoted = value.length() >= 2
+                && value.charAt(0) == '\'' && value.charAt(value.length() - 1) == '\'';
+        if (quoted) {
+            // 实体侧是 SQL 字面量，'' 表示一个单引号；库端返回的是解转义后的真实值
+            return value.substring(1, value.length() - 1).replace("''", "'");
+        }
+
+        String lower = value.toLowerCase(Locale.ROOT);
+        if ("null".equals(lower)) return "null";
+        if ("true".equals(lower)) return "1";
+        if ("false".equals(lower)) return "0";
+        String temporal = normalizeTemporalFunction(lower);
+        if (temporal != null) return temporal;
+        if (lower.matches("[+-]?\\d+(\\.\\d+)?([eE][+-]?\\d+)?")) {
+            try {
+                return new BigDecimal(lower).stripTrailingZeros().toPlainString();
+            } catch (NumberFormatException ignored) {
+                // 落到下面的原样返回
+            }
+        }
+        // 未识别：按原始大小写比较。裸词（如枚举/字符串默认值）在 MySQL 里同样合法
+        return value;
+    }
+
+    /** 时间函数族折叠：current_timestamp() / CURRENT_TIMESTAMP / now() 视为同一语义，保留精度后缀 */
+    private static String normalizeTemporalFunction(String lower) {
+        for (String fn : new String[]{"current_timestamp", "localtimestamp", "current_date", "current_time", "localtime"}) {
+            if (lower.startsWith(fn)) {
+                String suffix = lower.substring(fn.length()).trim();
+                if (suffix.isEmpty() || suffix.equals("()")) {
+                    return fn;
+                }
+                return fn + suffix;
+            }
+        }
+        if (lower.equals("now()") || lower.equals("now")) {
+            return "current_timestamp";
+        }
+        return null;
     }
 
     /**

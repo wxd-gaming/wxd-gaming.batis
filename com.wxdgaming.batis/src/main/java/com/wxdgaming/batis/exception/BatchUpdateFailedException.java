@@ -25,6 +25,7 @@ package com.wxdgaming.batis.exception;
  * @version 2026-10-09
  **/
 public class BatchUpdateFailedException extends NonTransientDataAccessException {
+    private static final long serialVersionUID = 1L;
 
     /** 批次内失败的条目下标，未知为 -1 */
     private final int failedIndex;

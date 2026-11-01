@@ -26,6 +26,7 @@ package com.wxdgaming.batis.exception;
  * @version 2026-10-09
  **/
 public class IllegalTransactionStateException extends TransactionException {
+    private static final long serialVersionUID = 1L;
 
     /** 主用法：状态检查不通过，没有底层异常 */
     public IllegalTransactionStateException(String message) {

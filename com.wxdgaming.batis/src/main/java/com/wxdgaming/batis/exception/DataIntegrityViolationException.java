@@ -28,6 +28,7 @@ package com.wxdgaming.batis.exception;
  * @version 2026-10-09
  **/
 public class DataIntegrityViolationException extends NonTransientDataAccessException {
+    private static final long serialVersionUID = 1L;
 
     /** 合成/包装场景，仅消息与 cause */
     public DataIntegrityViolationException(String message, Throwable cause) {

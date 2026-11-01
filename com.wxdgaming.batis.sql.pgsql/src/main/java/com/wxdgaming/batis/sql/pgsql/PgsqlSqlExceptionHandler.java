@@ -10,6 +10,7 @@ import com.wxdgaming.batis.exception.DeadlockLoserDataAccessException;
 import com.wxdgaming.batis.exception.DuplicateKeyException;
 import com.wxdgaming.batis.exception.ForeignKeyConstraintViolationException;
 import com.wxdgaming.batis.exception.NotNullConstraintViolationException;
+import com.wxdgaming.batis.exception.NonTransientDataAccessException;
 import com.wxdgaming.batis.exception.QueryTimeoutException;
 import com.wxdgaming.batis.exception.RecoverableDataAccessException;
 import com.wxdgaming.batis.exception.UnknownColumnException;
@@ -29,7 +30,8 @@ import java.sql.SQLException;
  * 匹配不上 {@code "not null"}，会被归成通用的完整性违反而不是 NotNull；
  * {@code column "x" does not exist} 同理匹配不上 {@code "unknown column"}，被当成语法错误而不是未知列；
  * 它把 57 类一律判成查询超时，而 57P01/P02（管理员/崩溃关闭）实际是"重连即可"的可恢复故障；
- * 53300（连接数打满）与 55P03（锁等待）落在默认分支只会得到无法分类。</p>
+ * 53300（连接数打满）与 55P03（锁等待）落在默认分支只会得到无法分类；
+ * 25P02（事务已中止）也认不出类别前缀，被归成"无法分类"，而它明确要求"回滚重来、别重试本条"。</p>
  *
  * @author wxd-gaming(無心道, 15388152619)
  * @version 2026-10-14
@@ -94,6 +96,14 @@ public class PgsqlSqlExceptionHandler implements SqlExceptionHandler {
                 case PgsqlSqlStates.CONNECTION_FAILURE:
                 case PgsqlSqlStates.SYSTEM_ERROR:
                     return new RecoverableDataAccessException(msg, sql, params, code, state, ex);
+                // 事务已被前一条失败语句打成 aborted：本语句没被真正执行，重试它必再失败，
+                // 正确动作是回滚整个事务重来。归成非瞬时（不可重试）才能阻止批量降级反复压同一条语句；
+                // 真实原因在事务里第一条失败的语句上，这条只是它的回声，消息里点明以免误导排查方向。
+                case PgsqlSqlStates.IN_FAILED_SQL_TRANSACTION:
+                    return new NonTransientDataAccessException(
+                            "当前事务已因前一条语句失败而中止（SQLState 25P02），必须先 ROLLBACK；"
+                                    + "本条语句并未真正执行，真实错误见事务内最早失败的语句: " + msg,
+                            sql, params, code, state, ex);
                 default:
                     break;
             }

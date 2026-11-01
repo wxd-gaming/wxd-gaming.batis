@@ -156,14 +156,16 @@ public class MysqlColumnTypeDefHandler implements ColumnTypeDefHandler {
         SqlType sqlType = BASE_TYPE_MAP.get(base);
         if (sqlType == null) return t;
 
+        // tinyint(1) 是布尔档，必须与其它整数宽度区分开；这一支要在"整数统一剥宽度"之前判断，
+        // 否则 tinyint→BYTE 会先命中整数分支，使该分支永远不可达（M6）。
+        // tinyint(4) 等由 MariaDB 回读的显示宽度仍按整数处理，避免与裸 TINYINT 永久判成漂移。
+        if ("tinyint".equals(base) && params != null && "1".equals(params.trim())) {
+            return concat("tinyint(1)", suffix);
+        }
         // 整数类型无宽度概念：int(11) / bigint(20) 均规格化为基名
         if (sqlType == SqlType.BYTE || sqlType == SqlType.SHORT || sqlType == SqlType.MEDIUMINT
                 || sqlType == SqlType.INT || sqlType == SqlType.BIGINT) {
             return concat(base, suffix);
-        }
-        // boolean 逻辑档：任意宽度的 tinyint(1) 都归一为 tinyint(1)
-        if ("tinyint".equals(base) && params != null && "1".equals(params.trim())) {
-            return "tinyint(1)";
         }
         // FLOAT/DOUBLE 显示宽度（如 double(10,2)） MySQL 8 已不保留，按旧规格化语义丢弃
         if (sqlType == SqlType.FLOAT || sqlType == SqlType.DOUBLE) {

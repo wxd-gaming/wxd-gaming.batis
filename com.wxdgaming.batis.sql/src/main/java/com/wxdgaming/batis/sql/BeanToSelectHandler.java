@@ -3,6 +3,7 @@ package com.wxdgaming.batis.sql;
 import com.wxdgaming.batis.model.TableInfo;
 
 import java.util.List;
+import java.util.Locale;
 
 /**
  * SELECT SQL 构建接口（方言 SPI）
@@ -74,7 +75,7 @@ public interface BeanToSelectHandler {
      * @return 该方言认可的标识符文本
      */
     default String quote(String identifier) {
-        return "`" + identifier.toLowerCase() + "`";
+        return "`" + identifier.toLowerCase(Locale.ROOT) + "`";
     }
 
     /**

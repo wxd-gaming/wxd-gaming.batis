@@ -10,6 +10,7 @@ import lombok.extern.slf4j.Slf4j;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * MySQL 方言的 UPDATE 处理器
@@ -44,9 +45,9 @@ public class MysqlBeanToUpdateHandler implements BeanToUpdateHandler {
 
         for (ColumnInfo col : columns.values()) {
             if (col.isPrimaryKey()) {
-                whereCols.add("`" + col.getColumnName().toLowerCase() + "` = ?");
+                whereCols.add("`" + col.getColumnName().toLowerCase(Locale.ROOT) + "` = ?");
             } else {
-                setCols.add("`" + col.getColumnName().toLowerCase() + "` = ?");
+                setCols.add("`" + col.getColumnName().toLowerCase(Locale.ROOT) + "` = ?");
             }
         }
 
@@ -60,7 +61,7 @@ public class MysqlBeanToUpdateHandler implements BeanToUpdateHandler {
                     "实体 " + bean.getClass().getSimpleName() + " 只有主键列，没有可更新的字段，update 无意义");
         }
 
-        String sql = "UPDATE `" + tableInfo.getTableName().toLowerCase() + "` SET "
+        String sql = "UPDATE `" + tableInfo.getTableName().toLowerCase(Locale.ROOT) + "` SET "
                 + String.join(", ", setCols) + " WHERE " + String.join(" AND ", whereCols);
         log.debug("构建 UPDATE sql:\n{}", sql);
         return sql;

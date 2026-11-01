@@ -10,6 +10,7 @@ import lombok.extern.slf4j.Slf4j;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * MySQL 方言的 DELETE 处理器
@@ -39,7 +40,7 @@ public class MysqlBeanToDeleteHandler implements BeanToDeleteHandler {
         List<String> whereCols = new ArrayList<>();
         for (ColumnInfo col : columns.values()) {
             if (col.isPrimaryKey()) {
-                whereCols.add("`" + col.getColumnName().toLowerCase() + "` = ?");
+                whereCols.add("`" + col.getColumnName().toLowerCase(Locale.ROOT) + "` = ?");
             }
         }
 
@@ -48,7 +49,7 @@ public class MysqlBeanToDeleteHandler implements BeanToDeleteHandler {
                     "实体 " + bean.getClass().getSimpleName() + " 未定义主键，无法执行 deleteById");
         }
 
-        String sql = "DELETE FROM `" + tableInfo.getTableName().toLowerCase()
+        String sql = "DELETE FROM `" + tableInfo.getTableName().toLowerCase(Locale.ROOT)
                 + "` WHERE " + String.join(" AND ", whereCols);
         log.debug("构建 DELETE BY ID sql:\n{}", sql);
         return sql;
@@ -77,7 +78,7 @@ public class MysqlBeanToDeleteHandler implements BeanToDeleteHandler {
      */
     @Override
     public String buildDeleteAllSql(TableInfo tableInfo) {
-        String sql = "DELETE FROM `" + tableInfo.getTableName().toLowerCase() + "`";
+        String sql = "DELETE FROM `" + tableInfo.getTableName().toLowerCase(Locale.ROOT) + "`";
         log.debug("构建 DELETE ALL sql:\n{}", sql);
         return sql;
     }

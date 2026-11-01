@@ -57,8 +57,9 @@ public @interface Index {
     /**
      * 索引列名列表，多列用英文逗号分隔。字段级使用时可以留空，默认取当前标注字段的列名。
      * <p>列名按数据库列名匹配（解析时只做 trim，不做驼峰转换），因此这里写 {@code Column.name()}
-     * 之后的真实列名。Table 级使用时留空没有意义：解析器仍会按逗号切一次，得到一个空列名，
-     * 生成出的索引 DDL 是坏的。</p>
+     * 之后的真实列名。Table 级使用时<b>必须</b>填写：表级索引没有"当前字段"可兜底，
+     * 解析期检测到留空（或 {@code "a,,b"} 这类含空列名的清单）会直接抛
+     * {@link IllegalArgumentException}，而不是等到执行坏 DDL 才失败。</p>
      */
     String columnList() default "";
 

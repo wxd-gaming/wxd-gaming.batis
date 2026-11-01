@@ -36,9 +36,10 @@ import java.util.List;
  * </ol>
  * <p>
  * 用法约定：一个 Runner 对应一段逻辑操作，推荐 try-with-resources；它不是线程安全的，
- * 不要跨线程共享，也不要长期持有（长期持有会把一条池连接占死）。事务内使用时直接
- * {@code new QueryRunner(jdbcTemplate)} 即可——线程上绑定了事务连接时会自动复用，
- * 这正是 {@link #getConnection()} 存在的意义（同事务同连接，将来读写分离也在这个点收敛）。
+ * 不要跨线程共享，也不要长期持有（长期持有会把一条池连接占死）。框架内部每次操作都
+ * <b>新建</b> Runner，"复用"这个词只指<b>连接</b>：事务内直接 {@code new QueryRunner(jdbcTemplate)}
+ * 即可，线程上绑定了事务连接时新 Runner 会取到同一条连接，这正是 {@link #getConnection()}
+ * 存在的意义（同事务同连接，将来读写分离也在这个点收敛）。Runner 实例本身不复用。
  * </p>
  *
  * @author wxd-gaming(無心道, 15388152619)
@@ -483,10 +484,24 @@ public class QueryRunner implements AutoCloseable {
     /**
      * 批量异常翻译：{@link BatchUpdateException} 携带的 {@code getUpdateCounts()}
      * 是唯一能定位"第几条失败"的信息，不能像普通异常那样一译了之。
+     * <p>但"能定位下标"不等于"不可重试"：批量失败同样可能是死锁、串行化冲突或连接中断
+     * （{@code BatchUpdateException} 只是驱动表达批量的外壳）。先让方言翻译器判断底层病因，
+     * 可重试的瞬时故障必须原样返回 {@code isRetryable()==true} 的形态——包成
+     * {@link BatchUpdateFailedException}（非瞬时）会让上层的降级/重试逻辑做出相反决策，
+     * 把一次死锁放大成 N 次逐条执行。</p>
      */
     // 包内可见：与 checkExecuteFailures 一样供 BeanRunner 的批量插入旁路复用
     DataAccessException translateBatchException(SQLException e, String sql, int expected) {
         if (e instanceof BatchUpdateException bue) {
+            // BUE 自身可能没有 state，真正的病因在 nextException 链上（驱动常见做法）
+            SQLException cause = bue;
+            if ((bue.getSQLState() == null || bue.getSQLState().isEmpty()) && bue.getNextException() != null) {
+                cause = bue.getNextException();
+            }
+            DataAccessException translated = jdbcTemplate.translateException(cause, sql, null);
+            if (translated.isRetryable()) {
+                return translated;
+            }
             int failedIndex = firstExecuteFailure(bue.getUpdateCounts(), expected);
             return new BatchUpdateFailedException(
                     "批量执行失败"

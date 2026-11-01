@@ -26,8 +26,11 @@ class SqlFragmentsTest {
     }
 
     @Test
-    void bareConditionWithoutParamsPasses() {
-        assertEquals("`deleted` = 0", SqlFragments.guardWhereSection("`deleted` = 0"));
+    void bareLiteralWithoutParamsIsRejected() {
+        // 裸数字/布尔字面量本身是注入面（如 "age = 0 OR 1=1"），这个字符串拼接入口一律拒绝；
+        // 需要常量条件请改用参数化形态 `deleted` = ?
+        assertThrows(BadSqlGrammarException.class,
+                () -> SqlFragments.guardWhereSection("`deleted` = 0"));
     }
 
     @Test

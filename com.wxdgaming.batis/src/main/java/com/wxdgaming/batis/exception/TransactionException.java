@@ -25,6 +25,7 @@ package com.wxdgaming.batis.exception;
  * @version 2026-10-09
  **/
 public class TransactionException extends DataAccessException {
+    private static final long serialVersionUID = 1L;
 
     /** 状态/前置条件不满足（如传播行为不允许、只读事务里写），一般没有 cause */
     public TransactionException(String message) {

@@ -11,6 +11,7 @@ import lombok.extern.slf4j.Slf4j;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.stream.Collectors;
 
 /**
@@ -43,7 +44,7 @@ public class MysqlBeanToInsertHandler implements BeanToInsertHandler {
         List<String> colNames = new ArrayList<>();
         for (ColumnInfo col : columns.values()) {
             if (isIdentityPk(col)) continue;
-            colNames.add("`" + col.getColumnName().toLowerCase() + "`");
+            colNames.add("`" + col.getColumnName().toLowerCase(Locale.ROOT) + "`");
         }
 
         String cols = String.join(", ", colNames);
@@ -51,7 +52,7 @@ public class MysqlBeanToInsertHandler implements BeanToInsertHandler {
                 .map(c -> "?")
                 .collect(Collectors.joining(", "));
 
-        String sql = "INSERT INTO `" + tableInfo.getTableName().toLowerCase() + "` ("
+        String sql = "INSERT INTO `" + tableInfo.getTableName().toLowerCase(Locale.ROOT) + "` ("
                 + cols + ") VALUES (" + placeholders + ")";
         log.debug("构建 INSERT sql:\n{}", sql);
         return sql;

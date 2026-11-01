@@ -20,6 +20,7 @@ import java.lang.reflect.Type;
 import java.lang.reflect.WildcardType;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
 import java.sql.Blob;
 import java.sql.SQLException;
 import java.sql.Timestamp;
@@ -186,8 +187,15 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
     }
 
     /**
-     * 二进制存储模式的写入编码：byte[] 原样落库，其余用 Protostuff 编码。
+     * 二进制存储模式的写入编码：byte[] 原样落库，其余用 Protostuff 编码后套上类型壳。
      * <p>byte[] 不再套一层 Protostuff：那样库里存的字节和调用方给的字节不一致，读回来还得手工剥壳。</p>
+     * <p><b>类型壳</b>：Protostuff 的字节流与"编码时用的 schema"绑定，而写侧用的是
+     * {@code value.getClass()}（运行时类型），读侧过去用的是字段声明类型。字段声明成父类、
+     * 实际放进去的是子类时（{@code BaseEvent} 列装 {@code LoginEvent}），两侧 schema 不同：
+     * 子类字段被静默丢弃，甚至 merge 出字段错位。壳里记下运行时类名，读侧据此选 schema，
+     * 再用"必须是声明类型的子类"把库里的类名焊回编译期声明——多态能力有了，任意类实例化的口子没有。</p>
+     * <p>壳的格式：7 字节魔数 + 1 字节版本 + 2 字节类名长度（大端）+ UTF-8 类名 + Protostuff 载荷。
+     * 没有魔数的历史裸 Protostuff 行按声明类型解，保持向后兼容。</p>
      */
     protected byte[] toBlobBytes(Object value, ColumnInfo col) {
         if (value instanceof byte[]) {
@@ -195,7 +203,7 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
         }
         for (int i = 0; ; i++) {
             try {
-                return ProtostuffUtil.encode(value);
+                return wrapBlobEnvelope(value.getClass(), ProtostuffUtil.encode(value), col);
             } catch (StackOverflowError e) {
                 // 与 JSON 通道同一护栏：循环引用不是并发问题，重试无意义，报出列名
                 throw new TypeMismatchDataAccessException(
@@ -451,19 +459,124 @@ public abstract class AbstractBeanValueHandler implements BeanValueHandler {
     }
 
     /**
-     * 二进制存储模式的读取解码：byte[] 字段直接交出原始字节，其余按声明类型 Protostuff 解码。
+     * 二进制存储模式的读取解码：byte[] 字段直接交出原始字节，其余按类型壳里的运行时类型解码。
      * <p>{@code toBytes} 兼容两种驱动形态：MySQL 的 {@code java.sql.Blob} 需 getBytes 物化，
      * pgsql 的 bytea 已经是 byte[]。</p>
+     * <p>类型壳里的类名必须通过两道闸门才允许实例化：可加载，且是字段声明类型的子类。
+     * 库里的字节不止本进程能写，少了这道检查，BLOB 列就和当年 {@code SupportAutoType} 的 JSON 列一样
+     * 变成"数据决定实例化哪个类"的入口。没有壳的历史行退回按声明类型解，与旧版本行为一致。</p>
      */
     protected Object fromBlobBytes(Object value, ColumnInfo col) {
         byte[] bytes = toBytes(value, col);
-        if (col.getJavaType() == byte[].class) {
+        Class<?> declared = col.getJavaType();
+        if (declared == byte[].class) {
             return bytes;
         }
+        BlobEnvelope envelope = parseBlobEnvelope(bytes, col);
+        Class<?> target = declared;
+        byte[] payload = bytes;
+        if (envelope != null) {
+            Class<?> stored = loadBlobType(envelope.className());
+            if (stored == null) {
+                throw new TypeMismatchDataAccessException(
+                        "Protostuff 解码字段 " + col.getFieldName() + " 失败：库里记录的类型 "
+                                + envelope.className() + " 无法加载");
+            }
+            if (!declared.isAssignableFrom(stored)) {
+                throw new TypeMismatchDataAccessException(
+                        "Protostuff 解码字段 " + col.getFieldName() + " 失败：库里记录的类型 "
+                                + envelope.className() + " 不是字段声明类型 " + declared.getName() + " 的子类");
+            }
+            // 与 JSON 多态白名单同一条闸门：声明的是业务类型时，不允许库里的字节把实例化目标点名到 JDK 类
+            if (stored != declared && isJdkPackage(stored)) {
+                throw new TypeMismatchDataAccessException(
+                        "Protostuff 解码字段 " + col.getFieldName() + " 失败：库里记录的类型 "
+                                + envelope.className() + " 属于 JDK 平台类，拒绝从列内容实例化");
+            }
+            target = stored;
+            payload = envelope.payload();
+        }
         try {
-            return ProtostuffUtil.decode(bytes, col.getJavaType());
+            return ProtostuffUtil.decode(payload, target);
         } catch (Exception e) {
-            throw new TypeMismatchDataAccessException("Protostuff 解码字段 " + col.getFieldName() + " 失败，bytes length=" + bytes.length, e);
+            throw new TypeMismatchDataAccessException("Protostuff 解码字段 " + col.getFieldName() + " 失败，bytes length=" + payload.length, e);
+        }
+    }
+
+    /** 类型壳魔数：7 字节，刻意含非 ASCII 首字节，裸 Protostuff 数据撞上的概率可以忽略 */
+    private static final byte[] BLOB_ENVELOPE_MAGIC = {(byte) 0xBF, 'W', 'X', 'D', 'B', 'L', 'O'};
+
+    /** 类型壳格式版本：解析到未知版本说明是更新版框架写的行，宁可直接报错也不要按旧格式硬解 */
+    private static final byte BLOB_ENVELOPE_VERSION = 1;
+
+    private record BlobEnvelope(String className, byte[] payload) {
+    }
+
+    /** 写入侧套壳：类名取运行时类型，与 {@link ProtostuffUtil#encode(Object)} 选 schema 的依据保持同一来源 */
+    private static byte[] wrapBlobEnvelope(Class<?> runtimeType, byte[] payload, ColumnInfo col) {
+        byte[] className = runtimeType.getName().getBytes(StandardCharsets.UTF_8);
+        if (className.length > 0xFFFF) {
+            throw new TypeMismatchDataAccessException(
+                    "Protostuff序列化字段" + col.getFieldName() + "失败：类名过长 " + runtimeType.getName());
+        }
+        int offset = 0;
+        byte[] out = new byte[BLOB_ENVELOPE_MAGIC.length + 1 + 2 + className.length + payload.length];
+        System.arraycopy(BLOB_ENVELOPE_MAGIC, 0, out, offset, BLOB_ENVELOPE_MAGIC.length);
+        offset += BLOB_ENVELOPE_MAGIC.length;
+        out[offset++] = BLOB_ENVELOPE_VERSION;
+        out[offset++] = (byte) (className.length >>> 8);
+        out[offset++] = (byte) className.length;
+        System.arraycopy(className, 0, out, offset, className.length);
+        offset += className.length;
+        System.arraycopy(payload, 0, out, offset, payload.length);
+        return out;
+    }
+
+    /** 解析类型壳；没有魔数（历史裸 Protostuff 行）返回 null，魔数命中但结构损坏直接报错 */
+    private static BlobEnvelope parseBlobEnvelope(byte[] bytes, ColumnInfo col) {
+        if (bytes.length < BLOB_ENVELOPE_MAGIC.length + 1) {
+            return null;
+        }
+        for (int i = 0; i < BLOB_ENVELOPE_MAGIC.length; i++) {
+            if (bytes[i] != BLOB_ENVELOPE_MAGIC[i]) {
+                return null;
+            }
+        }
+        int offset = BLOB_ENVELOPE_MAGIC.length;
+        byte version = bytes[offset++];
+        if (version != BLOB_ENVELOPE_VERSION) {
+            throw new TypeMismatchDataAccessException(
+                    "Protostuff 解码字段 " + col.getFieldName() + " 失败：未知的类型壳版本 " + version
+                            + "，该行可能由更新版本的框架写入");
+        }
+        if (bytes.length < offset + 2) {
+            throw new TypeMismatchDataAccessException(
+                    "Protostuff 解码字段 " + col.getFieldName() + " 失败：类型壳头部不完整");
+        }
+        int nameLength = ((bytes[offset] & 0xFF) << 8) | (bytes[offset + 1] & 0xFF);
+        offset += 2;
+        if (bytes.length < offset + nameLength) {
+            throw new TypeMismatchDataAccessException(
+                    "Protostuff 解码字段 " + col.getFieldName() + " 失败：类型壳声明的类名长度超出字节流");
+        }
+        String className = new String(bytes, offset, nameLength, StandardCharsets.UTF_8);
+        offset += nameLength;
+        return new BlobEnvelope(className, java.util.Arrays.copyOfRange(bytes, offset, bytes.length));
+    }
+
+    /** 加载壳里记录的类；加载失败返回 null，由调用方升级为带列名的异常 */
+    private static Class<?> loadBlobType(String typeName) {
+        if (typeName == null || typeName.isEmpty()) {
+            return null;
+        }
+        ClassLoader loader = Thread.currentThread().getContextClassLoader();
+        if (loader == null) {
+            loader = AbstractBeanValueHandler.class.getClassLoader();
+        }
+        try {
+            return Class.forName(typeName, false, loader);
+        } catch (Throwable e) {
+            return null;
         }
     }
 

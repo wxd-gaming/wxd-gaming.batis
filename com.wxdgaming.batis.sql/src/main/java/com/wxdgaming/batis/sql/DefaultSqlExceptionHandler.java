@@ -63,7 +63,13 @@ public class DefaultSqlExceptionHandler implements SqlExceptionHandler {
 
         // SQLState 类别优先
         if (state != null) {
-            String clazz = state.length() >= 2 ? state.substring(0, 2) : state;
+            // HYT 是 3 位的 ODBC 风格类别（HYT00/HYT01），按前两位截取只能得到 "HY"，
+            // 放进下面的 switch 永远命中不了，必须单独判断
+            if (state.startsWith("HYT")) {
+                return new QueryTimeoutException(describe(ex), sql, params, code, state, ex);
+            }
+            // 空串/单字符状态码按"无状态"处理；至少两位才取类别
+            String clazz = state.length() >= 2 ? state.substring(0, 2) : "";
             switch (clazz) {
                 case "08": // 连接异常类
                     if ("08S01".equals(state) || msg.contains("communications link failure")) {
@@ -83,8 +89,7 @@ public class DefaultSqlExceptionHandler implements SqlExceptionHandler {
                 case "42": // 语法/对象缺失
                     return grammar(ex, sql, params, code, state, msg);
                 case "57": // 操作被中断（语句超时、管理员终止）
-                case "HYT": // ODBC 风格超时类
-                    // 最典型的是 57014（query_canceled）与 HYT00（timeout expired）。
+                    // 最典型的是 57014（query_canceled）；ODBC 风格超时（HYT00）在上方单独判断。
                     // 不映射会落进"未知错误"（NonTransient、不可重试），而 BeanRunner 的批量降级
                     // 正是按 isRetryable() 判断"上抛还是逐条重跑"——一次超时会被放大成 N 次逐条压库。
                     return new QueryTimeoutException(describe(ex), sql, params, code, state, ex);

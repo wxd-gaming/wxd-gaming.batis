@@ -27,6 +27,7 @@ package com.wxdgaming.batis.exception;
  * @version 2026-10-09
  **/
 public class TypeMismatchDataAccessException extends NonTransientDataAccessException {
+    private static final long serialVersionUID = 1L;
 
     /** 值转换阶段常用：只有描述与底层 cause，没有 SQL 上下文 */
     public TypeMismatchDataAccessException(String message) {
